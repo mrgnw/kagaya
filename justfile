@@ -39,7 +39,7 @@ build-all: build-ui build-release
 dist +targets: build-ui
 	#!/bin/bash
 	set -euo pipefail
-	bin="ubermind"
+	bin="kagaya"
 	dist="dist"
 	echo "building ${bin} {{tag}}"
 	echo
@@ -77,7 +77,7 @@ gh-release:
 		dist/*.tar.gz
 	echo
 	echo "released {{tag}}"
-	echo "  https://github.com/mrgnw/ubermind/releases/tag/{{tag}}"
+	echo "  https://github.com/mrgnw/kagaya/releases/tag/{{tag}}"
 	echo
 	echo "don't forget: just publish"
 
@@ -95,8 +95,14 @@ release-all: (dist "aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-lin
 
 # Publish to crates.io
 publish:
-	cargo publish -p ubermind
+	cargo publish -p kagaya
 
-# Install locally
+# Install locally (release build)
 install:
-	cargo install --path crates/ubermind-cli
+	cargo install --path crates/kagaya
+	ln -sf ~/.cargo/bin/kagaya ~/.cargo/bin/ky
+
+# Install locally (debug build — fast iteration)
+dev-install:
+	cargo build --bin kagaya && cp target/debug/kagaya ~/.cargo/bin/kagaya
+	ln -sf ~/.cargo/bin/kagaya ~/.cargo/bin/ky

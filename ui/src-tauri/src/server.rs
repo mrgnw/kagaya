@@ -214,7 +214,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn serve_state_file() -> PathBuf {
-    home_dir().join(".local/share/ubermind/serve-state")
+    home_dir().join(".local/share/kagaya/serve-state")
 }
 
 fn serve_log_file() -> Option<PathBuf> {

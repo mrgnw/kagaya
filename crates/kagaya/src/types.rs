@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Whether a process is a long-running service or a one-shot task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceType {
@@ -10,6 +11,7 @@ pub enum ServiceType {
 	Task,
 }
 
+/// A named service: a directory containing one or more processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
 	pub name: String,
@@ -17,6 +19,7 @@ pub struct Service {
 	pub processes: Vec<ProcessDef>,
 }
 
+/// Definition of a process to supervise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessDef {
 	pub name: String,
@@ -45,6 +48,7 @@ fn default_restart_delay() -> u64 {
 	1
 }
 
+/// Runtime state of a supervised process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ProcessState {
 	Running { pid: u32, uptime_secs: u64 },
@@ -59,6 +63,7 @@ impl ProcessState {
 	}
 }
 
+/// Status snapshot of a service and its processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStatus {
 	pub name: String,
@@ -72,6 +77,7 @@ impl ServiceStatus {
 	}
 }
 
+/// Status snapshot of a single process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessStatus {
 	pub name: String,

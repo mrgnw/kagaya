@@ -1,56 +1,57 @@
 use owo_colors::OwoColorize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const UBERMIND_PREFIX: &str = "com.ubermind.";
+const KAGAYA_PREFIX: &str = "com.kagaya.";
 
 // --- Public entry point ---
 
 pub fn cmd_launchd(args: &[String]) {
 	let subcmd = args.first().map(|s| s.as_str()).unwrap_or("list");
+	let rest = if args.is_empty() { &[] as &[String] } else { &args[1..] };
 
 	match subcmd {
 		"help" | "--help" | "-h" => print_launchd_usage(),
-		"list" | "ls" => cmd_list(&args[1..]),
-		"status" | "st" => cmd_status(&args[1..]),
-		"start" => cmd_start(&args[1..]),
-		"stop" => cmd_stop(&args[1..]),
-		"restart" => cmd_restart(&args[1..]),
-		"logs" => cmd_logs(&args[1..]),
-		"show" => cmd_show(&args[1..]),
-		"create" => cmd_create(&args[1..]),
-		"edit" => cmd_edit(&args[1..]),
-		"remove" | "rm" => cmd_remove(&args[1..]),
+		"list" | "ls" => cmd_list(rest),
+		"status" | "st" => cmd_status(rest),
+		"start" => cmd_start(rest),
+		"stop" => cmd_stop(rest),
+		"restart" => cmd_restart(rest),
+		"logs" => cmd_logs(rest),
+		"show" => cmd_show(rest),
+		"create" => cmd_create(rest),
+		"edit" => cmd_edit(rest),
+		"remove" | "rm" => cmd_remove(rest),
 		label => {
-			// Treat as label for status
 			cmd_status(&[label.to_string()]);
 		}
 	}
 }
 
 fn print_launchd_usage() {
-	eprintln!("ubermind launchd — manage macOS launchd agents");
+	eprintln!("kagaya launchd — manage macOS launchd agents");
 	eprintln!();
-	eprintln!("usage: ub launchd [command] [options]");
+	eprintln!("usage: ky launchd [command] [options]");
+	eprintln!("alias: ky lctl, or shell alias: alias lctl='ky launchd'");
 	eprintln!();
 	eprintln!("commands:");
 	eprintln!("  list [--all] [--global]       List agents (default: user plist agents)");
-	eprintln!("  status [label]               Show agent status");
+	eprintln!("  status [label]               Show agent status details");
 	eprintln!("  start <label>                Start / load agent");
 	eprintln!("  stop <label>                 Stop / unload agent");
 	eprintln!("  restart <label>              Restart agent");
-	eprintln!("  logs <label>                 Tail agent log files");
+	eprintln!("  logs <label>                 Show agent log files");
 	eprintln!("  show <label>                 Show plist contents");
 	eprintln!("  create <label> -- <cmd>      Create a new agent plist");
 	eprintln!("  edit <label>                 Open plist in $EDITOR");
 	eprintln!("  remove <label> [--yes]       Unload and delete agent plist");
 	eprintln!();
 	eprintln!("options:");
-	eprintln!("  --all                        Include all loaded agents (not just plist files)");
-	eprintln!("  --global                     Include /Library agents (read-only)");
+	eprintln!("  --all, -a                    Include all loaded agents (not just plist files)");
+	eprintln!("  --global, -g                 Include /Library agents (read-only)");
 	eprintln!();
-	eprintln!("labels can be partial: 'ub launchd status tunnel' matches 'com.ubermind.tunnel'");
+	eprintln!("labels can be partial: 'lctl restart opencode' matches 'com.opencode.serve'");
 }
 
 // --- Data types ---
@@ -88,6 +89,105 @@ impl AgentDomain {
 	}
 }
 
+// --- Display helpers ---
+
+fn short_label(label: &str) -> String {
+	let parts: Vec<&str> = label.split('.').collect();
+	if parts.len() <= 1 {
+		return label.to_string();
+	}
+
+	let start = if matches!(parts[0], "com" | "org" | "io" | "net" | "homebrew") {
+		1
+	} else {
+		0
+	};
+	let rest = &parts[start..];
+
+	match rest.len() {
+		0 => label.to_string(),
+		1 => rest[0].to_string(),
+		2 => {
+			let vendor = rest[0].to_lowercase();
+			let next = rest[1].to_lowercase();
+			let noise = matches!(vendor.as_str(), "user" | "mxcl");
+			if noise || next.starts_with(&vendor) || vendor == next {
+				rest[1].to_string()
+			} else {
+				rest.join(".")
+			}
+		}
+		_ => rest[1..].join("."),
+	}
+}
+
+use crate::utils::format_uptime;
+
+fn get_uptimes(pids: &[u32]) -> HashMap<u32, u64> {
+	if pids.is_empty() {
+		return HashMap::new();
+	}
+	let pid_args: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+	let output = match Command::new("ps")
+		.arg("-o")
+		.arg("etime=,pid=")
+		.arg("-p")
+		.arg(pid_args.join(","))
+		.output()
+	{
+		Ok(o) => o,
+		Err(_) => return HashMap::new(),
+	};
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	let mut map = HashMap::new();
+	for line in stdout.lines() {
+		let line = line.trim();
+		if line.is_empty() {
+			continue;
+		}
+		let parts: Vec<&str> = line.split_whitespace().collect();
+		if parts.len() < 2 {
+			continue;
+		}
+		let etime = parts[0];
+		let pid: u32 = match parts[1].parse() {
+			Ok(p) => p,
+			Err(_) => continue,
+		};
+		if let Some(secs) = parse_etime(etime) {
+			map.insert(pid, secs);
+		}
+	}
+	map
+}
+
+fn parse_etime(etime: &str) -> Option<u64> {
+	// Formats: MM:SS, HH:MM:SS, D-HH:MM:SS
+	let (days, rest) = if let Some(pos) = etime.find('-') {
+		let d: u64 = etime[..pos].parse().ok()?;
+		(d, &etime[pos + 1..])
+	} else {
+		(0, etime)
+	};
+	let parts: Vec<&str> = rest.split(':').collect();
+	match parts.len() {
+		2 => {
+			let m: u64 = parts[0].parse().ok()?;
+			let s: u64 = parts[1].parse().ok()?;
+			Some(days * 86400 + m * 60 + s)
+		}
+		3 => {
+			let h: u64 = parts[0].parse().ok()?;
+			let m: u64 = parts[1].parse().ok()?;
+			let s: u64 = parts[2].parse().ok()?;
+			Some(days * 86400 + h * 3600 + m * 60 + s)
+		}
+		_ => None,
+	}
+}
+
+use crate::utils::listening_ports_for_pids;
+
 // --- Discovery ---
 
 fn get_uid() -> u32 {
@@ -109,7 +209,7 @@ fn launchd_log_dir() -> PathBuf {
 	PathBuf::from(home)
 		.join(".local")
 		.join("state")
-		.join("ubermind")
+		.join("kagaya")
 		.join("launchd")
 }
 
@@ -278,8 +378,8 @@ fn resolve_label(partial: &str, agents: &BTreeMap<String, AgentInfo>) -> Option<
 	if agents.contains_key(partial) {
 		return Some(partial.to_string());
 	}
-	// Try with ubermind prefix
-	let prefixed = format!("{}{}", UBERMIND_PREFIX, partial);
+	// Try with kagaya prefix
+	let prefixed = format!("{}{}", KAGAYA_PREFIX, partial);
 	if agents.contains_key(&prefixed) {
 		return Some(prefixed);
 	}
@@ -291,7 +391,66 @@ fn resolve_label(partial: &str, agents: &BTreeMap<String, AgentInfo>) -> Option<
 	if matches.len() == 1 {
 		return Some(matches[0].clone());
 	}
+	// Segment match: check if any dot-segment of a label matches the partial
+	let partial_lower = partial.to_lowercase();
+	let seg_matches: Vec<&String> = agents
+		.keys()
+		.filter(|k| {
+			k.split('.').any(|seg| seg.to_lowercase() == partial_lower)
+		})
+		.collect();
+	if seg_matches.len() == 1 {
+		return Some(seg_matches[0].clone());
+	}
+	// Multiple segment matches — prefer agents with plist files (not dynamic/Apple agents)
+	if seg_matches.len() > 1 {
+		let with_plist: Vec<&&String> = seg_matches
+			.iter()
+			.filter(|k| agents[k.as_str()].plist_path.is_some())
+			.collect();
+		if with_plist.len() == 1 {
+			return Some(with_plist[0].to_string());
+		}
+	}
 	None
+}
+
+fn print_not_found(partial: &str, agents: &BTreeMap<String, AgentInfo>) {
+	eprintln!("agent not found: {}", partial);
+	let partial_lower = partial.to_lowercase();
+
+	// Find suggestions: substring or segment match
+	let suggestions: Vec<&String> = agents
+		.keys()
+		.filter(|k| {
+			k.to_lowercase().contains(&partial_lower)
+				|| k.split('.').any(|seg| seg.to_lowercase().contains(&partial_lower))
+		})
+		.collect();
+
+	if suggestions.len() == 1 {
+		eprintln!("did you mean: {}?", suggestions[0]);
+	} else if suggestions.len() > 1 && suggestions.len() <= 5 {
+		eprintln!(
+			"did you mean: {}?",
+			suggestions.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+		);
+	}
+
+	let kagaya_agents: Vec<&String> = agents
+		.keys()
+		.filter(|k| k.starts_with(KAGAYA_PREFIX))
+		.collect();
+	if !kagaya_agents.is_empty() && suggestions.is_empty() {
+		eprintln!(
+			"kagaya agents: {}",
+			kagaya_agents
+				.iter()
+				.map(|s| s.strip_prefix(KAGAYA_PREFIX).unwrap_or(s))
+				.collect::<Vec<_>>()
+				.join(", ")
+		);
+	}
 }
 
 fn find_plist_path(label: &str) -> Option<PathBuf> {
@@ -334,51 +493,95 @@ fn cmd_list(args: &[String]) {
 		return;
 	}
 
-	let max_label_width = agents.keys().map(|k| k.len()).max().unwrap_or(0);
+	let running_pids: Vec<u32> = agents.values().filter_map(|a| a.pid).collect();
+	let uptimes = get_uptimes(&running_pids);
+	let ports = listening_ports_for_pids(&running_pids);
+
+	let max_name_width = agents
+		.values()
+		.map(|a| short_label(&a.label).len())
+		.max()
+		.unwrap_or(0);
 
 	for agent in agents.values() {
-		let circle = if agent.pid.is_some() {
-			"●".green().to_string()
-		} else if agent.loaded {
-			"●".yellow().to_string()
-		} else {
-			"●".red().to_string()
-		};
+		let short = short_label(&agent.label);
 
-		let cmd_display = agent
-			.program
-			.as_deref()
-			.unwrap_or("")
-			.chars()
-			.take(60)
-			.collect::<String>();
-
-		let status = if let Some(pid) = agent.pid {
-			format!("pid {}", pid)
+		let (symbol, status_text, extra) = if let Some(pid) = agent.pid {
+			let port_str = ports
+				.get(&pid)
+				.map(|ps| ps.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(","))
+				.unwrap_or_default();
+			let uptime_str = uptimes
+				.get(&pid)
+				.map(|s| format_uptime(*s))
+				.unwrap_or_default();
+			let extra = format!(
+				"{:<8} {:<8} {}",
+				uptime_str, pid, port_str,
+			);
+			("●".green().to_string(), "on".green().to_string(), extra)
 		} else if agent.loaded {
-			let exit_str = agent
-				.exit_code
-				.map(|c| format!("exit {}", c))
-				.unwrap_or_else(|| "loaded".to_string());
-			exit_str
+			match agent.exit_code {
+				Some(code) if code != 0 => {
+					let extra = format!("exit {}", code);
+					("⚠".yellow().to_string(), "crashed".yellow().to_string(), extra)
+				}
+				Some(code) => {
+					("◻".dimmed().to_string(), format!("exit {}", code).dimmed().to_string(), String::new())
+				}
+				None => {
+					("◻".dimmed().to_string(), "loaded".dimmed().to_string(), String::new())
+				}
+			}
 		} else {
-			"not loaded".to_string()
+			("◻".dimmed().to_string(), "not loaded".dimmed().to_string(), String::new())
 		};
 
 		let domain_tag = if agent.domain != AgentDomain::UserAgent {
-			format!(" [{}]", agent.domain.display())
+			format!(" {}", format!("[{}]", agent.domain.display()).dimmed())
 		} else {
 			String::new()
 		};
 
+		let name_display = if agent.pid.is_some() {
+			if let Some(dot) = short.rfind('.') {
+				let prefix = &short[..dot + 1];
+				let suffix = &short[dot + 1..];
+				format!(
+					"{}{}",
+					prefix.to_string().dimmed(),
+					suffix.to_string().green(),
+				)
+			} else {
+				short.green().to_string()
+			}
+		} else {
+			if let Some(dot) = short.rfind('.') {
+				let prefix = &short[..dot + 1];
+				let suffix = &short[dot + 1..];
+				format!(
+					"{}{}",
+					prefix.to_string().dimmed(),
+					suffix,
+				)
+			} else {
+				short.to_string()
+			}
+		};
+
+		let extra_str = if extra.is_empty() {
+			String::new()
+		} else {
+			format!("  {}", extra.trim_end())
+		};
+
+		// Pad the name using the plain short label length
+		let padding = max_name_width.saturating_sub(short.len());
+		let pad = " ".repeat(padding);
+
 		println!(
-			" {} {:<width$} {:<50} {}{}",
-			circle,
-			agent.label,
-			cmd_display.dimmed(),
-			status.dimmed(),
-			domain_tag.dimmed(),
-			width = max_label_width,
+			" {} {}{} {}{}{}",
+			symbol, name_display, pad, status_text, extra_str, domain_tag,
 		);
 	}
 }
@@ -393,21 +596,7 @@ fn cmd_status(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
-			let ubermind_agents: Vec<&String> = agents
-				.keys()
-				.filter(|k| k.starts_with(UBERMIND_PREFIX))
-				.collect();
-			if !ubermind_agents.is_empty() {
-				eprintln!(
-					"ubermind agents: {}",
-					ubermind_agents
-						.iter()
-						.map(|s| s.strip_prefix(UBERMIND_PREFIX).unwrap_or(s))
-						.collect::<Vec<_>>()
-						.join(", ")
-				);
-			}
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -416,56 +605,73 @@ fn cmd_status(args: &[String]) {
 	let circle = if agent.pid.is_some() {
 		"●".green().to_string()
 	} else if agent.loaded {
-		"●".yellow().to_string()
+		match agent.exit_code {
+			Some(c) if c != 0 => "⚠".yellow().to_string(),
+			_ => "◻".dimmed().to_string(),
+		}
 	} else {
-		"●".red().to_string()
+		"◻".dimmed().to_string()
 	};
 
 	println!(" {} {}", circle, agent.label.bold());
 	println!();
 
 	if let Some(ref path) = agent.plist_path {
-		println!("   {} {}", "plist:".dimmed(), path.display());
+		println!("   {:>12} {}", "plist:".dimmed(), path.display());
 	}
 	if let Some(ref prog) = agent.program {
-		println!("   {} {}", "command:".dimmed(), prog);
+		println!("   {:>12} {}", "command:".dimmed(), prog);
 	}
 	if let Some(pid) = agent.pid {
-		println!("   {} {}", "pid:".dimmed(), pid);
+		println!("   {:>12} {}", "pid:".dimmed(), pid);
+		let uptimes = get_uptimes(&[pid]);
+		if let Some(secs) = uptimes.get(&pid) {
+			println!("   {:>12} {}", "uptime:".dimmed(), format_uptime(*secs));
+		}
+		let ports = listening_ports_for_pids(&[pid]);
+		if let Some(ps) = ports.get(&pid) {
+			let port_str = ps.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(" ");
+			println!("   {:>12} {}", "ports:".dimmed(), port_str);
+		}
 	}
 	if let Some(exit) = agent.exit_code {
-		println!("   {} {}", "exit code:".dimmed(), exit);
+		let exit_display = if exit != 0 {
+			format!("{}", exit).yellow().to_string()
+		} else {
+			format!("{}", exit)
+		};
+		println!("   {:>12} {}", "exit code:".dimmed(), exit_display);
 	}
 	println!(
-		"   {} {}",
+		"   {:>12} {}",
 		"loaded:".dimmed(),
 		if agent.loaded { "yes" } else { "no" }
 	);
 	println!(
-		"   {} {}",
+		"   {:>12} {}",
 		"keep alive:".dimmed(),
 		if agent.keep_alive { "yes" } else { "no" }
 	);
 	println!(
-		"   {} {}",
+		"   {:>12} {}",
 		"run at load:".dimmed(),
 		if agent.run_at_load { "yes" } else { "no" }
 	);
 	if let Some(ref dir) = agent.working_dir {
-		println!("   {} {}", "workdir:".dimmed(), dir);
+		println!("   {:>12} {}", "workdir:".dimmed(), dir);
 	}
 	if let Some(ref p) = agent.stdout_path {
-		println!("   {} {}", "stdout:".dimmed(), p);
+		println!("   {:>12} {}", "stdout:".dimmed(), p);
 	}
 	if let Some(ref p) = agent.stderr_path {
-		println!("   {} {}", "stderr:".dimmed(), p);
+		println!("   {:>12} {}", "stderr:".dimmed(), p);
 	}
-	println!("   {} {}", "domain:".dimmed(), agent.domain.display());
+	println!("   {:>12} {}", "domain:".dimmed(), agent.domain.display());
 }
 
 fn cmd_start(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd start <label>");
+		eprintln!("usage: ky launchd start <label>");
 		std::process::exit(1);
 	}
 
@@ -473,7 +679,7 @@ fn cmd_start(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -552,7 +758,7 @@ fn cmd_start(args: &[String]) {
 
 fn cmd_stop(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd stop <label>");
+		eprintln!("usage: ky launchd stop <label>");
 		std::process::exit(1);
 	}
 
@@ -560,7 +766,7 @@ fn cmd_stop(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -611,7 +817,7 @@ fn cmd_stop(args: &[String]) {
 
 fn cmd_restart(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd restart <label>");
+		eprintln!("usage: ky launchd restart <label>");
 		std::process::exit(1);
 	}
 
@@ -619,7 +825,7 @@ fn cmd_restart(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -661,7 +867,7 @@ fn cmd_restart(args: &[String]) {
 
 fn cmd_logs(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd logs <label>");
+		eprintln!("usage: ky launchd logs <label>");
 		std::process::exit(1);
 	}
 
@@ -669,7 +875,7 @@ fn cmd_logs(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -744,7 +950,7 @@ fn cmd_logs(args: &[String]) {
 
 fn cmd_show(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd show <label>");
+		eprintln!("usage: ky launchd show <label>");
 		std::process::exit(1);
 	}
 
@@ -752,7 +958,7 @@ fn cmd_show(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -830,7 +1036,7 @@ fn cmd_show(args: &[String]) {
 fn cmd_create(args: &[String]) {
 	// Parse: create <label> [options] -- <command...>
 	if args.is_empty() {
-		eprintln!("usage: ub launchd create <label> [options] -- <command...>");
+		eprintln!("usage: ky launchd create <label> [options] -- <command...>");
 		eprintln!();
 		eprintln!("options:");
 		eprintln!("  --dir <path>           Working directory (default: current dir)");
@@ -844,7 +1050,7 @@ fn cmd_create(args: &[String]) {
 	let label = if label_short.contains('.') {
 		label_short.clone()
 	} else {
-		format!("{}{}", UBERMIND_PREFIX, label_short)
+		format!("{}{}", KAGAYA_PREFIX, label_short)
 	};
 
 	// Find the -- separator
@@ -853,7 +1059,7 @@ fn cmd_create(args: &[String]) {
 		Some(pos) => (&args[1..pos], &args[pos + 1..]),
 		None => {
 			eprintln!("error: missing -- separator before command");
-			eprintln!("usage: ub launchd create {} -- <command...>", label_short);
+			eprintln!("usage: ky launchd create {} -- <command...>", label_short);
 			std::process::exit(1);
 		}
 	};
@@ -906,7 +1112,7 @@ fn cmd_create(args: &[String]) {
 
 	if plist_path.exists() {
 		eprintln!("error: plist already exists: {}", plist_path.display());
-		eprintln!("use 'ub launchd edit {}' to modify, or 'ub launchd remove {}' first", label_short, label_short);
+		eprintln!("use 'ky launchd edit {}' to modify, or 'ky launchd remove {}' first", label_short, label_short);
 		std::process::exit(1);
 	}
 
@@ -1004,7 +1210,7 @@ fn cmd_create(args: &[String]) {
 
 fn cmd_edit(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd edit <label>");
+		eprintln!("usage: ky launchd edit <label>");
 		std::process::exit(1);
 	}
 
@@ -1012,7 +1218,7 @@ fn cmd_edit(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
@@ -1081,7 +1287,7 @@ fn cmd_edit(args: &[String]) {
 
 fn cmd_remove(args: &[String]) {
 	if args.is_empty() {
-		eprintln!("usage: ub launchd remove <label> [--yes]");
+		eprintln!("usage: ky launchd remove <label> [--yes]");
 		std::process::exit(1);
 	}
 
@@ -1091,16 +1297,16 @@ fn cmd_remove(args: &[String]) {
 	let label = match resolve_label(&args[0], &agents) {
 		Some(l) => l,
 		None => {
-			eprintln!("agent not found: {}", args[0]);
+			print_not_found(&args[0], &agents);
 			std::process::exit(1);
 		}
 	};
 
 	let agent = &agents[&label];
 
-	if !label.starts_with(UBERMIND_PREFIX) && !force {
+	if !label.starts_with(KAGAYA_PREFIX) && !force {
 		eprintln!(
-			"refusing to remove non-ubermind agent: {}",
+			"refusing to remove non-kagaya agent: {}",
 			label
 		);
 		eprintln!("use --yes to force removal");

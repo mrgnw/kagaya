@@ -1,10 +1,10 @@
 [package]
-name = "ubermind-ui"
+name = "kagaya-ui"
 version = "0.1.0"
-description = "Ubermind web UI and native app"
+description = "Kagaya web UI and native app"
 edition = "2021"
 rust-version = "1.77.2"
-default-run = "ubermind-ui"
+default-run = "kagaya-ui"
 
 [lib]
 name = "app_lib"

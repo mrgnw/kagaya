@@ -30,7 +30,7 @@ When you `connect` to a process, you're inside a tmux session. The prefix key is
 
 ## Typical workflow: copy an error
 
-1. `ubermind connect web myapp` — attach to the process
+1. `ky connect web myapp` — attach to the process
 2. `Ctrl+b`, `[` — enter scroll mode
 3. Scroll up to find the error
 4. `Space` — start selecting

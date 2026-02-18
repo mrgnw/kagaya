@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const REPO: &str = "mrgnw/ubermind";
+const REPO: &str = "mrgnw/kagaya";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn cmd_self_update() {
@@ -21,11 +21,11 @@ pub fn cmd_self_update() {
 		return;
 	}
 
-	eprintln!("updating ubermind {} -> {}", CURRENT_VERSION, latest_clean);
+	eprintln!("updating kagaya {} -> {}", CURRENT_VERSION, latest_clean);
 
 	let target = detect_target();
 	let tag = if latest.starts_with('v') { latest.clone() } else { format!("v{}", latest) };
-	let archive_name = format!("ubermind-{}-{}.tar.gz", tag, target);
+	let archive_name = format!("kagaya-{}-{}.tar.gz", tag, target);
 	let url = format!(
 		"https://github.com/{}/releases/download/{}/{}",
 		REPO, tag, archive_name
@@ -36,7 +36,7 @@ pub fn cmd_self_update() {
 		Err(_) => PathBuf::from("/usr/local/bin"),
 	};
 
-	let tmpdir = std::env::temp_dir().join(format!("ubermind-update-{}", std::process::id()));
+	let tmpdir = std::env::temp_dir().join(format!("kagaya-update-{}", std::process::id()));
 	let _ = fs::create_dir_all(&tmpdir);
 
 	let archive_path = tmpdir.join(&archive_name);
@@ -56,7 +56,7 @@ pub fn cmd_self_update() {
 		std::process::exit(1);
 	}
 
-	for bin_name in &["ubermind"] {
+	for bin_name in &["kagaya"] {
 		let src = tmpdir.join(bin_name);
 		let dest = install_dir.join(bin_name);
 		if src.exists() {
@@ -71,14 +71,6 @@ pub fn cmd_self_update() {
 	let _ = fs::remove_dir_all(&tmpdir);
 
 	eprintln!("updated to {}", latest_clean);
-
-	let ub = install_dir.join("ub");
-	if !ub.exists() {
-		let ubermind = install_dir.join("ubermind");
-		if ubermind.exists() {
-			let _ = std::os::unix::fs::symlink(&ubermind, &ub);
-		}
-	}
 }
 
 fn fetch_latest_version() -> Result<String, String> {
@@ -96,7 +88,6 @@ fn fetch_latest_version() -> Result<String, String> {
 
 	let body = String::from_utf8_lossy(&output.stdout);
 
-	// parse tag_name from JSON without adding a dep
 	for line in body.lines() {
 		let line = line.trim();
 		if line.contains("\"tag_name\"") {
@@ -151,7 +142,6 @@ fn download(url: &str, dest: &PathBuf) -> Result<(), String> {
 }
 
 fn replace_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), String> {
-	// Atomic-ish replacement: rename old, move new, remove old
 	let backup = dest.with_extension("old");
 	let _ = fs::remove_file(&backup);
 
@@ -170,7 +160,6 @@ fn replace_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), String> {
 			Ok(())
 		}
 		Err(e) => {
-			// Restore backup on failure
 			if backup.exists() {
 				let _ = fs::rename(&backup, dest);
 			}

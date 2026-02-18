@@ -1,12 +1,9 @@
 pub mod api;
-pub mod output;
 pub mod supervisor;
 
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use crate::config;
-use crate::protocol::{self, Request, Response};
+use crate::protocol::{Request, Response};
 
 pub async fn run(args: &[String]) {
 	tracing_subscriber::fmt().init();
@@ -19,32 +16,49 @@ pub async fn run(args: &[String]) {
 	let http_port = if enable_http { Some(port) } else { None };
 	let supervisor = supervisor::Supervisor::new(global_config.clone(), http_port);
 
-	let state_dir = protocol::state_dir();
+	let paths = muzan::DaemonPaths::new("kagaya");
+
+	let state_dir = paths.state_dir();
 	let _ = std::fs::create_dir_all(&state_dir);
 
-	let pid_path = protocol::pid_path();
+	let pid_path = paths.pid_path();
 	let _ = std::fs::write(&pid_path, std::process::id().to_string());
 
-	let socket_path = protocol::socket_path();
+	let socket_path = paths.socket_path();
 	if socket_path.exists() {
 		let _ = std::fs::remove_file(&socket_path);
 	}
 
-	output::expire_logs(global_config.logs.max_age_days, global_config.logs.max_files);
+	let log_dir = crate::logs::log_dir();
+	kagaya::logs::expire_logs(&log_dir, global_config.logs.max_age_days, global_config.logs.max_files);
 
 	{
 		let config = global_config.clone();
+		let log_dir = log_dir.clone();
 		tokio::spawn(async move {
 			loop {
 				tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-				output::expire_logs(config.logs.max_age_days, config.logs.max_files);
+				kagaya::logs::expire_logs(&log_dir, config.logs.max_age_days, config.logs.max_files);
 			}
 		});
 	}
 
+	let shutdown = Arc::new(tokio::sync::Notify::new());
+
 	let sup_socket = Arc::clone(&supervisor);
+	let shutdown_socket = Arc::clone(&shutdown);
+	let paths_socket = paths.clone();
 	let socket_handle = tokio::spawn(async move {
-		run_socket_server(sup_socket, &socket_path).await;
+		muzan::server::run_socket_server_with_error(
+			&paths_socket,
+			move |req: Request| {
+				let sup = Arc::clone(&sup_socket);
+				let shutdown = Arc::clone(&shutdown_socket);
+				async move { handle_request(&sup, req, &shutdown).await }
+			},
+			Some(|msg: String| Response::Error { message: msg }),
+		)
+		.await;
 	});
 
 	let http_handle = if enable_http {
@@ -70,59 +84,29 @@ pub async fn run(args: &[String]) {
 		_ = tokio::signal::ctrl_c() => {
 			tracing::info!("shutting down");
 		}
-	}
-
-	let _ = std::fs::remove_file(protocol::socket_path());
-	let _ = std::fs::remove_file(protocol::pid_path());
-}
-
-async fn run_socket_server(supervisor: Arc<supervisor::Supervisor>, socket_path: &std::path::Path) {
-	let listener = match UnixListener::bind(socket_path) {
-		Ok(l) => l,
-		Err(e) => {
-			tracing::error!("failed to bind socket: {}", e);
-			return;
+		_ = shutdown.notified() => {
+			tracing::info!("shutdown requested");
 		}
-	};
-
-	tracing::info!("listening on {}", socket_path.display());
-
-	loop {
-		let (stream, _) = match listener.accept().await {
-			Ok(s) => s,
-			Err(e) => {
-				tracing::error!("accept error: {}", e);
-				continue;
-			}
-		};
-
-		let sup = Arc::clone(&supervisor);
-		tokio::spawn(async move {
-			let (reader, mut writer) = stream.into_split();
-			let mut lines = BufReader::new(reader).lines();
-
-			while let Ok(Some(line)) = lines.next_line().await {
-				let request: Request = match serde_json::from_str(&line) {
-					Ok(r) => r,
-					Err(e) => {
-						let resp = Response::Error {
-							message: format!("invalid request: {}", e),
-						};
-						let _ = write_response(&mut writer, &resp).await;
-						continue;
-					}
-				};
-
-				let response = handle_request(&sup, request).await;
-				if write_response(&mut writer, &response).await.is_err() {
-					break;
-				}
-			}
-		});
 	}
+
+	// Gracefully stop all supervised processes
+	let services: Vec<String> = supervisor
+		.inner
+		.services
+		.read()
+		.await
+		.keys()
+		.cloned()
+		.collect();
+	for name in &services {
+		let _ = supervisor.stop_service(name).await;
+	}
+
+	let _ = std::fs::remove_file(paths.socket_path());
+	let _ = std::fs::remove_file(paths.pid_path());
 }
 
-async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Request) -> Response {
+async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Request, shutdown: &Arc<tokio::sync::Notify>) -> Response {
 	match request {
 		Request::Ping => Response::Pong,
 		Request::Status => {
@@ -177,36 +161,25 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 				Err(e) => Response::Error { message: e },
 			}
 		}
-		Request::Logs { service, process, follow: _ } => {
+		Request::Logs { service, process, follow: _, offset } => {
 			match supervisor.get_output(&service, process.as_deref()).await {
 				Ok(capture) => {
-					let snapshot = capture.snapshot().await;
+					let (data, new_offset) = capture.snapshot_from(offset).await;
 					Response::Log {
-						line: String::from_utf8_lossy(&snapshot).to_string(),
+						line: String::from_utf8_lossy(&data).to_string(),
+						offset: new_offset,
 					}
 				}
 				Err(e) => Response::Error { message: e },
 			}
 		}
 		Request::Shutdown => {
-			tokio::spawn(async {
-				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-				std::process::exit(0);
-			});
+			shutdown.notify_one();
 			Response::Ok {
 				message: Some("shutting down".to_string()),
 			}
 		}
 	}
-}
-
-async fn write_response(
-	writer: &mut tokio::net::unix::OwnedWriteHalf,
-	response: &Response,
-) -> Result<(), std::io::Error> {
-	let mut data = serde_json::to_vec(response).unwrap();
-	data.push(b'\n');
-	writer.write_all(&data).await
 }
 
 async fn run_http_server(supervisor: Arc<supervisor::Supervisor>, port: u16) {

@@ -3,7 +3,7 @@ set -euo pipefail
 
 version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 tag="v${version}"
-bin="ubermind"
+bin="kagaya"
 dist="dist"
 
 targets=(
@@ -68,6 +68,6 @@ gh release create "${tag}" \
 
 echo
 echo "released ${tag}"
-echo "  https://github.com/mrgnw/ubermind/releases/tag/${tag}"
+echo "  https://github.com/mrgnw/kagaya/releases/tag/${tag}"
 echo
 echo "don't forget: cargo publish"

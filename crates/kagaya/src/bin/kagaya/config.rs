@@ -1,10 +1,10 @@
 use crate::protocol::config_dir;
-use crate::types::{ProcessDef, Service, ServiceType};
+use kagaya::{ProcessDef, Service, ServiceType};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-// ── Global config (~/.config/ubermind/config.toml) ──────────────────────────
+// ── Global config (~/.config/kagaya/config.toml) ────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GlobalConfig {
@@ -17,10 +17,11 @@ pub struct GlobalConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct DaemonConfig {
 	#[serde(default = "default_idle_timeout")]
+	#[allow(dead_code)]
 	pub idle_timeout: u64,
+	#[allow(dead_code)]
 	pub log_dir: Option<String>,
 	#[serde(default = "default_port")]
 	pub port: u16,
@@ -233,7 +234,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
 				services.insert(name.clone(), ServiceEntry { name, dir, inline_command: None });
 			}
 			ProjectDef::Command { run, service_type, restart, max_retries, restart_delay, env } => {
-				// Standalone commands get a synthetic dir under ~/.config/ubermind/_commands/
+				// Standalone commands get a synthetic dir under ~/.config/kagaya/_commands/
 				let dir = config_dir().join("_commands").join(&name);
 				let _ = std::fs::create_dir_all(&dir);
 				services.insert(

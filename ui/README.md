@@ -1,6 +1,6 @@
-# ubermind ui
+# kagaya ui
 
-Desktop dashboard for [ubermind](https://github.com/mrgnw/ubermind). View, start, stop, and reload services. Attach to live process output via terminal.
+Desktop dashboard for [kagaya](https://github.com/mrgnw/kagaya). View, start, stop, and reload services. Attach to live process output via terminal.
 
 Built with SvelteKit 2 (Svelte 5), Tauri 2, and xterm.js.
 
@@ -9,7 +9,7 @@ Built with SvelteKit 2 (Svelte 5), Tauri 2, and xterm.js.
 - [Node.js](https://nodejs.org/) (or Bun)
 - [Rust toolchain](https://rustup.rs/)
 - [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
-- A running ubermind HTTP server (port 13369)
+- A running kagaya HTTP server (port 13369)
 
 ## Dev
 
@@ -27,4 +27,4 @@ cargo tauri build
 
 ## Architecture
 
-The UI connects to ubermind's HTTP + WebSocket server on port 13369. When running as a Tauri app, it uses Tauri's IPC invoke layer instead. The service detail page streams live process output over a WebSocket (`/ws/echo/{name}`) rendered with xterm.js.
+The UI connects to kagaya's HTTP + WebSocket server on port 13369. When running as a Tauri app, it uses Tauri's IPC invoke layer instead. The service detail page streams live process output over a WebSocket (`/ws/echo/{name}`) rendered with xterm.js.
