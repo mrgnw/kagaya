@@ -37,4 +37,4 @@ kagaya replaces ubermind as the user-facing binary (`ky`).
 ## Future work
 - Publish muzan + kagaya to crates.io
 - Remove/archive ubermind-cli crate
-- Rename GitHub repo
+- [x] Rename GitHub repo

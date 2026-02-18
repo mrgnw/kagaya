@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-repo="mrgnw/ubermind"
-bin="ubermind"
+repo="mrgnw/kagaya"
+bin="kagaya"
 install_dir="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 detect_target() {
@@ -74,7 +74,7 @@ echo "created alias ${install_dir}/ub"
 
 # --- install shell completions ---
 
-completion_dir="${HOME}/.local/share/ubermind/completions"
+completion_dir="${HOME}/.local/share/kagaya/completions"
 mkdir -p "${completion_dir}"
 
 for shell in bash zsh fish; do
