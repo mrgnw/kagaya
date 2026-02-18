@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="logo.svg" width="128" height="128" alt="ubermind logo">
+  <img src="logo.svg" width="128" height="128" alt="kagaya logo">
 </p>
 
-# ubermind
+# kagaya
 
-A native Rust process supervisor for managing multiple projects. Each project keeps its own `Procfile`, and ubermind orchestrates them all from anywhere with auto-restart, log management, and live monitoring.
+A native Rust process supervisor for managing multiple projects. Each project keeps its own `Procfile`, and kagaya orchestrates them all from anywhere with auto-restart, log management, and live monitoring.
 
 Inspired by [overmind](https://github.com/DarthSim/overmind) and [foreman](https://github.com/ddollar/foreman).
 
@@ -12,14 +12,14 @@ Inspired by [overmind](https://github.com/DarthSim/overmind) and [foreman](https
 
 ```sh
 # shell script (prebuilt binary)
-curl -fsSL https://raw.githubusercontent.com/mrgnw/ubermind/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mrgnw/kagaya/main/install.sh | sh
 
 # gah (github asset helper)
-gah install mrgnw/ubermind
+gah install mrgnw/kagaya
 
 # cargo
-cargo install ubermind       # from source
-cargo binstall ubermind      # prebuilt binary
+cargo install kagaya       # from source
+cargo binstall kagaya      # prebuilt binary
 ```
 
 ### Shell completion
@@ -27,41 +27,41 @@ cargo binstall ubermind      # prebuilt binary
 Tab completion for commands, project names, and flags:
 
 ```sh
-ub start appli<tab>    # completes to: ub start appligator
-ub st<tab>             # completes to: ub status / ub start / ub stop
-ub status <tab>        # shows all project names
+ky start appli<tab>    # completes to: ky start appligator
+ky st<tab>             # completes to: ky status / ky start / ky stop
+ky status <tab>        # shows all project names
 ```
 
 **Setup:**
 
-If installed via the install script, completions are in `~/.local/share/ubermind/completions/`.
+If installed via the install script, completions are in `~/.local/share/kagaya/completions/`.
 
 **Bash:**
 ```sh
-echo 'source ~/.local/share/ubermind/completions/ub.bash' >> ~/.bashrc
+echo 'source ~/.local/share/kagaya/completions/ky.bash' >> ~/.bashrc
 ```
 
 **Zsh:**
 ```sh
 # Add to ~/.zshrc
-fpath=(~/.local/share/ubermind/completions $fpath)
+fpath=(~/.local/share/kagaya/completions $fpath)
 autoload -Uz compinit && compinit
 ```
 
 **Fish:**
 ```sh
-ln -s ~/.local/share/ubermind/completions/ub.fish ~/.config/fish/completions/
+ln -s ~/.local/share/kagaya/completions/ky.fish ~/.config/fish/completions/
 ```
 
 ## Quick start
 
-### 1. Initialize ubermind
+### 1. Initialize kagaya
 
 ```sh
-ubermind init
+ky init
 ```
 
-This creates a projects config at `~/.config/ubermind/projects`.
+This creates a projects config at `~/.config/kagaya/projects`.
 
 ### 2. Create a Procfile in your project
 
@@ -74,21 +74,21 @@ api: python server.py
 worker: ruby worker.rb
 ```
 
-This is the standard [Procfile](https://devcenter.heroku.com/articles/procfile) format. Each line becomes a named process that ubermind will manage.
+This is the standard [Procfile](https://devcenter.heroku.com/articles/procfile) format. Each line becomes a named process that kagaya will manage.
 
-### 3. Register your project with ubermind
+### 3. Register your project with kagaya
 
 ```sh
-ubermind add myapp ~/dev/myapp
+ky add myapp ~/dev/myapp
 ```
 
-This tells ubermind "there's a project called `myapp` at `~/dev/myapp` that has a Procfile."
+This tells kagaya "there's a project called `myapp` at `~/dev/myapp` that has a Procfile."
 
 **Shorthand:** If you're already in the project directory with a Procfile, just run:
 
 ```sh
 cd ~/dev/myapp
-ubermind add
+ky add
 # myapp: added (/Users/you/dev/myapp)
 ```
 
@@ -97,15 +97,15 @@ This automatically uses the directory name as the project name.
 ### 4. Start it
 
 ```sh
-ubermind start myapp    # start one project
-ubermind start          # or start everything
+ky start myapp    # start one project
+ky start          # or start everything
 ```
 
 ## How it fits together
 
-ubermind has two layers of config:
+kagaya has two layers of config:
 
-**Projects file** (`~/.config/ubermind/projects`) — maps project names to directories:
+**Projects file** (`~/.config/kagaya/projects`) — maps project names to directories:
 
 ```
 myapp: ~/dev/myapp
@@ -113,7 +113,7 @@ api: ~/dev/api-server
 frontend: ~/dev/frontend
 ```
 
-**Commands file** (`~/.config/ubermind/commands`) — optional, defines standalone commands in Procfile format:
+**Commands file** (`~/.config/kagaya/commands`) — optional, defines standalone commands in Procfile format:
 
 ```
 tunnel: ssh -N -L 5432:localhost:5432 prod-server
@@ -135,26 +135,26 @@ worker: cargo run --bin worker
 dev: pnpm dev
 ```
 
-When you run `ubermind start myapp`, ubermind looks up `myapp` → `~/dev/myapp`, then starts its daemon in that directory using the `Procfile`. Each project gets its own isolated supervisor instance — one project crashing won't affect the others.
+When you run `ky start myapp`, kagaya looks up `myapp` → `~/dev/myapp`, then starts its daemon in that directory using the `Procfile`. Each project gets its own isolated supervisor instance — one project crashing won't affect the others.
 
-Standalone commands from the `commands` file are auto-expanded into generated Procfiles under `~/.config/ubermind/_commands/`.
+Standalone commands from the `commands` file are auto-expanded into generated Procfiles under `~/.config/kagaya/_commands/`.
 
 ## Usage
 
 ```
-ubermind init                # create projects config file
-ubermind add [name] [dir]    # register a project directory (uses cwd if omitted)
+ky init                # create projects config file
+ky add [name] [dir]    # register a project directory (uses cwd if omitted)
 
-ubermind status              # show all projects
-ubermind start [name]        # start project(s)
-ubermind stop [name]         # stop project(s)
-ubermind reload [name]       # restart project(s) (picks up Procfile changes)
-ubermind kill [name]         # kill process(es) in project(s)
-ubermind restart [name]      # restart process(es) in project(s)
-ubermind echo [name]         # live stream logs from project(s)
-ubermind logs [name]         # show last 100 lines of log file
-ubermind tail [name]         # follow log file (tail -f)
-ubermind serve [-p PORT]     # start web UI server (default port: 13369)
+ky status              # show all projects
+ky start [name]        # start project(s)
+ky stop [name]         # stop project(s)
+ky reload [name]       # restart project(s) (picks up Procfile changes)
+ky kill [name]         # kill process(es) in project(s)
+ky restart [name]      # restart process(es) in project(s)
+ky echo [name]         # live stream logs from project(s)
+ky logs [name]         # show last 100 lines of log file
+ky tail [name]         # follow log file (tail -f)
+ky serve [-p PORT]     # start web UI server (default port: 13369)
 ```
 
 ### Watch mode
@@ -162,28 +162,28 @@ ubermind serve [-p PORT]     # start web UI server (default port: 13369)
 Commands that modify services automatically watch status for 4 seconds:
 
 ```sh
-ubermind start myapp               # starts and watches for 4 seconds
-ubermind stop myapp                # stops and watches for 4 seconds
-ubermind reload myapp              # reloads and watches for 4 seconds
-ubermind restart myapp web         # restarts process and watches for 4 seconds
+ky start myapp               # starts and watches for 4 seconds
+ky stop myapp                # stops and watches for 4 seconds
+ky reload myapp              # reloads and watches for 4 seconds
+ky restart myapp web         # restarts process and watches for 4 seconds
 ```
 
 Override the default watch duration or use with status:
 
 ```sh
-ubermind status --watch            # watch indefinitely (refreshes every 1s)
-ubermind status --watch 10         # watch for 10 seconds
-ubermind start myapp --watch 8     # start and watch for 8 seconds (overrides default)
-ubermind reload myapp --watch 0    # reload without watching
+ky status --watch            # watch indefinitely (refreshes every 1s)
+ky status --watch 10         # watch for 10 seconds
+ky start myapp --watch 8     # start and watch for 8 seconds (overrides default)
+ky reload myapp --watch 0    # reload without watching
 ```
 
 ### Live logs
 
 ```sh
-ubermind echo myapp          # live stream logs from myapp (runs until stopped)
-ubermind echo myapp web      # live stream from specific process
-ubermind logs myapp          # show last 100 lines from log file
-ubermind tail myapp          # follow log file (like tail -f)
+ky echo myapp          # live stream logs from myapp (runs until stopped)
+ky echo myapp web      # live stream from specific process
+ky logs myapp          # show last 100 lines from log file
+ky tail myapp          # follow log file (like tail -f)
 ```
 
 ### Targeting
@@ -191,23 +191,23 @@ ubermind tail myapp          # follow log file (like tail -f)
 Pass project names to target specific projects:
 
 ```
-ubermind status myapp        # show status of myapp
-ubermind myapp status        # same thing, flexible arg ordering
+ky status myapp        # show status of myapp
+ky myapp status        # same thing, flexible arg ordering
 ```
 
 Omit the name to target all projects (or current project if in a registered directory):
 
 ```
-ubermind start               # start all projects
-ubermind stop                # stop all projects
-cd ~/dev/myapp && ub status  # show status of myapp (context-aware)
+ky start               # start all projects
+ky stop                # stop all projects
+cd ~/dev/myapp && ky status  # show status of myapp (context-aware)
 ```
 
 ## Config
 
-The projects file lives at `~/.config/ubermind/projects` (respects `$XDG_CONFIG_HOME`).
+The projects file lives at `~/.config/kagaya/projects` (respects `$XDG_CONFIG_HOME`).
 
-You can edit it directly or use `ubermind add`:
+You can edit it directly or use `ky add`:
 
 ```
 # name: directory
@@ -218,12 +218,12 @@ frontend: ~/dev/frontend
 
 Quick add from a project directory:
 ```sh
-cd ~/dev/myapp && ubermind add              # infers name from directory
-cd ~/dev/myapp && ubermind add myapp        # uses cwd, custom name
-ubermind add myapp ~/dev/myapp              # full form with explicit path
+cd ~/dev/myapp && ky add              # infers name from directory
+cd ~/dev/myapp && ky add myapp        # uses cwd, custom name
+ky add myapp ~/dev/myapp              # full form with explicit path
 ```
 
-Optionally, define standalone commands in `~/.config/ubermind/commands`:
+Optionally, define standalone commands in `~/.config/kagaya/commands`:
 
 ```
 tunnel: ssh -N -L 5432:localhost:5432 prod-server
@@ -234,17 +234,17 @@ See [tmux cheatsheet](tmux.md) for navigating connected sessions (scrolling, cop
 
 ## How it works
 
-ubermind uses native Rust process supervision with:
+kagaya uses native Rust process supervision with:
 - Direct PID-based process management
 - Auto-restart on crash with configurable retry limits
-- Log files with rotation (stored in `~/.local/share/ubermind/log/`)
+- Log files with rotation (stored in `~/.local/share/kagaya/log/`)
 - Live log streaming via ring buffers
 - Unix socket communication for CLI commands
 - HTTP/WebSocket API for the web UI
 
-Each project directory gets its own independent supervisor instance. ubermind knows where each project lives and dispatches commands to the right supervisor.
+Each project directory gets its own independent supervisor instance. kagaya knows where each project lives and dispatches commands to the right supervisor.
 
-Standalone commands are auto-expanded into generated Procfiles under `~/.config/ubermind/_commands/` (an internal directory that you shouldn't edit directly).
+Standalone commands are auto-expanded into generated Procfiles under `~/.config/kagaya/_commands/` (an internal directory that you shouldn't edit directly).
 
 ## License
 
@@ -252,4 +252,6 @@ MIT
 
 ## History
 
-ubermind v0.6+ uses native Rust process management. Earlier versions (v0.1-v0.5) were thin wrappers around [overmind](https://github.com/DarthSim/overmind) and tmux.
+Formerly known as **ubermind**. Renamed to **kagaya** in v0.9.
+
+kagaya v0.6+ uses native Rust process management. Earlier versions (v0.1-v0.5) were thin wrappers around [overmind](https://github.com/DarthSim/overmind) and tmux.

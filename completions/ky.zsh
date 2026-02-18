@@ -1,8 +1,8 @@
-#compdef ub ubermind
+#compdef ky kagaya
 
-_ub() {
+_ky() {
 	local -a commands projects flags
-	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/ubermind/projects"
+	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects"
 
 	commands=(
 		'status:show project status'
@@ -70,7 +70,7 @@ _ub() {
 				;;
 			self)
 				local -a self_commands
-				self_commands=('update:update ubermind to the latest version')
+				self_commands=('update:update kagaya to the latest version')
 				_describe -t self_commands 'self command' self_commands
 				;;
 				*)
@@ -82,4 +82,4 @@ _ub() {
 	esac
 }
 
-_ub "$@"
+_ky "$@"

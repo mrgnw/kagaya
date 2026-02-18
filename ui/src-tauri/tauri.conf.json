@@ -1,8 +1,8 @@
 {
 	"$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-	"productName": "ubermind-ui",
+	"productName": "kagaya-ui",
 	"version": "0.1.0",
-	"identifier": "dev.ubermind.ui",
+	"identifier": "dev.kagaya.ui",
 	"build": {
 		"frontendDist": "../build",
 		"devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
 	"app": {
 		"windows": [
 			{
-				"title": "ubermind",
+				"title": "kagaya",
 				"width": 1200,
 				"height": 800,
 				"resizable": true,

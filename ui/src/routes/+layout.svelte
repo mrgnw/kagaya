@@ -3,7 +3,7 @@
 </script>
 
 <svelte:head>
-	<title>ubermind</title>
+	<title>kagaya</title>
 </svelte:head>
 
 {@render children()}

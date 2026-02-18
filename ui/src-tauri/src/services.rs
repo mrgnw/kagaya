@@ -43,9 +43,9 @@ fn expand_tilde(raw: &str) -> String {
 
 fn config_dir() -> PathBuf {
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
-        return Path::new(&xdg).join("ubermind");
+        return Path::new(&xdg).join("kagaya");
     }
-    home_dir().join(".config/ubermind")
+    home_dir().join(".config/kagaya")
 }
 
 fn projects_config_path() -> PathBuf {

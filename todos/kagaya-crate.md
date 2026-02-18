@@ -4,7 +4,7 @@ branch: muzan
 
 ## Status: implemented
 
-kagaya replaces ubermind as the user-facing binary (`ky`).
+kagaya is the user-facing binary (`ky`).
 
 ## Architecture
 
@@ -28,7 +28,7 @@ kagaya replaces ubermind as the user-facing binary (`ky`).
 - [x] `daemon/` — daemon entry point, request dispatch, HTTP/WS API
 - [x] `launchd.rs` — macOS launchd agent management
 - [x] `self_update.rs` — self-update from GitHub releases
-- [x] All `ubermind` references replaced with `kagaya`/`ky`
+- [x] All references updated to `kagaya`/`ky`
 
 ### Tests
 - [x] 19 kagaya tests (2 unit + 16 integration + 1 doc-test)
@@ -36,5 +36,5 @@ kagaya replaces ubermind as the user-facing binary (`ky`).
 
 ## Future work
 - Publish muzan + kagaya to crates.io
-- Remove/archive ubermind-cli crate
+- Remove/archive old ubermind-cli crate
 - [x] Rename GitHub repo

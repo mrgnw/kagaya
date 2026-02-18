@@ -27,9 +27,9 @@ fn main() {
         });
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("ubermind-serve - headless web UI server");
+        eprintln!("kagaya-serve - headless web UI server");
         eprintln!();
-        eprintln!("usage: ubermind-serve [options]");
+        eprintln!("usage: kagaya-serve [options]");
         eprintln!(
             "  -p, --port PORT  HTTP port (default: {})",
             app_lib::server::DEFAULT_PORT
@@ -39,7 +39,7 @@ fn main() {
         return;
     }
 
-    eprintln!("ubermind-serve starting on port {port}");
+    eprintln!("kagaya-serve starting on port {port}");
     if let Some(ref dir) = static_dir {
         eprintln!("serving static files from {}", dir.display());
     } else {

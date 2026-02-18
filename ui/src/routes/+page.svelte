@@ -177,7 +177,7 @@
         <div class="error-wrap">
             <div class="error">
                 {error}
-                <p>Make sure the ubermind-ui server is running on port 13369</p>
+                <p>Make sure the kagaya server is running on port 13369</p>
             </div>
         </div>
     {/if}
@@ -187,7 +187,7 @@
         <header class="panel-header">
             <div class="brand">
                 <img src={logoSvg} alt="" class="logo" />
-                <span class="brand-name">ubermind</span>
+                <span class="brand-name">kagaya</span>
             </div>
             <div class="stats" aria-label="Project status">
                 {#if runningCount > 0}
@@ -306,7 +306,7 @@
             <div class="empty">
                 <p>No projects configured</p>
                 <p class="empty-hint">
-                    Run <code>ubermind init</code> to get started
+                    Run <code>ky init</code> to get started
                 </p>
             </div>
         {/if}
