@@ -24,9 +24,6 @@ pub struct Supervisor {
 
 /// A service being managed by the supervisor.
 pub struct ManagedService {
-	#[allow(dead_code)]
-	pub name: String,
-	#[allow(dead_code)]
 	pub dir: PathBuf,
 	pub processes: HashMap<String, ManagedProcess>,
 }
@@ -36,8 +33,6 @@ pub struct ManagedProcess {
 	pub def: ProcessDef,
 	pub state: ProcessState,
 	pub output: OutputCapture,
-	#[allow(dead_code)]
-	pub started_at: Option<Instant>,
 	pub retry_count: u32,
 	cancel: Option<tokio::sync::watch::Sender<bool>>,
 }
@@ -94,6 +89,49 @@ impl Supervisor {
 		all: bool,
 		filter: &[String],
 	) -> Result<String, String> {
+		// If the service is already managed and specific processes are requested,
+		// start only those stopped/failed processes within the existing service.
+		if !filter.is_empty() {
+			let mut services = self.services.write().await;
+			if let Some(managed) = services.get_mut(name) {
+				let mut started = Vec::new();
+				for proc_name in filter {
+					let mp = match managed.processes.get_mut(proc_name.as_str()) {
+						Some(mp) => mp,
+						None => return Err(format!("{}/{}: not found", name, proc_name)),
+					};
+					if mp.state.is_running() {
+						started.push(format!("{}/{}: already running", name, proc_name));
+						continue;
+					}
+					// Reset and start this process
+					if let Some(cancel) = mp.cancel.take() {
+						let _ = cancel.send(true);
+					}
+					mp.state = ProcessState::Stopped;
+					mp.retry_count = 0;
+
+					let output = OutputCapture::new(
+						&self.config.log_dir, name, proc_name, self.config.max_log_size,
+					);
+					let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+					mp.output = output.clone();
+					mp.cancel = Some(cancel_tx);
+
+					let sup = Arc::clone(self);
+					let svc = name.to_string();
+					let pname = proc_name.clone();
+					let def = mp.def.clone();
+					let d = dir.to_path_buf();
+					tokio::spawn(async move {
+						run_process_loop(sup, svc, pname, def, d, output, cancel_rx).await;
+					});
+					started.push(format!("{}/{}: starting", name, proc_name));
+				}
+				return Ok(started.join("\n"));
+			}
+		}
+
 		{
 			let services = self.services.read().await;
 			if let Some(managed) = services.get(name) {
@@ -130,7 +168,6 @@ impl Supervisor {
 				def: proc_def.clone(),
 				state: ProcessState::Stopped,
 				output: output.clone(),
-				started_at: None,
 				retry_count: 0,
 				cancel: Some(cancel_tx),
 			};
@@ -162,9 +199,8 @@ impl Supervisor {
 			let mut services = self.services.write().await;
 			services.insert(
 				name.to_string(),
-				ManagedService {
-					name: name.to_string(),
-					dir: dir.to_path_buf(),
+			ManagedService {
+				dir: dir.to_path_buf(),
 					processes: managed_processes,
 				},
 			);
@@ -368,7 +404,26 @@ async fn run_process_loop(
 			}
 		};
 
-		let pid = child.id().unwrap_or(0) as u32;
+		let pid = match child.id() {
+			Some(id) => id,
+			None => {
+				let msg = format!(
+					"[kagaya] {}/{} exited before PID could be read\n",
+					service, process
+				);
+				output.write(msg.as_bytes()).await;
+				let exit_result = child.wait().await;
+				let code = exit_result.ok().and_then(|s| s.code()).unwrap_or(-1);
+				update_state(
+					&supervisor,
+					&service,
+					&process,
+					ProcessState::Failed { exit_code: code },
+				)
+				.await;
+				return;
+			}
+		};
 		let started_at = Instant::now();
 		update_state(
 			&supervisor,
@@ -510,6 +565,7 @@ async fn spawn_process(def: &ProcessDef, dir: &Path) -> Result<Child, String> {
 	let mut cmd = Command::new("sh");
 	cmd.args(["-c", &def.command])
 		.current_dir(dir)
+		.stdin(Stdio::null())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.process_group(0);
@@ -548,6 +604,9 @@ async fn update_state(
 
 /// Send SIGTERM to a process group, then SIGKILL after 3 seconds.
 pub fn kill_process_tree(pid: u32) {
+	if pid == 0 {
+		return;
+	}
 	use nix::sys::signal::{killpg, Signal};
 	use nix::unistd::Pid;
 	let pgid = Pid::from_raw(pid as i32);

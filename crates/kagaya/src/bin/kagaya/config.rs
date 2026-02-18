@@ -17,10 +17,11 @@ pub struct GlobalConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct DaemonConfig {
 	#[serde(default = "default_idle_timeout")]
+	#[allow(dead_code)]
 	pub idle_timeout: u64,
+	#[allow(dead_code)]
 	pub log_dir: Option<String>,
 	#[serde(default = "default_port")]
 	pub port: u16,

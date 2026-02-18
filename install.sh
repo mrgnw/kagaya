@@ -67,10 +67,10 @@ tar -xzf "${tmpdir}/${archive}" -C "${tmpdir}"
 mkdir -p "${install_dir}"
 mv "${tmpdir}/${bin}" "${install_dir}/${bin}"
 chmod +x "${install_dir}/${bin}"
-ln -sf "${install_dir}/${bin}" "${install_dir}/ub"
+ln -sf "${install_dir}/${bin}" "${install_dir}/ky"
 
 echo "installed ${install_dir}/${bin}"
-echo "created alias ${install_dir}/ub"
+echo "created alias ${install_dir}/ky"
 
 # --- install shell completions ---
 
@@ -78,25 +78,25 @@ completion_dir="${HOME}/.local/share/kagaya/completions"
 mkdir -p "${completion_dir}"
 
 for shell in bash zsh fish; do
-	completion_url="https://raw.githubusercontent.com/${repo}/${tag}/completions/ub.${shell}"
-	download "${completion_url}" "${completion_dir}/ub.${shell}" 2>/dev/null || true
+	completion_url="https://raw.githubusercontent.com/${repo}/${tag}/completions/ky.${shell}"
+	download "${completion_url}" "${completion_dir}/ky.${shell}" 2>/dev/null || true
 done
 
-if [ -f "${completion_dir}/ub.bash" ]; then
+if [ -f "${completion_dir}/ky.bash" ]; then
 	echo
 	echo "shell completions installed to ${completion_dir}"
 	echo
 	echo "enable tab completion:"
 	echo
 	echo "  bash:"
-	echo "    echo 'source ${completion_dir}/ub.bash' >> ~/.bashrc"
+	echo "    echo 'source ${completion_dir}/ky.bash' >> ~/.bashrc"
 	echo
 	echo "  zsh:"
 	echo "    echo 'fpath=(${completion_dir} \$fpath)' >> ~/.zshrc"
 	echo "    echo 'autoload -Uz compinit && compinit' >> ~/.zshrc"
 	echo
 	echo "  fish:"
-	echo "    ln -s ${completion_dir}/ub.fish ~/.config/fish/completions/"
+	echo "    ln -s ${completion_dir}/ky.fish ~/.config/fish/completions/"
 fi
 
 # --- PATH hint ---

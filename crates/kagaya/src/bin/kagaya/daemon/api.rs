@@ -324,26 +324,46 @@ async fn handle_ws_echo(mut socket: WebSocket, state: AppState, name: String) {
 		}
 	}
 
-	let mut receivers: Vec<(String, tokio::sync::broadcast::Receiver<Vec<u8>>)> = outputs
-		.iter()
-		.map(|(name, capture)| (name.clone(), capture.subscribe()))
-		.collect();
+	let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+	for (_, capture) in &outputs {
+		let mut broadcast_rx = capture.subscribe();
+		let tx = tx.clone();
+		tokio::spawn(async move {
+			loop {
+				match broadcast_rx.recv().await {
+					Ok(data) => {
+						if tx.send(data).await.is_err() {
+							break;
+						}
+					}
+					Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+					Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+				}
+			}
+		});
+	}
+	drop(tx);
 
 	loop {
-		let mut any = false;
-		for (_proc_name, rx) in &mut receivers {
-			match rx.try_recv() {
-				Ok(data) => {
-					any = true;
-					let _ = socket.send(Message::Binary(data.into())).await;
+		tokio::select! {
+			biased;
+			msg = socket.recv() => {
+				match msg {
+					Some(Ok(Message::Close(_))) | None => break,
+					_ => {}
 				}
-				Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
-				Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
-				Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {}
 			}
-		}
-		if !any {
-			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			data = rx.recv() => {
+				match data {
+					Some(bytes) => {
+						if socket.send(Message::Binary(bytes.into())).await.is_err() {
+							break;
+						}
+					}
+					None => break,
+				}
+			}
 		}
 	}
 }

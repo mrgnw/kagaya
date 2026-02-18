@@ -4,7 +4,7 @@
 
 # kagaya
 
-A native Rust process supervisor for managing multiple projects. Each project keeps its own `Procfile`, and kagaya orchestrates them all from anywhere with auto-restart, log management, and live monitoring.
+A native Rust process supervisor for managing multiple projects. Each project keeps its own `services.toml`, and kagaya orchestrates them all from anywhere with auto-restart, log management, and live monitoring.
 
 Inspired by [overmind](https://github.com/DarthSim/overmind) and [foreman](https://github.com/ddollar/foreman).
 
@@ -61,38 +61,45 @@ ln -s ~/.local/share/kagaya/completions/ky.fish ~/.config/fish/completions/
 ky init
 ```
 
-This creates a projects config at `~/.config/kagaya/projects`.
+This creates `~/.config/kagaya/projects.toml`.
 
-### 2. Create a Procfile in your project
+### 2. Create a services.toml in your project
 
-Each project you want to manage needs a `Procfile` in its root directory. A Procfile lists the processes to run — one per line, in `name: command` format:
+Each project you want to manage needs a `services.toml` in its root directory. It defines the processes to run:
 
-```sh
-# ~/dev/myapp/Procfile
-web: npm run dev
-api: python server.py
-worker: ruby worker.rb
+```toml
+# ~/dev/myapp/services.toml
+web = "npm run dev"
+api = "python server.py"
+worker = "ruby worker.rb"
 ```
 
-This is the standard [Procfile](https://devcenter.heroku.com/articles/procfile) format. Each line becomes a named process that kagaya will manage.
+Each key becomes a named process that kagaya will manage. For more control:
 
-### 3. Register your project with kagaya
+```toml
+[web]
+run = "npm run dev"
+
+[migrate]
+run = "python manage.py migrate"
+type = "task"          # runs once, no auto-restart
+```
+
+### 3. Register your project
 
 ```sh
 ky add myapp ~/dev/myapp
 ```
 
-This tells kagaya "there's a project called `myapp` at `~/dev/myapp` that has a Procfile."
+This tells kagaya "there's a project called `myapp` at `~/dev/myapp` that has a services.toml."
 
-**Shorthand:** If you're already in the project directory with a Procfile, just run:
+**Shorthand:** If you're already in the project directory:
 
 ```sh
 cd ~/dev/myapp
 ky add
 # myapp: added (/Users/you/dev/myapp)
 ```
-
-This automatically uses the directory name as the project name.
 
 ### 4. Start it
 
@@ -103,41 +110,43 @@ ky start          # or start everything
 
 ## How it fits together
 
-kagaya has two layers of config:
+kagaya uses two config files:
 
-**Projects file** (`~/.config/kagaya/projects`) — maps project names to directories:
+**Projects** (`~/.config/kagaya/projects.toml`) — maps project names to directories:
 
-```
-myapp: ~/dev/myapp
-api: ~/dev/api-server
-frontend: ~/dev/frontend
-```
-
-**Commands file** (`~/.config/kagaya/commands`) — optional, defines standalone commands in Procfile format:
-
-```
-tunnel: ssh -N -L 5432:localhost:5432 prod-server
-sync: watchman-wait . --max-events 0 -p '*.json' | xargs ./sync.sh
+```toml
+myapp = "~/dev/myapp"
+api = "~/dev/api-server"
+frontend = "~/dev/frontend"
 ```
 
-Each project directory has its own **Procfile** that defines what processes to run:
+You can also define standalone commands directly:
 
-```
-# ~/dev/myapp/Procfile
-web: npm run dev
-api: python server.py
+```toml
+[tunnel]
+run = "ssh -N -L 5432:localhost:5432 prod-server"
 
-# ~/dev/api-server/Procfile
-server: cargo run
-worker: cargo run --bin worker
-
-# ~/dev/frontend/Procfile
-dev: pnpm dev
+[sync]
+run = "watchman-wait . --max-events 0 -p '*.json' | xargs ./sync.sh"
+type = "task"
 ```
 
-When you run `ky start myapp`, kagaya looks up `myapp` → `~/dev/myapp`, then starts its daemon in that directory using the `Procfile`. Each project gets its own isolated supervisor instance — one project crashing won't affect the others.
+Each project directory has its own **services.toml** that defines what processes to run:
 
-Standalone commands from the `commands` file are auto-expanded into generated Procfiles under `~/.config/kagaya/_commands/`.
+```toml
+# ~/dev/myapp/services.toml
+web = "npm run dev"
+api = "python server.py"
+
+# ~/dev/api-server/services.toml
+server = "cargo run"
+worker = "cargo run --bin worker"
+
+# ~/dev/frontend/services.toml
+dev = "pnpm dev"
+```
+
+When you run `ky start myapp`, kagaya looks up `myapp` → `~/dev/myapp`, reads `services.toml`, and starts those processes. Each project gets its own isolated supervisor — one project crashing won't affect the others.
 
 ## Usage
 
@@ -148,7 +157,7 @@ ky add [name] [dir]    # register a project directory (uses cwd if omitted)
 ky status              # show all projects
 ky start [name]        # start project(s)
 ky stop [name]         # stop project(s)
-ky reload [name]       # restart project(s) (picks up Procfile changes)
+ky reload [name]       # restart project(s) (picks up config changes)
 ky kill [name]         # kill process(es) in project(s)
 ky restart [name]      # restart process(es) in project(s)
 ky echo [name]         # live stream logs from project(s)
@@ -205,15 +214,23 @@ cd ~/dev/myapp && ky status  # show status of myapp (context-aware)
 
 ## Config
 
-The projects file lives at `~/.config/kagaya/projects` (respects `$XDG_CONFIG_HOME`).
+### projects.toml
 
-You can edit it directly or use `ky add`:
+Lives at `~/.config/kagaya/projects.toml` (respects `$XDG_CONFIG_HOME`).
 
-```
-# name: directory
-myapp: ~/dev/myapp
-api: ~/dev/api-server
-frontend: ~/dev/frontend
+```toml
+# directory-based projects (each has its own services.toml)
+myapp = "~/dev/myapp"
+api = "~/dev/api-server"
+frontend = "~/dev/frontend"
+
+# standalone commands (no project directory needed)
+[tunnel]
+run = "ssh -N -L 5432:localhost:5432 prod-server"
+
+[db-backup]
+run = "pg_dump mydb > backup.sql"
+type = "task"
 ```
 
 Quick add from a project directory:
@@ -223,14 +240,48 @@ cd ~/dev/myapp && ky add myapp        # uses cwd, custom name
 ky add myapp ~/dev/myapp              # full form with explicit path
 ```
 
-Optionally, define standalone commands in `~/.config/kagaya/commands`:
+### services.toml
 
-```
-tunnel: ssh -N -L 5432:localhost:5432 prod-server
-sync: watchman-wait . --max-events 0 -p '*.json' | xargs ./sync.sh
+Each project directory contains a `services.toml`:
+
+```toml
+# simple form — just the command
+web = "npm run dev"
+api = "python server.py"
+
+# full form — with options
+[worker]
+run = "ruby worker.rb"
+restart = true
+max_retries = 5
+restart_delay = 2
+env = { RAILS_ENV = "development" }
+
+# tasks — run once, no auto-restart
+[migrate]
+run = "python manage.py migrate"
+type = "task"
 ```
 
-See [tmux cheatsheet](tmux.md) for navigating connected sessions (scrolling, copying error text, etc).
+### config.toml (optional)
+
+Global settings at `~/.config/kagaya/config.toml`:
+
+```toml
+[daemon]
+port = 13369
+
+[logs]
+max_size_bytes = 10485760    # 10MB, triggers rotation
+max_age_days = 7
+max_files = 5
+
+[defaults]
+restart = true
+max_retries = 3
+restart_delay = 1
+env = { FORCE_COLOR = "1", CLICOLOR_FORCE = "1" }
+```
 
 ## How it works
 
@@ -242,9 +293,9 @@ kagaya uses native Rust process supervision with:
 - Unix socket communication for CLI commands
 - HTTP/WebSocket API for the web UI
 
-Each project directory gets its own independent supervisor instance. kagaya knows where each project lives and dispatches commands to the right supervisor.
+Each project gets its own isolated supervisor. kagaya knows where each project lives and dispatches commands to the right supervisor.
 
-Standalone commands are auto-expanded into generated Procfiles under `~/.config/kagaya/_commands/` (an internal directory that you shouldn't edit directly).
+Standalone commands from `projects.toml` are auto-expanded into synthetic services under `~/.config/kagaya/_commands/`.
 
 ## License
 

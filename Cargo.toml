@@ -20,6 +20,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 owo-colors = "4"
 plist = "1"
+muzan = { path = "../muzan" }
 
 [profile.release]
 lto = "thin"

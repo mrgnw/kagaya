@@ -6,6 +6,7 @@ mod logs;
 mod migrate;
 mod protocol;
 mod self_update;
+mod utils;
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -40,6 +41,7 @@ fn main() {
 		"version" | "--version" | "-V" => println!("kagaya {}", env!("CARGO_PKG_VERSION")),
 		"init" => cmd_init(),
 		"add" => cmd_add(&args[1..]),
+		"remove" | "rm" => cmd_remove(&args[1..]),
 		"status" | "st" => cmd_status(&args[1..]),
 		"all" => cmd_status(&["all".to_string()]),
 		"start" => cmd_start(&args[1..]),
@@ -131,6 +133,7 @@ fn print_usage() {
 	eprintln!("{}", "config".cyan().bold());
 	eprintln!("  {} [name] [process]        Show services.toml or process command", "show".bold());
 	eprintln!("  {} [name] [dir]             Register a project", "add".bold());
+	eprintln!("  {} <name>                Unregister a project", "remove".bold());
 	eprintln!("  {}                         Create config files", "init".bold());
 	eprintln!("  {} [--force]             Migrate ubermind Procfiles to kagaya TOML", "migrate".bold());
 	eprintln!();
@@ -242,6 +245,49 @@ fn cmd_add(args: &[String]) {
 		.unwrap();
 	writeln!(file, "{} = {:?}", name, dir.display().to_string()).unwrap();
 	eprintln!("{}: added ({})", name, dir.display());
+}
+
+fn cmd_remove(args: &[String]) {
+	let name = if let Some(n) = args.first() {
+		n.clone()
+	} else {
+		let dir = std::env::current_dir().unwrap();
+		dir.file_name()
+			.unwrap_or_default()
+			.to_string_lossy()
+			.to_lowercase()
+			.chars()
+			.map(|c| if c.is_alphanumeric() { c } else { '-' })
+			.collect::<String>()
+	};
+
+	let config_dir = protocol::config_dir();
+	let projects_file = config_dir.join("projects.toml");
+
+	let content = match std::fs::read_to_string(&projects_file) {
+		Ok(c) => c,
+		Err(_) => {
+			eprintln!("no projects.toml found");
+			std::process::exit(1);
+		}
+	};
+
+	let mut table: toml::Table = match toml::from_str(&content) {
+		Ok(t) => t,
+		Err(e) => {
+			eprintln!("failed to parse projects.toml: {}", e);
+			std::process::exit(1);
+		}
+	};
+
+	if table.remove(&name).is_none() {
+		eprintln!("{}: not found in projects.toml", name);
+		std::process::exit(1);
+	}
+
+	let new_content = toml::to_string_pretty(&table).unwrap();
+	std::fs::write(&projects_file, new_content).unwrap();
+	eprintln!("{}: removed", name);
 }
 
 // --- Daemon communication ---
@@ -676,17 +722,22 @@ fn cmd_echo(args: &[String]) {
 		(svc, proc.or_else(|| args.get(1).cloned()))
 	};
 
+	let mut offset = 0u64;
 	loop {
 		let response = send_request(&Request::Logs {
 			service: service.clone(),
 			process: process.clone(),
 			follow: true,
+			offset,
 		});
 
 		match response {
-			Response::Log { line } => {
-				print!("{}", line);
-				let _ = io::stdout().flush();
+			Response::Log { line, offset: new_offset } => {
+				if !line.is_empty() {
+					print!("{}", line);
+					let _ = io::stdout().flush();
+				}
+				offset = new_offset;
 			}
 			Response::Error { message } => {
 				eprintln!("error: {}", message);
@@ -1168,23 +1219,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 
 // --- Formatting helpers ---
 
-fn format_uptime(secs: u64) -> String {
-	if secs < 60 {
-		format!("{}s", secs)
-	} else if secs < 3600 {
-		let m = secs / 60;
-		let s = secs % 60;
-		if s == 0 { format!("{}m", m) } else { format!("{}m{}s", m, s) }
-	} else if secs < 86400 {
-		let h = secs / 3600;
-		let m = (secs % 3600) / 60;
-		if m == 0 { format!("{}h", h) } else { format!("{}h{}m", h, m) }
-	} else {
-		let d = secs / 86400;
-		let h = (secs % 86400) / 3600;
-		if h == 0 { format!("{}d", d) } else { format!("{}d{}h", d, h) }
-	}
-}
+use utils::format_uptime;
 
 fn parse_dot_target(name: &str) -> (&str, Option<&str>) {
 	if let Some(dot) = name.find('.') {

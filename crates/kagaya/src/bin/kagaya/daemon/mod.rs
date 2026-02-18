@@ -43,14 +43,18 @@ pub async fn run(args: &[String]) {
 		});
 	}
 
+	let shutdown = Arc::new(tokio::sync::Notify::new());
+
 	let sup_socket = Arc::clone(&supervisor);
+	let shutdown_socket = Arc::clone(&shutdown);
 	let paths_socket = paths.clone();
 	let socket_handle = tokio::spawn(async move {
 		muzan::server::run_socket_server_with_error(
 			&paths_socket,
 			move |req: Request| {
 				let sup = Arc::clone(&sup_socket);
-				async move { handle_request(&sup, req).await }
+				let shutdown = Arc::clone(&shutdown_socket);
+				async move { handle_request(&sup, req, &shutdown).await }
 			},
 			Some(|msg: String| Response::Error { message: msg }),
 		)
@@ -80,13 +84,29 @@ pub async fn run(args: &[String]) {
 		_ = tokio::signal::ctrl_c() => {
 			tracing::info!("shutting down");
 		}
+		_ = shutdown.notified() => {
+			tracing::info!("shutdown requested");
+		}
+	}
+
+	// Gracefully stop all supervised processes
+	let services: Vec<String> = supervisor
+		.inner
+		.services
+		.read()
+		.await
+		.keys()
+		.cloned()
+		.collect();
+	for name in &services {
+		let _ = supervisor.stop_service(name).await;
 	}
 
 	let _ = std::fs::remove_file(paths.socket_path());
 	let _ = std::fs::remove_file(paths.pid_path());
 }
 
-async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Request) -> Response {
+async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Request, shutdown: &Arc<tokio::sync::Notify>) -> Response {
 	match request {
 		Request::Ping => Response::Pong,
 		Request::Status => {
@@ -141,22 +161,20 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 				Err(e) => Response::Error { message: e },
 			}
 		}
-		Request::Logs { service, process, follow: _ } => {
+		Request::Logs { service, process, follow: _, offset } => {
 			match supervisor.get_output(&service, process.as_deref()).await {
 				Ok(capture) => {
-					let snapshot = capture.snapshot().await;
+					let (data, new_offset) = capture.snapshot_from(offset).await;
 					Response::Log {
-						line: String::from_utf8_lossy(&snapshot).to_string(),
+						line: String::from_utf8_lossy(&data).to_string(),
+						offset: new_offset,
 					}
 				}
 				Err(e) => Response::Error { message: e },
 			}
 		}
 		Request::Shutdown => {
-			tokio::spawn(async {
-				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-				std::process::exit(0);
-			});
+			shutdown.notify_one();
 			Response::Ok {
 				message: Some("shutting down".to_string()),
 			}
