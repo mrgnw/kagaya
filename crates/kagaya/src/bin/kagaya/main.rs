@@ -1,10 +1,12 @@
 mod config;
 mod daemon;
+mod koku_client;
 mod launchd;
 mod logs;
 mod migrate;
 mod protocol;
 mod self_update;
+mod utils;
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -39,6 +41,7 @@ fn main() {
 		"version" | "--version" | "-V" => println!("kagaya {}", env!("CARGO_PKG_VERSION")),
 		"init" => cmd_init(),
 		"add" => cmd_add(&args[1..]),
+		"remove" | "rm" => cmd_remove(&args[1..]),
 		"status" | "st" => cmd_status(&args[1..]),
 		"all" => cmd_status(&["all".to_string()]),
 		"start" => cmd_start(&args[1..]),
@@ -55,7 +58,8 @@ fn main() {
 			let force = args[1..].iter().any(|a| a == "--force" || a == "-f");
 			migrate::cmd_migrate(force);
 		}
-		"launchd" | "launch" => launchd::cmd_launchd(&args[1..]),
+		"cron" => cmd_cron(&args[1..]),
+		"launchd" | "launch" | "lctl" => launchd::cmd_launchd(&args[1..]),
 		"self" => {
 			match args.get(1).map(|s| s.as_str()) {
 				Some("update") => self_update::cmd_self_update(),
@@ -129,8 +133,17 @@ fn print_usage() {
 	eprintln!("{}", "config".cyan().bold());
 	eprintln!("  {} [name] [process]        Show services.toml or process command", "show".bold());
 	eprintln!("  {} [name] [dir]             Register a project", "add".bold());
+	eprintln!("  {} <name>                Unregister a project", "remove".bold());
 	eprintln!("  {}                         Create config files", "init".bold());
 	eprintln!("  {} [--force]             Migrate ubermind Procfiles to kagaya TOML", "migrate".bold());
+	eprintln!();
+
+	eprintln!("{}", "cron (via koku)".cyan().bold());
+	eprintln!("  {} [status|--json]       Show cron job status", "cron".bold());
+	eprintln!("  {} run <name>             Trigger a one-off run", "cron".bold());
+	eprintln!("  {} pause <name>           Pause a cron job", "cron".bold());
+	eprintln!("  {} resume <name>          Resume a cron job", "cron".bold());
+	eprintln!("  {} reload                 Reload koku config", "cron".bold());
 	eprintln!();
 
 	eprintln!("{}", "system".cyan().bold());
@@ -232,6 +245,49 @@ fn cmd_add(args: &[String]) {
 		.unwrap();
 	writeln!(file, "{} = {:?}", name, dir.display().to_string()).unwrap();
 	eprintln!("{}: added ({})", name, dir.display());
+}
+
+fn cmd_remove(args: &[String]) {
+	let name = if let Some(n) = args.first() {
+		n.clone()
+	} else {
+		let dir = std::env::current_dir().unwrap();
+		dir.file_name()
+			.unwrap_or_default()
+			.to_string_lossy()
+			.to_lowercase()
+			.chars()
+			.map(|c| if c.is_alphanumeric() { c } else { '-' })
+			.collect::<String>()
+	};
+
+	let config_dir = protocol::config_dir();
+	let projects_file = config_dir.join("projects.toml");
+
+	let content = match std::fs::read_to_string(&projects_file) {
+		Ok(c) => c,
+		Err(_) => {
+			eprintln!("no projects.toml found");
+			std::process::exit(1);
+		}
+	};
+
+	let mut table: toml::Table = match toml::from_str(&content) {
+		Ok(t) => t,
+		Err(e) => {
+			eprintln!("failed to parse projects.toml: {}", e);
+			std::process::exit(1);
+		}
+	};
+
+	if table.remove(&name).is_none() {
+		eprintln!("{}: not found in projects.toml", name);
+		std::process::exit(1);
+	}
+
+	let new_content = toml::to_string_pretty(&table).unwrap();
+	std::fs::write(&projects_file, new_content).unwrap();
+	eprintln!("{}: removed", name);
 }
 
 // --- Daemon communication ---
@@ -666,17 +722,22 @@ fn cmd_echo(args: &[String]) {
 		(svc, proc.or_else(|| args.get(1).cloned()))
 	};
 
+	let mut offset = 0u64;
 	loop {
 		let response = send_request(&Request::Logs {
 			service: service.clone(),
 			process: process.clone(),
 			follow: true,
+			offset,
 		});
 
 		match response {
-			Response::Log { line } => {
-				print!("{}", line);
-				let _ = io::stdout().flush();
+			Response::Log { line, offset: new_offset } => {
+				if !line.is_empty() {
+					print!("{}", line);
+					let _ = io::stdout().flush();
+				}
+				offset = new_offset;
 			}
 			Response::Error { message } => {
 				eprintln!("error: {}", message);
@@ -760,6 +821,95 @@ fn cmd_show(args: &[String]) {
 			};
 			let optional = if !proc.autostart { " (optional)".dimmed().to_string() } else { String::new() };
 			println!("{}{}{} {}", proc.name.cyan(), type_tag, optional, proc.command.dimmed());
+		}
+	}
+}
+
+fn cmd_cron(args: &[String]) {
+	let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+	match subcmd {
+		"status" | "st" => {
+			let json = args.iter().any(|a| a == "--json");
+			match koku_client::fetch_status() {
+				Some(jobs) => {
+					if json {
+						println!("{}", serde_json::to_string_pretty(&jobs).unwrap());
+					} else if jobs.is_empty() {
+						eprintln!("no cron jobs configured");
+					} else {
+						let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
+						for job in &jobs {
+							let sym = koku_client::state_symbol(&job.state);
+							let extra = match (&job.last_exit, &job.next_run) {
+								(Some(code), Some(next)) => format!("exit {}  next {}", code, next),
+								(Some(code), None) => format!("exit {}", code),
+								(None, Some(next)) => format!("next {}", next),
+								(None, None) => String::new(),
+							};
+							println!("  {} {:<width$} {}{}", sym, job.name, job.state,
+								if extra.is_empty() { String::new() } else { format!("  {}", extra) },
+								width = max_name);
+						}
+					}
+				}
+				None => {
+					eprintln!("koku daemon not running");
+					std::process::exit(1);
+				}
+			}
+		}
+		"run" => {
+			let name = args.get(1).unwrap_or_else(|| {
+				eprintln!("usage: ky cron run <name>");
+				std::process::exit(1);
+			});
+			match koku_client::run_job(name) {
+				Ok(msg) => eprintln!("{}", msg),
+				Err(e) => {
+					eprintln!("error: {}", e);
+					std::process::exit(1);
+				}
+			}
+		}
+		"pause" => {
+			let name = args.get(1).unwrap_or_else(|| {
+				eprintln!("usage: ky cron pause <name>");
+				std::process::exit(1);
+			});
+			match koku_client::pause_job(name) {
+				Ok(msg) => eprintln!("{}", msg),
+				Err(e) => {
+					eprintln!("error: {}", e);
+					std::process::exit(1);
+				}
+			}
+		}
+		"resume" => {
+			let name = args.get(1).unwrap_or_else(|| {
+				eprintln!("usage: ky cron resume <name>");
+				std::process::exit(1);
+			});
+			match koku_client::resume_job(name) {
+				Ok(msg) => eprintln!("{}", msg),
+				Err(e) => {
+					eprintln!("error: {}", e);
+					std::process::exit(1);
+				}
+			}
+		}
+		"reload" => {
+			match koku_client::reload() {
+				Ok(msg) => eprintln!("{}", msg),
+				Err(e) => {
+					eprintln!("error: {}", e);
+					std::process::exit(1);
+				}
+			}
+		}
+		_ => {
+			eprintln!("usage: ky cron [status|run|pause|resume|reload]");
+			std::process::exit(1);
 		}
 	}
 }
@@ -993,6 +1143,51 @@ fn render_status(args: &[String]) -> usize {
 			println!("{} {}  not running", "○".dimmed(), "serve".bold());
 		}
 		lines += 1;
+
+		lines += render_cron_status();
+	}
+
+	lines
+}
+
+fn render_cron_status() -> usize {
+	let jobs = match koku_client::fetch_status() {
+		Some(jobs) if !jobs.is_empty() => jobs,
+		_ => return 0,
+	};
+
+	let mut lines = 0;
+	println!();
+	lines += 1;
+
+	let has_running = jobs.iter().any(|j| j.state == koku::JobState::Running);
+	let symbol = if has_running { "●".green().to_string() } else { "○".dimmed().to_string() };
+	println!("{} {}", symbol, "cron".bold());
+	lines += 1;
+
+	let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
+
+	for job in &jobs {
+		let sym = koku_client::state_symbol(&job.state);
+		let state_str = job.state.to_string();
+		let (sym_colored, state_colored) = match job.state {
+			koku::JobState::Running => (sym.green().to_string(), state_str.green().to_string()),
+			koku::JobState::Idle => (sym.dimmed().to_string(), state_str.dimmed().to_string()),
+			koku::JobState::Paused => (sym.dimmed().to_string(), state_str.dimmed().to_string()),
+			koku::JobState::Failing => (sym.yellow().to_string(), state_str.yellow().to_string()),
+			koku::JobState::Stopped => (sym.red().to_string(), state_str.red().to_string()),
+		};
+
+		let extra = match (&job.last_exit, &job.next_run) {
+			(Some(code), Some(next)) => format!("exit {}  next {}", code, next),
+			(Some(code), None) => format!("exit {}", code),
+			(None, Some(next)) => format!("next {}", next),
+			(None, None) => String::new(),
+		};
+
+		let extra_str = if extra.is_empty() { String::new() } else { format!("  {}", extra) };
+		println!("  {} {:<width$} {}{}", sym_colored, job.name, state_colored, extra_str, width = max_name);
+		lines += 1;
 	}
 
 	lines
@@ -1024,23 +1219,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 
 // --- Formatting helpers ---
 
-fn format_uptime(secs: u64) -> String {
-	if secs < 60 {
-		format!("{}s", secs)
-	} else if secs < 3600 {
-		let m = secs / 60;
-		let s = secs % 60;
-		if s == 0 { format!("{}m", m) } else { format!("{}m{}s", m, s) }
-	} else if secs < 86400 {
-		let h = secs / 3600;
-		let m = (secs % 3600) / 60;
-		if m == 0 { format!("{}h", h) } else { format!("{}h{}m", h, m) }
-	} else {
-		let d = secs / 86400;
-		let h = (secs % 86400) / 3600;
-		if h == 0 { format!("{}d", d) } else { format!("{}d{}h", d, h) }
-	}
-}
+use utils::format_uptime;
 
 fn parse_dot_target(name: &str) -> (&str, Option<&str>) {
 	if let Some(dot) = name.find('.') {
@@ -1111,16 +1290,56 @@ fn resolve_target_names(args: &[String], entries: &BTreeMap<String, ServiceEntry
 }
 
 fn check_alias_hint() {
-	let exe = std::env::current_exe().unwrap_or_default();
-	let name = exe.file_name().unwrap_or_default().to_string_lossy();
-	if name == "kagaya" {
-		if let Some(dir) = exe.parent() {
-			let ky = dir.join("ky");
-			if !ky.exists() {
-				eprintln!();
-				eprintln!("tip: create a shorter alias:");
-				eprintln!("ln -s {} {}", exe.display(), ky.display());
-			}
+	let shell = detect_shell();
+	let rc_file = shell_rc_file(&shell);
+
+	let mut hints: Vec<String> = Vec::new();
+
+	// Check if 'ky' alias/binary exists
+	if !command_exists("ky") {
+		hints.push("alias ky='kagaya'".to_string());
+	}
+
+	// Check if 'lctl' alias/binary exists
+	if !command_exists("lctl") {
+		hints.push("alias lctl='ky launchd'".to_string());
+	}
+
+	if hints.is_empty() {
+		return;
+	}
+
+	eprintln!();
+	eprintln!("tip: add to {}:", rc_file);
+	for hint in &hints {
+		eprintln!("  {}", hint);
+	}
+}
+
+fn detect_shell() -> String {
+	// Check SHELL env var
+	if let Ok(shell) = std::env::var("SHELL") {
+		if let Some(name) = shell.rsplit('/').next() {
+			return name.to_string();
 		}
 	}
+	"bash".to_string()
+}
+
+fn shell_rc_file(shell: &str) -> String {
+	let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+	match shell {
+		"zsh" => format!("{}/.zshrc", home),
+		"fish" => format!("{}/.config/fish/config.fish", home),
+		"bash" => format!("{}/.bashrc", home),
+		_ => format!("~/.{}rc", shell),
+	}
+}
+
+fn command_exists(name: &str) -> bool {
+	std::process::Command::new("sh")
+		.args(["-c", &format!("command -v {} >/dev/null 2>&1", name)])
+		.status()
+		.map(|s| s.success())
+		.unwrap_or(false)
 }

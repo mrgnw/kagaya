@@ -40,6 +40,10 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
 		)
 		.route("/api/services/{name}/echo", get(echo_service))
 		.route("/ws/echo/{name}", get(ws_echo))
+		.route("/api/cron", get(cron_status))
+		.route("/api/cron/{name}/run", post(cron_run))
+		.route("/api/cron/{name}/pause", post(cron_pause))
+		.route("/api/cron/{name}/resume", post(cron_resume))
 		.fallback(static_handler)
 		.layer(CorsLayer::permissive())
 		.with_state(state)
@@ -237,6 +241,41 @@ async fn kill_process(
 		})
 }
 
+async fn cron_status() -> Result<Json<Vec<koku::JobStatus>>, (StatusCode, Json<ErrorResponse>)> {
+	crate::koku_client::fetch_status()
+		.map(Json)
+		.ok_or_else(|| {
+			(
+				StatusCode::SERVICE_UNAVAILABLE,
+				Json(ErrorResponse { error: "koku daemon not running".to_string() }),
+			)
+		})
+}
+
+async fn cron_run(
+	Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	crate::koku_client::run_job(&name)
+		.map(|msg| Json(ActionResponse { message: msg }))
+		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+async fn cron_pause(
+	Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	crate::koku_client::pause_job(&name)
+		.map(|msg| Json(ActionResponse { message: msg }))
+		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+async fn cron_resume(
+	Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	crate::koku_client::resume_job(&name)
+		.map(|msg| Json(ActionResponse { message: msg }))
+		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
 async fn echo_service(
 	State(state): State<AppState>,
 	Path(name): Path<String>,
@@ -285,26 +324,46 @@ async fn handle_ws_echo(mut socket: WebSocket, state: AppState, name: String) {
 		}
 	}
 
-	let mut receivers: Vec<(String, tokio::sync::broadcast::Receiver<Vec<u8>>)> = outputs
-		.iter()
-		.map(|(name, capture)| (name.clone(), capture.subscribe()))
-		.collect();
+	let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+	for (_, capture) in &outputs {
+		let mut broadcast_rx = capture.subscribe();
+		let tx = tx.clone();
+		tokio::spawn(async move {
+			loop {
+				match broadcast_rx.recv().await {
+					Ok(data) => {
+						if tx.send(data).await.is_err() {
+							break;
+						}
+					}
+					Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+					Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+				}
+			}
+		});
+	}
+	drop(tx);
 
 	loop {
-		let mut any = false;
-		for (_proc_name, rx) in &mut receivers {
-			match rx.try_recv() {
-				Ok(data) => {
-					any = true;
-					let _ = socket.send(Message::Binary(data.into())).await;
+		tokio::select! {
+			biased;
+			msg = socket.recv() => {
+				match msg {
+					Some(Ok(Message::Close(_))) | None => break,
+					_ => {}
 				}
-				Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
-				Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
-				Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {}
 			}
-		}
-		if !any {
-			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			data = rx.recv() => {
+				match data {
+					Some(bytes) => {
+						if socket.send(Message::Binary(bytes.into())).await.is_err() {
+							break;
+						}
+					}
+					None => break,
+				}
+			}
 		}
 	}
 }

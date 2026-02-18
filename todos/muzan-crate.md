@@ -4,11 +4,11 @@ branch: muzan
 
 ## Status: implemented
 
-All core features implemented and integrated into ubermind.
+All core features implemented and integrated into kagaya.
 
 ## What
 
-Extract ubermind's daemon plumbing into a reusable crate called `muzan`.
+Extract kagaya's daemon plumbing into a reusable crate called `muzan`.
 Named after Kibutsuji Muzan (Demon Slayer) — the progenitor demon who creates and commands all other demons.
 
 Any Rust CLI can use `muzan` to add a background daemon mode with IPC, auto-start, and lifecycle management.
@@ -39,7 +39,7 @@ No Rust crate exists for this. The ecosystem has:
 - [x] `clap.rs` — (feature = "clap") `DaemonCommand` enum: Run, Start, Stop, Status
 - [x] Doc comments on all public API
 
-### Integration into ubermind
+### Integration into kagaya
 - [x] `protocol.rs` — delegates path logic to `muzan::DaemonPaths`
 - [x] `daemon/mod.rs` — uses `muzan::server::run_socket_server_with_error`
 - [x] `main.rs` — uses `muzan::DaemonClient`, `muzan::ensure_daemon_with_args`, `muzan::client::is_running`
@@ -47,7 +47,7 @@ No Rust crate exists for this. The ecosystem has:
 ### Verified
 - [x] `cargo check --workspace` — zero warnings
 - [x] `cargo check -p muzan --features clap` — clean
-- [x] `cargo test -p ubermind` — 2/2 tests pass
+- [x] `cargo test -p kagaya` — 2/2 tests pass
 
 ## Future work
 - Publish muzan + kagaya to crates.io

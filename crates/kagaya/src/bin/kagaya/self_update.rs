@@ -71,14 +71,6 @@ pub fn cmd_self_update() {
 	let _ = fs::remove_dir_all(&tmpdir);
 
 	eprintln!("updated to {}", latest_clean);
-
-	let ky = install_dir.join("ky");
-	if !ky.exists() {
-		let kagaya = install_dir.join("kagaya");
-		if kagaya.exists() {
-			let _ = std::os::unix::fs::symlink(&kagaya, &ky);
-		}
-	}
 }
 
 fn fetch_latest_version() -> Result<String, String> {

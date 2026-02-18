@@ -1,4 +1,4 @@
-_ub_completion() {
+_ky_completion() {
 	local cur prev words cword
 	if declare -F _init_completion >/dev/null 2>&1; then
 		_init_completion || return
@@ -16,7 +16,7 @@ _ub_completion() {
 	local commands="status st start stop reload kill echo connect restart quit run init add serve ui self help version"
 	local flags="--all -a --daemon -d --stop --echo --restart --status -h --help -V --version"
 
-	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/ubermind/projects"
+	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects"
 	local projects=""
 	if [[ -f "$config_path" ]]; then
 		projects=$(grep -v '^#' "$config_path" 2>/dev/null | grep -v '^[[:space:]]*$' | cut -d: -f1 | tr -d ' ')
@@ -45,5 +45,5 @@ _ub_completion() {
 	fi
 }
 
-complete -F _ub_completion ub
-complete -F _ub_completion ubermind
+complete -F _ky_completion ky
+complete -F _ky_completion kagaya

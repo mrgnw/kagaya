@@ -97,6 +97,12 @@ release-all: (dist "aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-lin
 publish:
 	cargo publish -p kagaya
 
-# Install locally
+# Install locally (release build)
 install:
 	cargo install --path crates/kagaya
+	ln -sf ~/.cargo/bin/kagaya ~/.cargo/bin/ky
+
+# Install locally (debug build — fast iteration)
+dev-install:
+	cargo build --bin kagaya && cp target/debug/kagaya ~/.cargo/bin/kagaya
+	ln -sf ~/.cargo/bin/kagaya ~/.cargo/bin/ky

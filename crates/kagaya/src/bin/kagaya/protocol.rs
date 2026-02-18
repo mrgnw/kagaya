@@ -22,7 +22,13 @@ pub enum Request {
 	Restart { service: String, process: String },
 	Kill { service: String, process: String },
 	Status,
-	Logs { service: String, process: Option<String>, follow: bool },
+	Logs {
+		service: String,
+		process: Option<String>,
+		follow: bool,
+		#[serde(default)]
+		offset: u64,
+	},
 	Ping,
 	Shutdown,
 }
@@ -32,7 +38,7 @@ pub enum Request {
 pub enum Response {
 	Ok { message: Option<String> },
 	Status { services: Vec<ServiceStatus>, http_port: Option<u16> },
-	Log { line: String },
+	Log { line: String, #[serde(default)] offset: u64 },
 	Error { message: String },
 	Progress { service: String, message: String },
 	Pong,

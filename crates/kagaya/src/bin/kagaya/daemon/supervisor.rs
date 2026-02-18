@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::{self, GlobalConfig};
@@ -173,58 +172,4 @@ impl Supervisor {
 	}
 }
 
-#[cfg(target_os = "macos")]
-fn listening_ports_for_pids(target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
-	use libproc::processes::{pids_by_type, ProcFilter};
-	use netstat2::*;
-
-	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-	let proto = ProtocolFlags::TCP;
-	let sockets = match get_sockets_info(af, proto) {
-		Ok(s) => s,
-		Err(_) => return HashMap::new(),
-	};
-
-	let mut all_ports: HashMap<u32, Vec<u16>> = HashMap::new();
-	for si in &sockets {
-		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
-			if tcp.state == TcpState::Listen {
-				for pid in &si.associated_pids {
-					let ports = all_ports.entry(*pid).or_default();
-					if !ports.contains(&tcp.local_port) {
-						ports.push(tcp.local_port);
-					}
-				}
-			}
-		}
-	}
-
-	let mut result: HashMap<u32, Vec<u16>> = HashMap::new();
-	for &pid in target_pids {
-		if let Some(ports) = all_ports.get(&pid) {
-			result.insert(pid, ports.clone());
-			continue;
-		}
-		let group_pids = pids_by_type(ProcFilter::ByProgramGroup { pgrpid: pid }).unwrap_or_default();
-		let mut ports: Vec<u16> = Vec::new();
-		for gpid in &group_pids {
-			if let Some(p) = all_ports.get(gpid) {
-				for port in p {
-					if !ports.contains(port) {
-						ports.push(*port);
-					}
-				}
-			}
-		}
-		if !ports.is_empty() {
-			ports.sort();
-			result.insert(pid, ports);
-		}
-	}
-	result
-}
-
-#[cfg(not(target_os = "macos"))]
-fn listening_ports_for_pids(_target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
-	HashMap::new()
-}
+use crate::utils::listening_ports_for_pids;
