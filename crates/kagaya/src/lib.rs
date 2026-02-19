@@ -42,4 +42,4 @@ pub mod supervisor;
 
 pub use types::*;
 pub use output::OutputCapture;
-pub use supervisor::{Supervisor, SupervisorConfig, ManagedService, ManagedProcess};
+pub use supervisor::{Supervisor, SupervisorConfig, ManagedService, ManagedProcess, kill_process_tree, kill_port_holders};

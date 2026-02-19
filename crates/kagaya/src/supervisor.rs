@@ -209,7 +209,7 @@ impl Supervisor {
 		Ok(format!("{}: starting", name))
 	}
 
-	/// Stop all processes in a service. Sends SIGTERM then SIGKILL after 3s.
+	/// Stop all processes in a service. Kills process trees and verifies death.
 	pub async fn stop_service(self: &Arc<Self>, name: &str) -> Result<String, String> {
 		let mut services = self.services.write().await;
 		let managed = services
@@ -217,6 +217,7 @@ impl Supervisor {
 			.ok_or_else(|| format!("{}: not running", name))?;
 
 		let mut any_running = false;
+		let mut all_ports = Vec::new();
 		for (_, mp) in managed.processes.iter_mut() {
 			if mp.state.is_running() {
 				any_running = true;
@@ -224,7 +225,8 @@ impl Supervisor {
 					let _ = cancel.send(true);
 				}
 				if let ProcessState::Running { pid, .. } = &mp.state {
-					kill_process_tree(*pid);
+					let ports = kill_process_tree(*pid).await;
+					all_ports.extend(ports);
 				}
 				mp.state = ProcessState::Stopped;
 			}
@@ -235,6 +237,9 @@ impl Supervisor {
 		}
 
 		services.remove(name);
+
+		kill_port_holders(&all_ports).await;
+
 		Ok(format!("{}: stopped", name))
 	}
 
@@ -250,6 +255,7 @@ impl Supervisor {
 			.ok_or_else(|| format!("{}: not running", name))?;
 
 		let mut messages = Vec::new();
+		let mut all_ports = Vec::new();
 		for proc_name in processes {
 			if let Some(mp) = managed.processes.get_mut(proc_name.as_str()) {
 				if mp.state.is_running() {
@@ -257,7 +263,8 @@ impl Supervisor {
 						let _ = cancel.send(true);
 					}
 					if let ProcessState::Running { pid, .. } = &mp.state {
-						kill_process_tree(*pid);
+						let ports = kill_process_tree(*pid).await;
+						all_ports.extend(ports);
 					}
 					mp.state = ProcessState::Stopped;
 					messages.push(format!("{}/{}: stopped", name, proc_name));
@@ -268,6 +275,7 @@ impl Supervisor {
 				messages.push(format!("{}/{}: not found", name, proc_name));
 			}
 		}
+		kill_port_holders(&all_ports).await;
 		Ok(messages.join("\n"))
 	}
 
@@ -281,7 +289,6 @@ impl Supervisor {
 		filter: &[String],
 	) -> Result<String, String> {
 		let _ = self.stop_service(name).await;
-		tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 		self.start_service(name, dir, process_defs, all, filter).await
 	}
 
@@ -305,7 +312,7 @@ impl Supervisor {
 			let _ = cancel.send(true);
 		}
 		if let ProcessState::Running { pid, .. } = &mp.state {
-			kill_process_tree(*pid);
+			kill_process_tree(*pid).await;
 		}
 		mp.state = ProcessState::Stopped;
 		mp.retry_count = 0;
@@ -353,7 +360,8 @@ impl Supervisor {
 			let _ = cancel.send(true);
 		}
 		if let ProcessState::Running { pid, .. } = &mp.state {
-			kill_process_tree(*pid);
+			let ports = kill_process_tree(*pid).await;
+			kill_port_holders(&ports).await;
 		}
 		mp.state = ProcessState::Stopped;
 
@@ -635,17 +643,163 @@ async fn update_state(
 	}
 }
 
-/// Send SIGTERM to a process group, then SIGKILL after 3 seconds.
-pub fn kill_process_tree(pid: u32) {
+/// Collect all descendant PIDs of a process recursively.
+#[cfg(target_os = "macos")]
+fn get_all_descendants(pid: u32) -> Vec<u32> {
+	use libproc::processes::{pids_by_type, ProcFilter};
+	let mut descendants = Vec::new();
+	let mut stack = vec![pid];
+	while let Some(parent) = stack.pop() {
+		let children =
+			pids_by_type(ProcFilter::ByParentProcess { ppid: parent }).unwrap_or_default();
+		for child in children {
+			if child != 0 && child != pid {
+				descendants.push(child);
+				stack.push(child);
+			}
+		}
+	}
+	descendants
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_all_descendants(_pid: u32) -> Vec<u32> {
+	Vec::new()
+}
+
+fn is_alive(pid: i32) -> bool {
+	use nix::sys::signal::kill;
+	use nix::unistd::Pid;
+	kill(Pid::from_raw(pid), None).is_ok()
+}
+
+/// Kill a process and all its descendants. Sends SIGTERM to process group + individual
+/// descendants, waits up to 3s for them to die, then SIGKILL any survivors.
+/// Returns the ports that were held by the killed processes (for fallback cleanup).
+pub async fn kill_process_tree(pid: u32) -> Vec<u16> {
 	if pid == 0 {
+		return Vec::new();
+	}
+	use nix::sys::signal::{kill, killpg, Signal};
+	use nix::unistd::Pid;
+
+	let pgid = Pid::from_raw(pid as i32);
+	let descendants = get_all_descendants(pid);
+
+	let held_ports = get_listening_ports(pid, &descendants);
+
+	// Phase 1: SIGTERM to process group + each descendant individually
+	let _ = killpg(pgid, Signal::SIGTERM);
+	for &dpid in &descendants {
+		let _ = kill(Pid::from_raw(dpid as i32), Signal::SIGTERM);
+	}
+
+	// Phase 2: wait up to 3s for all to die
+	let all_pids: Vec<i32> = std::iter::once(pid as i32)
+		.chain(descendants.iter().map(|&p| p as i32))
+		.collect();
+
+	let died = tokio::task::spawn_blocking(move || {
+		for _ in 0..30 {
+			if all_pids.iter().all(|&p| !is_alive(p)) {
+				return true;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(100));
+		}
+		false
+	})
+	.await
+	.unwrap_or(false);
+
+	if !died {
+		// Phase 3: SIGKILL survivors
+		let _ = killpg(pgid, Signal::SIGKILL);
+		for &dpid in &descendants {
+			let _ = kill(Pid::from_raw(dpid as i32), Signal::SIGKILL);
+		}
+		let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+
+		let remaining: Vec<i32> = std::iter::once(pid as i32)
+			.chain(descendants.iter().map(|&p| p as i32))
+			.collect();
+		let _ = tokio::task::spawn_blocking(move || {
+			for _ in 0..10 {
+				if remaining.iter().all(|&p| !is_alive(p)) {
+					return;
+				}
+				std::thread::sleep(std::time::Duration::from_millis(100));
+			}
+			tracing::warn!(
+				"some processes survived SIGKILL: {:?}",
+				remaining.iter().filter(|&&p| is_alive(p)).collect::<Vec<_>>()
+			);
+		})
+		.await;
+	}
+
+	held_ports
+}
+
+/// Get TCP listening ports held by a pid and its descendants.
+#[cfg(target_os = "macos")]
+fn get_listening_ports(pid: u32, descendants: &[u32]) -> Vec<u16> {
+	use netstat2::*;
+	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+	let proto = ProtocolFlags::TCP;
+	let sockets = match get_sockets_info(af, proto) {
+		Ok(s) => s,
+		Err(_) => return Vec::new(),
+	};
+	let all_pids: Vec<u32> = std::iter::once(pid).chain(descendants.iter().copied()).collect();
+	let mut ports = Vec::new();
+	for si in &sockets {
+		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
+			if tcp.state == TcpState::Listen {
+				for spid in &si.associated_pids {
+					if all_pids.contains(spid) && !ports.contains(&tcp.local_port) {
+						ports.push(tcp.local_port);
+					}
+				}
+			}
+		}
+	}
+	ports
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_listening_ports(_pid: u32, _descendants: &[u32]) -> Vec<u16> {
+	Vec::new()
+}
+
+/// Kill any process listening on the given ports. Last-resort fallback.
+#[cfg(target_os = "macos")]
+pub async fn kill_port_holders(ports: &[u16]) {
+	if ports.is_empty() {
 		return;
 	}
-	use nix::sys::signal::{killpg, Signal};
+	use netstat2::*;
+	use nix::sys::signal::{kill, Signal};
 	use nix::unistd::Pid;
-	let pgid = Pid::from_raw(pid as i32);
-	let _ = killpg(pgid, Signal::SIGTERM);
-	std::thread::spawn(move || {
-		std::thread::sleep(std::time::Duration::from_secs(3));
-		let _ = killpg(pgid, Signal::SIGKILL);
-	});
+
+	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+	let proto = ProtocolFlags::TCP;
+	let sockets = match get_sockets_info(af, proto) {
+		Ok(s) => s,
+		Err(_) => return,
+	};
+	for si in &sockets {
+		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
+			if tcp.state == TcpState::Listen && ports.contains(&tcp.local_port) {
+				for &spid in &si.associated_pids {
+					if spid != 0 {
+						tracing::warn!("port {} still held by pid {}, killing", tcp.local_port, spid);
+						let _ = kill(Pid::from_raw(spid as i32), Signal::SIGKILL);
+					}
+				}
+			}
+		}
+	}
 }
+
+#[cfg(not(target_os = "macos"))]
+pub async fn kill_port_holders(_ports: &[u16]) {}
