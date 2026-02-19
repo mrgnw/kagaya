@@ -1,6 +1,8 @@
 mod autostart;
+mod cli;
 mod config;
 mod daemon;
+mod format;
 mod koku_client;
 mod launchd;
 mod logs;
@@ -14,101 +16,187 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
+use cli::{Cli, Cmd, OutputFormat, output_format, set_output_format};
 use config::ServiceEntry;
 use protocol::{Request, Response};
 use kagaya::*;
 use owo_colors::OwoColorize;
-use toml;
+use clap::Parser;
 
 fn daemon_paths() -> muzan::DaemonPaths {
 	muzan::DaemonPaths::new("kagaya")
 }
 
 fn main() {
-	let args: Vec<String> = std::env::args().skip(1).collect();
+	// Two-pass parsing: try clap first, fall back to service-name dispatch
+	match Cli::try_parse() {
+		Ok(cli) => {
+			if cli.json {
+				set_output_format(OutputFormat::Json);
+			} else if cli.tsv {
+				set_output_format(OutputFormat::Tsv);
+			}
 
+			if cli.help {
+				print_usage();
+				return;
+			}
+			if cli.version {
+				println!("kagaya {}", env!("CARGO_PKG_VERSION"));
+				return;
+			}
+
+			match cli.command {
+				None => {
+					if cli.watch {
+						cmd_status(&["--watch".to_string()]);
+					} else {
+						print_usage();
+						if connect_daemon().is_some() {
+							eprintln!();
+							render_status(&[]);
+						}
+						check_alias_hint();
+					}
+				}
+				Some(Cmd::Status { names, all, watch, watch_interval }) => {
+					let mut args = names;
+					if all { args.push("--all".to_string()); }
+					if watch || cli.watch { args.push("--watch".to_string()); }
+					if let Some(iv) = watch_interval {
+						args.push("--watch-interval".to_string());
+						args.push(iv.to_string());
+					}
+					cmd_status(&args);
+				}
+				Some(Cmd::Start { names, all, autostart, watch, watch_interval }) => {
+					let mut args = names;
+					if all { args.push("--all".to_string()); }
+					if autostart { args.push("--autostart".to_string()); }
+					if watch || cli.watch { args.push("--watch".to_string()); }
+					if let Some(iv) = watch_interval {
+						args.push("--watch-interval".to_string());
+						args.push(iv.to_string());
+					}
+					cmd_start(&args);
+				}
+				Some(Cmd::Stop { names, all, watch, watch_interval }) => {
+					let mut args = names;
+					if all { args.push("--all".to_string()); }
+					if watch || cli.watch { args.push("--watch".to_string()); }
+					if let Some(iv) = watch_interval {
+						args.push("--watch-interval".to_string());
+						args.push(iv.to_string());
+					}
+					cmd_stop(&args);
+				}
+				Some(Cmd::Reload { names, all, watch, watch_interval }) => {
+					let mut args = names;
+					if all { args.push("--all".to_string()); }
+					if watch || cli.watch { args.push("--watch".to_string()); }
+					if let Some(iv) = watch_interval {
+						args.push("--watch-interval".to_string());
+						args.push(iv.to_string());
+					}
+					cmd_reload(&args);
+				}
+				Some(Cmd::Restart { target, watch, watch_interval }) => {
+					let mut args = target;
+					if watch || cli.watch { args.push("--watch".to_string()); }
+					if let Some(iv) = watch_interval {
+						args.push("--watch-interval".to_string());
+						args.push(iv.to_string());
+					}
+					cmd_restart(&args);
+				}
+				Some(Cmd::Logs { args }) => cmd_logs(&args),
+				Some(Cmd::Tail { args }) => cmd_tail(&args),
+				Some(Cmd::Echo { args }) => cmd_echo(&args),
+				Some(Cmd::Show { args }) => cmd_show(&args),
+				Some(Cmd::Cron { args }) => cmd_cron(&args),
+				Some(Cmd::Daemon { args }) => cmd_daemon(&args),
+				Some(Cmd::Serve { args }) => cmd_serve(&args),
+				Some(Cmd::Add { args }) => cmd_add(&args),
+				Some(Cmd::Remove { args }) => cmd_remove(&args),
+				Some(Cmd::Init) => cmd_init(),
+				Some(Cmd::Migrate { force }) => migrate::cmd_migrate(force),
+				Some(Cmd::Autostart { args }) => autostart::cmd_autostart(&args),
+				Some(Cmd::Launchd { args }) => launchd::cmd_launchd(&args),
+				Some(Cmd::SelfCmd { args }) => {
+					match args.first().map(|s| s.as_str()) {
+						Some("update") => self_update::cmd_self_update(),
+						_ => {
+							eprintln!("usage: ky self update");
+							std::process::exit(1);
+						}
+					}
+				}
+				Some(Cmd::All) => cmd_status(&["all".to_string()]),
+				Some(Cmd::Help) => print_usage(),
+				Some(Cmd::Version) => println!("kagaya {}", env!("CARGO_PKG_VERSION")),
+				Some(Cmd::External(args)) => dispatch_external(&args),
+			}
+		}
+		Err(e) => {
+			// clap error — could be bad flags, etc.
+			eprintln!("{}", e);
+			std::process::exit(1);
+		}
+	}
+}
+
+fn dispatch_external(args: &[String]) {
 	if args.is_empty() {
 		print_usage();
-		if connect_daemon().is_some() {
-			eprintln!();
-			render_status(&[]);
-		}
-		check_alias_hint();
 		return;
 	}
 
-	match args[0].as_str() {
-		"help" | "--help" | "-h" => print_usage(),
-		"version" | "--version" | "-V" => println!("kagaya {}", env!("CARGO_PKG_VERSION")),
-		"init" => cmd_init(),
-		"add" => cmd_add(&args[1..]),
-		"remove" | "rm" => cmd_remove(&args[1..]),
-		"status" | "st" => cmd_status(&args[1..]),
-		"all" => cmd_status(&["all".to_string()]),
-		"start" => cmd_start(&args[1..]),
-		"stop" => cmd_stop(&args[1..]),
-		"reload" => cmd_reload(&args[1..]),
-		"restart" => cmd_restart(&args[1..]),
-		"logs" => cmd_logs(&args[1..]),
-		"tail" => cmd_tail(&args[1..]),
-		"echo" => cmd_echo(&args[1..]),
-		"show" => cmd_show(&args[1..]),
-		"daemon" => cmd_daemon(&args[1..]),
-		"serve" => cmd_serve(&args[1..]),
-		"migrate" => {
-			let force = args[1..].iter().any(|a| a == "--force" || a == "-f");
-			migrate::cmd_migrate(force);
-		}
-		"cron" => cmd_cron(&args[1..]),
-		"autostart" => autostart::cmd_autostart(&args[1..]),
-		"launchd" | "launch" | "lctl" => launchd::cmd_launchd(&args[1..]),
-		"self" => {
-			match args.get(1).map(|s| s.as_str()) {
-				Some("update") => self_update::cmd_self_update(),
-				_ => {
-					eprintln!("usage: ky self update");
-					std::process::exit(1);
+	let name = &args[0];
+
+	if name == "--help" || name == "-h" || name == "help" {
+		print_usage();
+		return;
+	}
+	if name == "--version" || name == "-V" || name == "version" {
+		println!("kagaya {}", env!("CARGO_PKG_VERSION"));
+		return;
+	}
+
+	let services = config::load_service_entries();
+	let base_name = name.split('.').next().unwrap_or(name);
+	if services.contains_key(base_name) && args.len() > 1 {
+		match args[1].as_str() {
+			"start" => cmd_start(&[args[0].clone()]),
+			"stop" => cmd_stop(&[args[0].clone()]),
+			"reload" => cmd_reload(&[args[0].clone()]),
+			"status" | "st" => cmd_status(&[args[0].clone()]),
+			"logs" => cmd_logs(args),
+			"tail" => cmd_tail(args),
+			"echo" => cmd_echo(args),
+			"show" => cmd_show(args),
+			"restart" => {
+				if args.len() > 2 {
+					cmd_restart(&[args[0].clone(), args[2].clone()]);
+				} else {
+					cmd_reload(&[args[0].clone()]);
 				}
 			}
-		}
-		name => {
-			let services = config::load_service_entries();
-			let base_name = name.split('.').next().unwrap_or(name);
-			if services.contains_key(base_name) && args.len() > 1 {
-				match args[1].as_str() {
-					"start" => cmd_start(&[args[0].clone()]),
-					"stop" => cmd_stop(&[args[0].clone()]),
-					"reload" => cmd_reload(&[args[0].clone()]),
-					"status" | "st" => cmd_status(&[args[0].clone()]),
-					"logs" => cmd_logs(&args),
-					"tail" => cmd_tail(&args),
-					"echo" => cmd_echo(&args),
-					"show" => cmd_show(&args),
-					"restart" => {
-						if args.len() > 2 {
-							cmd_restart(&[args[0].clone(), args[2].clone()]);
-						} else {
-							cmd_reload(&[args[0].clone()]);
-						}
-					}
-					_ => {
-						eprintln!("unknown command: {}", args[1]);
-						std::process::exit(1);
-					}
-				}
-			} else if services.contains_key(base_name) {
-				cmd_status(&[args[0].clone()]);
-			} else {
-				eprintln!("unknown command or service: {}", name);
-				eprintln!();
-				let names: Vec<&str> = services.keys().map(|s| s.as_str()).collect();
-				if !names.is_empty() {
-					eprintln!("registered services: {}", names.join(", "));
-				}
-				eprintln!("run 'ky help' for usage");
+			_ => {
+				eprintln!("unknown command: {}", args[1]);
 				std::process::exit(1);
 			}
 		}
+	} else if services.contains_key(base_name) {
+		cmd_status(&[args[0].clone()]);
+	} else {
+		eprintln!("unknown command or service: {}", name);
+		eprintln!();
+		let names: Vec<&str> = services.keys().map(|s| s.as_str()).collect();
+		if !names.is_empty() {
+			eprintln!("registered services: {}", names.join(", "));
+		}
+		eprintln!("run 'ky help' for usage");
+		std::process::exit(1);
 	}
 }
 
@@ -154,6 +242,11 @@ fn print_usage() {
 	eprintln!("  {} [-d|--stop|--status]   HTTP server for web UI", "serve".bold());
 	eprintln!("  {} [command]            macOS launchd agents", "launchd".bold());
 	eprintln!("  {}                  Update to latest version", "self update".bold());
+	eprintln!();
+
+	eprintln!("{}", "output".cyan().bold());
+	eprintln!("  {}                       Output as JSON", "--json".bold());
+	eprintln!("  {}                        Output as TSV", "--tsv".bold());
 	eprintln!();
 
 	eprintln!("{}", "targeting".cyan().bold());
@@ -222,7 +315,6 @@ fn cmd_add(args: &[String]) {
 		std::process::exit(1);
 	}
 
-	// Check for duplicate in existing projects.toml
 	if let Ok(content) = std::fs::read_to_string(&projects_file) {
 		if let Ok(table) = toml::from_str::<toml::Value>(&content) {
 			if let Some(map) = table.as_table() {
@@ -307,6 +399,10 @@ fn send_request(request: &Request) -> Response {
 	) {
 		Ok(c) => c,
 		Err(e) => {
+			if output_format() == OutputFormat::Json {
+				format::json_error(&format!("{}", e));
+				std::process::exit(1);
+			}
 			eprintln!("error: {}", e);
 			std::process::exit(1);
 		}
@@ -315,6 +411,10 @@ fn send_request(request: &Request) -> Response {
 	match client.send(request) {
 		Ok(resp) => resp,
 		Err(e) => {
+			if output_format() == OutputFormat::Json {
+				format::json_error(&format!("{}", e));
+				std::process::exit(1);
+			}
 			eprintln!("error: {}", e);
 			std::process::exit(1);
 		}
@@ -325,7 +425,7 @@ fn send_request(request: &Request) -> Response {
 
 fn cmd_status(args: &[String]) {
 	let (watch, rest) = parse_watch_opts(args, None);
-	if watch.enabled {
+	if watch.enabled && !output_format().is_plain() {
 		watch_status(&rest, &watch);
 	} else {
 		render_status(&rest);
@@ -362,9 +462,37 @@ fn print_process_line(proc: &ProcessStatus, name_width: usize) {
 	println!("  {} {:<width$} {}{}", symbol, proc.name, label, extra_str, width = name_width);
 }
 
+fn handle_action_response(response: &Response) {
+	let fmt = output_format();
+	match response {
+		Response::Ok { message } => {
+			if fmt == OutputFormat::Json {
+				format::json_ok(message.clone());
+			} else {
+				if let Some(msg) = message {
+					for line in msg.lines() {
+						eprintln!("{}", line);
+					}
+				}
+			}
+		}
+		Response::Error { message } => {
+			if fmt == OutputFormat::Json {
+				format::json_error(message);
+				std::process::exit(1);
+			} else {
+				eprintln!("error: {}", message);
+				std::process::exit(1);
+			}
+		}
+		_ => {}
+	}
+}
+
 fn cmd_start(args: &[String]) {
 	let (mut watch, rest) = parse_watch_opts(args, Some(4));
 	let entries = config::load_service_entries();
+	let plain = output_format().is_plain();
 
 	let autostart_only = rest.iter().any(|a| a == "--autostart");
 	let start_all = rest.iter().any(|a| is_all_flag(a));
@@ -373,7 +501,11 @@ fn cmd_start(args: &[String]) {
 	if autostart_only {
 		let names = config::autostart_project_names();
 		if names.is_empty() {
-			eprintln!("no projects with autostart = true");
+			if plain {
+				format::json_error("no projects with autostart = true");
+			} else {
+				eprintln!("no projects with autostart = true");
+			}
 			return;
 		}
 		let response = send_request(&Request::Start {
@@ -381,20 +513,7 @@ fn cmd_start(args: &[String]) {
 			all: true,
 			processes: vec![],
 		});
-		match response {
-			Response::Ok { message } => {
-				if let Some(msg) = message {
-					for line in msg.lines() {
-						eprintln!("{}", line);
-					}
-				}
-			}
-			Response::Error { message } => {
-				eprintln!("error: {}", message);
-				std::process::exit(1);
-			}
-			_ => {}
-		}
+		handle_action_response(&response);
 		return;
 	}
 
@@ -444,6 +563,12 @@ fn cmd_start(args: &[String]) {
 		all: start_all || !target_processes.is_empty(),
 		processes: target_processes,
 	});
+
+	if plain {
+		handle_action_response(&response);
+		return;
+	}
+
 	match response {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
@@ -470,6 +595,7 @@ fn cmd_start(args: &[String]) {
 fn cmd_stop(args: &[String]) {
 	let (mut watch, rest) = parse_watch_opts(args, Some(4));
 	let entries = config::load_service_entries();
+	let plain = output_format().is_plain();
 
 	let stop_all = rest.iter().any(|a| is_all_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
@@ -518,6 +644,12 @@ fn cmd_stop(args: &[String]) {
 		names: names.clone(),
 		processes: target_processes,
 	});
+
+	if plain {
+		handle_action_response(&response);
+		return;
+	}
+
 	match response {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
@@ -544,6 +676,7 @@ fn cmd_stop(args: &[String]) {
 fn cmd_reload(args: &[String]) {
 	let (mut watch, rest) = parse_watch_opts(args, Some(4));
 	let entries = config::load_service_entries();
+	let plain = output_format().is_plain();
 
 	let reload_all = rest.iter().any(|a| is_all_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
@@ -591,6 +724,12 @@ fn cmd_reload(args: &[String]) {
 		all: reload_all,
 		processes: target_processes,
 	});
+
+	if plain {
+		handle_action_response(&response);
+		return;
+	}
+
 	match response {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
@@ -617,20 +756,23 @@ fn cmd_reload(args: &[String]) {
 fn cmd_restart(args: &[String]) {
 	let (mut watch, rest) = parse_watch_opts(args, Some(4));
 	let entries = config::load_service_entries();
+	let plain = output_format().is_plain();
 
-	if !watch.enabled {
+	if !watch.enabled && !plain {
 		watch.enabled = true;
 		watch.duration = Some(4);
 	}
 
 	let mut reload_extra: Vec<String> = Vec::new();
-	reload_extra.push("--watch".to_string());
-	if let Some(d) = watch.duration {
-		reload_extra.push(d.to_string());
-	}
-	if watch.interval != 1 {
-		reload_extra.push("--watch-interval".to_string());
-		reload_extra.push(watch.interval.to_string());
+	if !plain {
+		reload_extra.push("--watch".to_string());
+		if let Some(d) = watch.duration {
+			reload_extra.push(d.to_string());
+		}
+		if watch.interval != 1 {
+			reload_extra.push("--watch-interval".to_string());
+			reload_extra.push(watch.interval.to_string());
+		}
 	}
 
 	let (service, process) = if rest.is_empty() {
@@ -668,6 +810,12 @@ fn cmd_restart(args: &[String]) {
 			service: service.clone(),
 			process: process_name.clone(),
 		});
+
+		if plain {
+			handle_action_response(&response);
+			return;
+		}
+
 		match response {
 			Response::Ok { message } => {
 				if let Some(msg) = message {
@@ -691,6 +839,7 @@ fn cmd_restart(args: &[String]) {
 
 fn cmd_logs(args: &[String]) {
 	let svc_entries = config::load_service_entries();
+	let json = output_format() == OutputFormat::Json;
 
 	let (service, process) = if args.is_empty() {
 		if let Some(current) = get_current_project(&svc_entries) {
@@ -748,8 +897,15 @@ fn cmd_logs(args: &[String]) {
 	} else {
 		0
 	};
-	for line in &lines[start..] {
-		println!("{}", line);
+
+	if json {
+		for (i, line) in lines[start..].iter().enumerate() {
+			format::json_log_line(line, (start + i) as u64);
+		}
+	} else {
+		for line in &lines[start..] {
+			println!("{}", line);
+		}
 	}
 }
 
@@ -812,6 +968,7 @@ fn cmd_tail(args: &[String]) {
 
 fn cmd_echo(args: &[String]) {
 	let svc_entries = config::load_service_entries();
+	let json = output_format() == OutputFormat::Json;
 
 	let (service, process) = if args.is_empty() {
 		if let Some(current) = get_current_project(&svc_entries) {
@@ -838,8 +995,12 @@ fn cmd_echo(args: &[String]) {
 		match response {
 			Response::Log { line, offset: new_offset } => {
 				if !line.is_empty() {
-					print!("{}", line);
-					let _ = io::stdout().flush();
+					if json {
+						format::json_log_line(&line.trim_end(), new_offset);
+					} else {
+						print!("{}", line);
+						let _ = io::stdout().flush();
+					}
 				}
 				offset = new_offset;
 			}
@@ -856,6 +1017,7 @@ fn cmd_echo(args: &[String]) {
 
 fn cmd_show(args: &[String]) {
 	let entries = config::load_service_entries();
+	let json = output_format() == OutputFormat::Json;
 
 	let filtered_args: Vec<String> = if args.len() >= 2 && args[1] == "show" {
 		let mut new_args = vec![args[0].clone()];
@@ -870,6 +1032,11 @@ fn cmd_show(args: &[String]) {
 			(current, None)
 		} else {
 			let projects_path = protocol::config_dir().join("projects");
+			if json {
+				let map: BTreeMap<&String, &PathBuf> = entries.iter().map(|(n, e)| (n, &e.dir)).collect();
+				format::json_value(&map);
+				std::process::exit(0);
+			}
 			eprintln!("{}", projects_path.display().to_string().dimmed());
 			for (name, entry) in &entries {
 				eprintln!("{}: {}", name.bold(), entry.dir.display());
@@ -911,6 +1078,11 @@ fn cmd_show(args: &[String]) {
 		std::process::exit(1);
 	}
 
+	if json {
+		format::json_value(&service);
+		return;
+	}
+
 	if let Some(proc_name) = process_name {
 		if let Some(proc) = service.processes.iter().find(|p| p.name == proc_name) {
 			println!("{}", proc.command);
@@ -935,10 +1107,10 @@ fn cmd_show(args: &[String]) {
 
 fn cmd_cron(args: &[String]) {
 	let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
+	let json = output_format() == OutputFormat::Json || args.iter().any(|a| a == "--json");
 
 	match subcmd {
 		"status" | "st" => {
-			let json = args.iter().any(|a| a == "--json");
 			match koku_client::fetch_status() {
 				Some(jobs) => {
 					if json {
@@ -973,9 +1145,11 @@ fn cmd_cron(args: &[String]) {
 				std::process::exit(1);
 			});
 			match koku_client::run_job(name) {
-				Ok(msg) => eprintln!("{}", msg),
+				Ok(msg) => {
+					if json { format::json_ok(Some(msg)); } else { eprintln!("{}", msg); }
+				}
 				Err(e) => {
-					eprintln!("error: {}", e);
+					if json { format::json_error(&e); } else { eprintln!("error: {}", e); }
 					std::process::exit(1);
 				}
 			}
@@ -986,9 +1160,11 @@ fn cmd_cron(args: &[String]) {
 				std::process::exit(1);
 			});
 			match koku_client::pause_job(name) {
-				Ok(msg) => eprintln!("{}", msg),
+				Ok(msg) => {
+					if json { format::json_ok(Some(msg)); } else { eprintln!("{}", msg); }
+				}
 				Err(e) => {
-					eprintln!("error: {}", e);
+					if json { format::json_error(&e); } else { eprintln!("error: {}", e); }
 					std::process::exit(1);
 				}
 			}
@@ -999,18 +1175,22 @@ fn cmd_cron(args: &[String]) {
 				std::process::exit(1);
 			});
 			match koku_client::resume_job(name) {
-				Ok(msg) => eprintln!("{}", msg),
+				Ok(msg) => {
+					if json { format::json_ok(Some(msg)); } else { eprintln!("{}", msg); }
+				}
 				Err(e) => {
-					eprintln!("error: {}", e);
+					if json { format::json_error(&e); } else { eprintln!("error: {}", e); }
 					std::process::exit(1);
 				}
 			}
 		}
 		"reload" => {
 			match koku_client::reload() {
-				Ok(msg) => eprintln!("{}", msg),
+				Ok(msg) => {
+					if json { format::json_ok(Some(msg)); } else { eprintln!("{}", msg); }
+				}
 				Err(e) => {
-					eprintln!("error: {}", e);
+					if json { format::json_error(&e); } else { eprintln!("error: {}", e); }
 					std::process::exit(1);
 				}
 			}
@@ -1025,6 +1205,7 @@ fn cmd_cron(args: &[String]) {
 fn cmd_daemon(args: &[String]) {
 	let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
 	let paths = daemon_paths();
+	let json = output_format() == OutputFormat::Json;
 
 	match subcmd {
 		"run" => {
@@ -1035,7 +1216,8 @@ fn cmd_daemon(args: &[String]) {
 		}
 		"start" => {
 			if muzan::client::is_running(&paths) {
-				eprintln!("daemon already running");
+				if json { format::json_ok(Some("daemon already running".into())); }
+				else { eprintln!("daemon already running"); }
 				return;
 			}
 			let mut spawn_args: Vec<String> = vec!["daemon".to_string(), "run".to_string()];
@@ -1043,24 +1225,38 @@ fn cmd_daemon(args: &[String]) {
 			let spawn_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
 			let daemon = muzan::Daemon::new("kagaya");
 			match daemon.start_background_with_args(&spawn_refs) {
-				Ok(_) => eprintln!("daemon started"),
+				Ok(_) => {
+					if json { format::json_ok(Some("daemon started".into())); }
+					else { eprintln!("daemon started"); }
+				}
 				Err(e) => {
-					eprintln!("error: {}", e);
+					if json { format::json_error(&format!("{}", e)); }
+					else { eprintln!("error: {}", e); }
 					std::process::exit(1);
 				}
 			}
 		}
 		"stop" => {
 			let response = send_request(&Request::Shutdown);
-			match response {
-				Response::Ok { message } => {
-					eprintln!("daemon: {}", message.unwrap_or_default());
+			if json {
+				handle_action_response(&response);
+			} else {
+				match response {
+					Response::Ok { message } => {
+						eprintln!("daemon: {}", message.unwrap_or_default());
+					}
+					_ => eprintln!("daemon not running"),
 				}
-				_ => eprintln!("daemon not running"),
 			}
 		}
 		"status" => {
-			if muzan::client::is_running(&paths) {
+			if json {
+				#[derive(serde::Serialize)]
+				struct DaemonStatus { running: bool, pid: Option<u32> }
+				let running = muzan::client::is_running(&paths);
+				let pid = if running { muzan::client::read_pid(&paths) } else { None };
+				format::json_value(&DaemonStatus { running, pid });
+			} else if muzan::client::is_running(&paths) {
 				if let Some(pid) = muzan::client::read_pid(&paths) {
 					eprintln!("daemon running (pid {})", pid);
 				} else {
@@ -1088,7 +1284,6 @@ fn cmd_serve(args: &[String]) {
 	} else if has_daemon {
 		cmd_daemon(&vec!["start".to_string(), "--http".to_string()]);
 	} else {
-		// Foreground: run daemon in-process with --http
 		cmd_daemon(&vec!["run".to_string(), "--foreground".to_string(), "--http".to_string()]);
 	}
 }
@@ -1143,7 +1338,11 @@ fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
 	match response {
 		Response::Status { services, http_port } => (services, http_port),
 		Response::Error { message } => {
-			eprintln!("error: {}", message);
+			if output_format() == OutputFormat::Json {
+				format::json_error(&message);
+			} else {
+				eprintln!("error: {}", message);
+			}
 			std::process::exit(1);
 		}
 		_ => {
@@ -1156,6 +1355,7 @@ fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
 fn render_status(args: &[String]) -> usize {
 	let (services, http_port) = fetch_status();
 	let entries = config::load_service_entries();
+	let fmt = output_format();
 
 	let (process_filter, resolved_args) = if let Some(first) = args.first() {
 		let (svc, proc) = resolve_dot_target(first, &entries);
@@ -1186,6 +1386,29 @@ fn render_status(args: &[String]) -> usize {
 		status_map.insert(s.name.clone(), s);
 	}
 
+	// For JSON/TSV: filter services and output directly
+	if fmt == OutputFormat::Json {
+		let filtered: Vec<ServiceStatus> = filter.iter()
+			.filter_map(|name| status_map.get(name).map(|s| (*s).clone()))
+			.collect();
+		let port = if show_all || (resolved_args.is_empty() && current_project.is_none()) {
+			http_port
+		} else {
+			None
+		};
+		format::json_status(&filtered, port);
+		return 0;
+	}
+
+	if fmt == OutputFormat::Tsv {
+		let filtered: Vec<ServiceStatus> = filter.iter()
+			.filter_map(|name| status_map.get(name).map(|s| (*s).clone()))
+			.collect();
+		format::tsv_status(&filtered);
+		return 0;
+	}
+
+	// Human output
 	let mut sorted_filter = filter.clone();
 	if let Some(ref current) = current_project {
 		sorted_filter.sort_by(|a, b| {
@@ -1411,7 +1634,6 @@ fn check_alias_hint() {
 }
 
 fn detect_shell() -> String {
-	// Check SHELL env var
 	if let Ok(shell) = std::env::var("SHELL") {
 		if let Some(name) = shell.rsplit('/').next() {
 			return name.to_string();
