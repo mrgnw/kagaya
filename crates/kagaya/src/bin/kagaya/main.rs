@@ -517,41 +517,12 @@ fn cmd_start(args: &[String]) {
 		return;
 	}
 
-	let mut target_processes: Vec<String> = Vec::new();
-	let resolved: Vec<String> = if start_all && rest.is_empty() {
-		entries.keys().cloned().collect()
-	} else if rest.is_empty() {
-		resolve_target_names(&[], &entries)
+	let args_for_resolve: Vec<String> = if start_all && rest.is_empty() {
+		vec!["--all".to_string()]
 	} else {
-		let mut service_names = Vec::new();
-		for arg in &rest {
-			let (svc, proc) = resolve_dot_target(arg, &entries);
-			if let Some(p) = proc {
-				if !service_names.contains(&svc) {
-					service_names.push(svc);
-				}
-				if !target_processes.contains(&p) {
-					target_processes.push(p);
-				}
-			} else if entries.contains_key(&svc) {
-				if !service_names.contains(&svc) {
-					service_names.push(svc);
-				}
-			} else if let Some(current) = get_current_project(&entries) {
-				if !service_names.contains(&current) {
-					service_names.push(current);
-				}
-				if !target_processes.contains(&svc) {
-					target_processes.push(svc);
-				}
-			} else {
-				eprintln!("unknown service: {}", svc);
-				eprintln!("registered services: {}", entries.keys().cloned().collect::<Vec<_>>().join(", "));
-				std::process::exit(1);
-			}
-		}
-		service_names
+		rest.clone()
 	};
+	let (resolved, target_processes) = resolve_service_targets(&args_for_resolve, &entries);
 
 	if resolved.is_empty() {
 		eprintln!("no services to start");
@@ -600,40 +571,12 @@ fn cmd_stop(args: &[String]) {
 	let stop_all = rest.iter().any(|a| is_all_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
 
-	let mut target_processes: Vec<String> = Vec::new();
-	let names: Vec<String> = if stop_all && rest.is_empty() {
-		entries.keys().cloned().collect()
-	} else if rest.is_empty() {
-		resolve_target_names(&[], &entries)
+	let args_for_resolve: Vec<String> = if stop_all && rest.is_empty() {
+		vec!["--all".to_string()]
 	} else {
-		let mut service_names = Vec::new();
-		for arg in &rest {
-			let (svc, proc) = resolve_dot_target(arg, &entries);
-			if let Some(p) = proc {
-				if !service_names.contains(&svc) {
-					service_names.push(svc);
-				}
-				if !target_processes.contains(&p) {
-					target_processes.push(p);
-				}
-			} else if entries.contains_key(&svc) {
-				if !service_names.contains(&svc) {
-					service_names.push(svc);
-				}
-			} else if let Some(current) = get_current_project(&entries) {
-				if !service_names.contains(&current) {
-					service_names.push(current);
-				}
-				if !target_processes.contains(&svc) {
-					target_processes.push(svc);
-				}
-			} else {
-				eprintln!("unknown service: {}", svc);
-				std::process::exit(1);
-			}
-		}
-		service_names
+		rest.clone()
 	};
+	let (names, target_processes) = resolve_service_targets(&args_for_resolve, &entries);
 
 	if names.is_empty() {
 		eprintln!("no services to stop");
@@ -681,38 +624,7 @@ fn cmd_reload(args: &[String]) {
 	let reload_all = rest.iter().any(|a| is_all_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
 
-	let mut target_processes: Vec<String> = Vec::new();
-	let names: Vec<String> = if rest.is_empty() {
-		resolve_target_names(&[], &entries)
-	} else {
-		let mut service_names = Vec::new();
-		for arg in &rest {
-			let (svc, proc) = resolve_dot_target(arg, &entries);
-			if let Some(p) = proc {
-				if !service_names.contains(&svc) {
-					service_names.push(svc);
-				}
-				if !target_processes.contains(&p) {
-					target_processes.push(p);
-				}
-			} else if entries.contains_key(&svc) {
-				if !service_names.contains(&svc) {
-					service_names.push(svc);
-				}
-			} else if let Some(current) = get_current_project(&entries) {
-				if !service_names.contains(&current) {
-					service_names.push(current);
-				}
-				if !target_processes.contains(&svc) {
-					target_processes.push(svc);
-				}
-			} else {
-				eprintln!("unknown service: {}", svc);
-				std::process::exit(1);
-			}
-		}
-		service_names
-	};
+	let (names, target_processes) = resolve_service_targets(&rest, &entries);
 
 	if names.is_empty() {
 		eprintln!("no services to reload");
@@ -775,65 +687,41 @@ fn cmd_restart(args: &[String]) {
 		}
 	}
 
-	let (service, process) = if rest.is_empty() {
-		if let Some(current) = get_current_project(&entries) {
-			let mut reload_args = vec![current];
+	let (service, process) = resolve_single_target(&rest, &entries);
+
+	// No process name means reload (restart all processes in the service)
+	let process_name = match process {
+		Some(p) => p,
+		None => {
+			let mut reload_args = vec![service];
 			reload_args.extend(reload_extra);
 			return cmd_reload(&reload_args);
-		} else {
-			eprintln!("usage: ky restart <service> [process]");
-			eprintln!("or run from a registered project directory");
-			std::process::exit(1);
 		}
-	} else if rest.len() == 1 {
-		let (svc, proc) = resolve_dot_target(&rest[0], &entries);
-		if let Some(proc_name) = proc {
-			(svc, Some(proc_name))
-		} else if entries.contains_key(&svc) {
-			let mut reload_args = vec![svc];
-			reload_args.extend(reload_extra);
-			return cmd_reload(&reload_args);
-		} else if let Some(current) = get_current_project(&entries) {
-			(current, Some(svc))
-		} else {
-			eprintln!("unknown service: {}", rest[0]);
-			eprintln!("registered services: {}", entries.keys().cloned().collect::<Vec<_>>().join(", "));
-			std::process::exit(1);
-		}
-	} else {
-		let (svc, proc) = resolve_dot_target(&rest[0], &entries);
-		(svc, proc.or_else(|| Some(rest[1].clone())))
 	};
 
-	if let Some(process_name) = process {
-		let response = send_request(&Request::Restart {
-			service: service.clone(),
-			process: process_name.clone(),
-		});
+	let response = send_request(&Request::Restart {
+		service: service.clone(),
+		process: process_name.clone(),
+	});
 
-		if plain {
-			handle_action_response(&response);
-			return;
-		}
+	if plain {
+		handle_action_response(&response);
+		return;
+	}
 
-		match response {
-			Response::Ok { message } => {
-				if let Some(msg) = message {
-					eprintln!("{}", msg);
-				}
-				std::thread::sleep(std::time::Duration::from_millis(500));
-				watch_status(&[service], &watch);
+	match response {
+		Response::Ok { message } => {
+			if let Some(msg) = message {
+				eprintln!("{}", msg);
 			}
-			Response::Error { message } => {
-				eprintln!("error: {}", message);
-				std::process::exit(1);
-			}
-			_ => {}
+			std::thread::sleep(std::time::Duration::from_millis(500));
+			watch_status(&[service], &watch);
 		}
-	} else {
-		let mut reload_args = vec![service];
-		reload_args.extend(reload_extra);
-		cmd_reload(&reload_args);
+		Response::Error { message } => {
+			eprintln!("error: {}", message);
+			std::process::exit(1);
+		}
+		_ => {}
 	}
 }
 
@@ -841,18 +729,7 @@ fn cmd_logs(args: &[String]) {
 	let svc_entries = config::load_service_entries();
 	let json = output_format() == OutputFormat::Json;
 
-	let (service, process) = if args.is_empty() {
-		if let Some(current) = get_current_project(&svc_entries) {
-			(current, None)
-		} else {
-			eprintln!("usage: ky logs <service> [process]");
-			eprintln!("       ky logs <service.process>");
-			std::process::exit(1);
-		}
-	} else {
-		let (svc, proc) = resolve_dot_target(&args[0], &svc_entries);
-		(svc, proc.or_else(|| args.get(1).map(|s| s.to_string())))
-	};
+	let (service, process) = resolve_single_target(args, &svc_entries);
 
 	let log_dir = logs::service_log_dir(&service);
 	if !log_dir.exists() {
@@ -912,18 +789,7 @@ fn cmd_logs(args: &[String]) {
 fn cmd_tail(args: &[String]) {
 	let svc_entries = config::load_service_entries();
 
-	let (service, process) = if args.is_empty() {
-		if let Some(current) = get_current_project(&svc_entries) {
-			(current, None)
-		} else {
-			eprintln!("usage: ky tail <service> [process]");
-			eprintln!("       ky tail <service.process>");
-			std::process::exit(1);
-		}
-	} else {
-		let (svc, proc) = resolve_dot_target(&args[0], &svc_entries);
-		(svc, proc.or_else(|| args.get(1).cloned()))
-	};
+	let (service, process) = resolve_single_target(args, &svc_entries);
 
 	let log_dir = logs::service_log_dir(&service);
 	if !log_dir.exists() {
@@ -970,18 +836,7 @@ fn cmd_echo(args: &[String]) {
 	let svc_entries = config::load_service_entries();
 	let json = output_format() == OutputFormat::Json;
 
-	let (service, process) = if args.is_empty() {
-		if let Some(current) = get_current_project(&svc_entries) {
-			(current, None)
-		} else {
-			eprintln!("usage: ky echo <service> [process]");
-			eprintln!("       ky echo <service.process>");
-			std::process::exit(1);
-		}
-	} else {
-		let (svc, proc) = resolve_dot_target(&args[0], &svc_entries);
-		(svc, proc.or_else(|| args.get(1).cloned()))
-	};
+	let (service, process) = resolve_single_target(args, &svc_entries);
 
 	let mut offset = 0u64;
 	loop {
@@ -1043,22 +898,8 @@ fn cmd_show(args: &[String]) {
 			}
 			std::process::exit(0);
 		}
-	} else if filtered_args.len() == 1 {
-		let (svc, proc) = resolve_dot_target(&filtered_args[0], &entries);
-		if proc.is_some() {
-			(svc, proc)
-		} else if entries.contains_key(&svc) {
-			(svc, None)
-		} else if let Some(current) = get_current_project(&entries) {
-			(current, Some(svc))
-		} else {
-			eprintln!("unknown service: {}", filtered_args[0]);
-			eprintln!("registered services: {}", entries.keys().cloned().collect::<Vec<_>>().join(", "));
-			std::process::exit(1);
-		}
 	} else {
-		let (svc, proc) = resolve_dot_target(&filtered_args[0], &entries);
-		(svc, proc.or_else(|| Some(filtered_args[1].clone())))
+		resolve_single_target(&filtered_args, &entries)
 	};
 
 	let service_entry = match entries.get(&service_name) {
@@ -1357,27 +1198,22 @@ fn render_status(args: &[String]) -> usize {
 	let entries = config::load_service_entries();
 	let fmt = output_format();
 
-	let (process_filter, resolved_args) = if let Some(first) = args.first() {
-		let (svc, proc) = resolve_dot_target(first, &entries);
-		let rest: Vec<String> = std::iter::once(svc).chain(args[1..].iter().cloned()).collect();
-		(proc, rest)
-	} else {
-		(None, args.to_vec())
-	};
-
-	let show_all = !resolved_args.is_empty() && (resolved_args.len() == 1 && is_all_flag(&resolved_args[0]) || resolved_args.iter().any(|a| is_all_flag(a)));
+	let show_all = args.iter().any(|a| is_all_flag(a));
 	let current_project = get_current_project(&entries);
 
-	let filter = if resolved_args.is_empty() {
-		if let Some(ref current) = current_project {
+	let (filter, process_filter) = if args.is_empty() {
+		let svcs = if let Some(ref current) = current_project {
 			vec![current.clone()]
 		} else {
 			entries.keys().cloned().collect()
-		}
+		};
+		(svcs, None)
 	} else if show_all {
-		entries.keys().cloned().collect()
+		(entries.keys().cloned().collect(), None)
 	} else {
-		resolve_target_names(&resolved_args, &entries)
+		let (svcs, procs) = resolve_service_targets(args, &entries);
+		let proc_filter = procs.into_iter().next();
+		(svcs, proc_filter)
 	};
 
 	let mut status_map: std::collections::HashMap<String, &ServiceStatus> =
@@ -1391,7 +1227,7 @@ fn render_status(args: &[String]) -> usize {
 		let filtered: Vec<ServiceStatus> = filter.iter()
 			.filter_map(|name| status_map.get(name).map(|s| (*s).clone()))
 			.collect();
-		let port = if show_all || (resolved_args.is_empty() && current_project.is_none()) {
+		let port = if show_all || (args.is_empty() && current_project.is_none()) {
 			http_port
 		} else {
 			None
@@ -1465,7 +1301,7 @@ fn render_status(args: &[String]) -> usize {
 		}
 	}
 
-	if show_all || (resolved_args.is_empty() && current_project.is_none()) {
+	if show_all || (args.is_empty() && current_project.is_none()) {
 		println!();
 		lines += 1;
 		if let Some(port) = http_port {
@@ -1593,16 +1429,16 @@ fn get_current_project(entries: &BTreeMap<String, ServiceEntry>) -> Option<Strin
 	None
 }
 
-fn resolve_target_names(args: &[String], entries: &BTreeMap<String, ServiceEntry>) -> Vec<String> {
+/// Resolve a list of CLI args into (service_names, process_names).
+/// Handles: dot notation, known service names, bare process names via CWD, --all.
+/// If args is empty, falls back to CWD project or errors.
+fn resolve_service_targets(
+	args: &[String],
+	entries: &BTreeMap<String, ServiceEntry>,
+) -> (Vec<String>, Vec<String>) {
 	if args.is_empty() {
-		if let Ok(cwd) = std::env::current_dir() {
-			let cwd = cwd.canonicalize().unwrap_or(cwd);
-			for (name, entry) in entries {
-				let entry_dir = entry.dir.canonicalize().unwrap_or(entry.dir.clone());
-				if cwd == entry_dir {
-					return vec![name.clone()];
-				}
-			}
+		if let Some(current) = get_current_project(entries) {
+			return (vec![current], vec![]);
 		}
 		eprintln!("no service specified and not in a registered project directory");
 		eprintln!("use --all to target all services, or specify a name");
@@ -1614,10 +1450,77 @@ fn resolve_target_names(args: &[String], entries: &BTreeMap<String, ServiceEntry
 	}
 
 	if args.len() == 1 && is_all_flag(&args[0]) {
-		return entries.keys().cloned().collect();
+		return (entries.keys().cloned().collect(), vec![]);
 	}
 
-	args.iter().filter(|a| !is_all_flag(a)).cloned().collect()
+	let mut service_names: Vec<String> = Vec::new();
+	let mut process_names: Vec<String> = Vec::new();
+
+	for arg in args {
+		if is_all_flag(arg) {
+			continue;
+		}
+		let (svc, proc) = resolve_dot_target(arg, entries);
+		if let Some(p) = proc {
+			if !service_names.contains(&svc) {
+				service_names.push(svc);
+			}
+			if !process_names.contains(&p) {
+				process_names.push(p);
+			}
+		} else if entries.contains_key(&svc) {
+			if !service_names.contains(&svc) {
+				service_names.push(svc);
+			}
+		} else if let Some(current) = get_current_project(entries) {
+			if !service_names.contains(&current) {
+				service_names.push(current);
+			}
+			if !process_names.contains(&svc) {
+				process_names.push(svc);
+			}
+		} else {
+			eprintln!("unknown service: {}", svc);
+			eprintln!("registered services: {}", entries.keys().cloned().collect::<Vec<_>>().join(", "));
+			std::process::exit(1);
+		}
+	}
+
+	(service_names, process_names)
+}
+
+/// Resolve CLI args to a single (service, Option<process>) target.
+/// Second positional arg is treated as a process name fallback.
+fn resolve_single_target(
+	args: &[String],
+	entries: &BTreeMap<String, ServiceEntry>,
+) -> (String, Option<String>) {
+	if args.is_empty() {
+		if let Some(current) = get_current_project(entries) {
+			return (current, None);
+		}
+		eprintln!("not in a registered project directory; specify a service or service.process");
+		std::process::exit(1);
+	}
+
+	let (svc, proc) = resolve_dot_target(&args[0], entries);
+	let process = proc.or_else(|| args.get(1).cloned());
+
+	if process.is_some() {
+		return (svc, process);
+	}
+
+	if entries.contains_key(&svc) {
+		return (svc, None);
+	}
+
+	if let Some(current) = get_current_project(entries) {
+		return (current, Some(svc));
+	}
+
+	eprintln!("unknown service: {}", svc);
+	eprintln!("registered services: {}", entries.keys().cloned().collect::<Vec<_>>().join(", "));
+	std::process::exit(1);
 }
 
 fn check_alias_hint() {

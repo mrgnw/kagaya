@@ -101,6 +101,10 @@ publish:
 install:
 	cargo install --path crates/kagaya
 
+# Force reinstall from source (release build)
+update:
+	cargo install --path crates/kagaya --force
+
 # Install locally (debug build — fast iteration)
 dev-install:
 	cargo build --bin ky && cp target/debug/ky ~/.cargo/bin/ky

@@ -124,37 +124,40 @@ enum ServiceDef {
 		#[serde(default)]
 		env: HashMap<String, String>,
 		autostart: Option<bool>,
+		pre_start: Option<String>,
 	},
 }
 
 impl ServiceDef {
 	fn into_process_def(self, name: String, defaults: &DefaultsConfig) -> ProcessDef {
 		match self {
-			ServiceDef::Simple(cmd) => ProcessDef {
+		ServiceDef::Simple(cmd) => ProcessDef {
+			name,
+			command: cmd,
+			service_type: ServiceType::Service,
+			restart: defaults.restart,
+			max_retries: defaults.max_retries,
+			restart_delay_secs: defaults.restart_delay,
+			env: defaults.env.clone(),
+			autostart: true,
+			pre_start: None,
+		},
+		ServiceDef::Full { run, service_type, restart, max_retries, restart_delay, env, autostart, pre_start } => {
+			let is_task = service_type == ServiceType::Task;
+			let mut merged_env = defaults.env.clone();
+			merged_env.extend(env);
+			ProcessDef {
 				name,
-				command: cmd,
-				service_type: ServiceType::Service,
-				restart: defaults.restart,
-				max_retries: defaults.max_retries,
-				restart_delay_secs: defaults.restart_delay,
-				env: defaults.env.clone(),
-				autostart: true,
-			},
-			ServiceDef::Full { run, service_type, restart, max_retries, restart_delay, env, autostart } => {
-				let is_task = service_type == ServiceType::Task;
-				let mut merged_env = defaults.env.clone();
-				merged_env.extend(env);
-				ProcessDef {
-					name,
-					command: run,
-					service_type,
-					restart: restart.unwrap_or(if is_task { false } else { defaults.restart }),
-					max_retries: max_retries.unwrap_or(defaults.max_retries),
-					restart_delay_secs: restart_delay.unwrap_or(defaults.restart_delay),
-					env: merged_env,
-					autostart: autostart.unwrap_or(!is_task),
-				}
+				command: run,
+				service_type,
+				restart: restart.unwrap_or(if is_task { false } else { defaults.restart }),
+				max_retries: max_retries.unwrap_or(defaults.max_retries),
+				restart_delay_secs: restart_delay.unwrap_or(defaults.restart_delay),
+				env: merged_env,
+				autostart: autostart.unwrap_or(!is_task),
+				pre_start,
 			}
+		}
 		}
 	}
 }
@@ -306,6 +309,7 @@ pub fn load_service(entry: &ServiceEntry, defaults: &DefaultsConfig) -> Service 
 			restart_delay_secs: cmd.restart_delay.unwrap_or(defaults.restart_delay),
 			env,
 			autostart: !is_task,
+			pre_start: None,
 		};
 		return Service { name: entry.name.clone(), dir: entry.dir.clone(), processes: vec![proc] };
 	}

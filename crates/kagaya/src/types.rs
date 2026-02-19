@@ -36,6 +36,7 @@ pub struct ProcessDef {
 	pub env: HashMap<String, String>,
 	#[serde(default = "default_true")]
 	pub autostart: bool,
+	pub pre_start: Option<String>,
 }
 
 fn default_true() -> bool {

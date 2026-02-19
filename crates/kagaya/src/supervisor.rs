@@ -212,9 +212,10 @@ impl Supervisor {
 	/// Stop all processes in a service. Kills process trees and verifies death.
 	pub async fn stop_service(self: &Arc<Self>, name: &str) -> Result<String, String> {
 		let mut services = self.services.write().await;
-		let managed = services
-			.get_mut(name)
-			.ok_or_else(|| format!("{}: not running", name))?;
+		let managed = match services.get_mut(name) {
+			Some(m) => m,
+			None => return Ok(format!("{}: not running", name)),
+		};
 
 		let mut any_running = false;
 		let mut all_ports = Vec::new();
@@ -426,6 +427,23 @@ async fn run_process_loop(
 	loop {
 		if *cancel.borrow() {
 			return;
+		}
+
+		if let Some(ref pre_start_cmd) = def.pre_start {
+			let msg = format!("[kagaya] running pre_start for {}/{}\n", service, process);
+			output.write(msg.as_bytes()).await;
+			let status = tokio::process::Command::new("sh")
+				.args(["-c", pre_start_cmd])
+				.current_dir(&dir)
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.status()
+				.await;
+			if let Err(e) = status {
+				let msg = format!("[kagaya] pre_start failed for {}/{}: {}\n", service, process, e);
+				output.write(msg.as_bytes()).await;
+			}
 		}
 
 		let child = spawn_process(&def, &dir).await;
