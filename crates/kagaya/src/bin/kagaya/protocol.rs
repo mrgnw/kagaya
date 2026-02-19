@@ -11,7 +11,11 @@ pub enum Request {
 		#[serde(default)]
 		processes: Vec<String>,
 	},
-	Stop { names: Vec<String> },
+	Stop {
+		names: Vec<String>,
+		#[serde(default)]
+		processes: Vec<String>,
+	},
 	Reload {
 		names: Vec<String>,
 		#[serde(default)]

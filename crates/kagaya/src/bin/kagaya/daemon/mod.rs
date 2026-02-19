@@ -125,10 +125,10 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 				message: Some(messages.join("\n")),
 			}
 		}
-		Request::Stop { names } => {
+		Request::Stop { names, processes } => {
 			let mut messages = Vec::new();
 			for name in &names {
-				match supervisor.stop_service(name).await {
+				match supervisor.stop_service_filtered(name, &processes).await {
 					Ok(msg) => messages.push(msg),
 					Err(e) => return Response::Error { message: e },
 				}

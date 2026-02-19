@@ -118,6 +118,17 @@ impl Supervisor {
 		self.inner.stop_service(name).await
 	}
 
+	pub async fn stop_service_filtered(
+		self: &Arc<Self>,
+		name: &str,
+		processes: &[String],
+	) -> Result<String, String> {
+		if processes.is_empty() {
+			return self.inner.stop_service(name).await;
+		}
+		self.inner.stop_processes(name, processes).await
+	}
+
 	pub async fn reload_service_filtered(
 		self: &Arc<Self>,
 		name: &str,

@@ -166,6 +166,11 @@ impl ServiceDef {
 #[serde(untagged)]
 enum ProjectDef {
 	Dir(String),
+	DirTable {
+		dir: String,
+		#[serde(default)]
+		autostart: bool,
+	},
 	Command {
 		run: String,
 		#[serde(default, rename = "type")]
@@ -175,6 +180,8 @@ enum ProjectDef {
 		restart_delay: Option<u64>,
 		#[serde(default)]
 		env: HashMap<String, String>,
+		#[serde(default)]
+		autostart: bool,
 	},
 }
 
@@ -185,6 +192,8 @@ pub struct ServiceEntry {
 	pub dir: PathBuf,
 	/// Set for standalone commands (no services.toml in dir)
 	pub inline_command: Option<InlineCommand>,
+	/// Whether this project should be started on boot (via `ky autostart`)
+	pub autostart: bool,
 }
 
 pub struct InlineCommand {
@@ -231,9 +240,17 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
 					eprintln!("warning: directory does not exist for {}: {}", name, dir.display());
 					continue;
 				}
-				services.insert(name.clone(), ServiceEntry { name, dir, inline_command: None });
+				services.insert(name.clone(), ServiceEntry { name, dir, inline_command: None, autostart: false });
 			}
-			ProjectDef::Command { run, service_type, restart, max_retries, restart_delay, env } => {
+			ProjectDef::DirTable { dir: dir_str, autostart } => {
+				let dir = expand_tilde(&dir_str);
+				if !dir.exists() {
+					eprintln!("warning: directory does not exist for {}: {}", name, dir.display());
+					continue;
+				}
+				services.insert(name.clone(), ServiceEntry { name, dir, inline_command: None, autostart });
+			}
+			ProjectDef::Command { run, service_type, restart, max_retries, restart_delay, env, autostart } => {
 				// Standalone commands get a synthetic dir under ~/.config/kagaya/_commands/
 				let dir = config_dir().join("_commands").join(&name);
 				let _ = std::fs::create_dir_all(&dir);
@@ -250,6 +267,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
 							restart_delay,
 							env,
 						}),
+						autostart,
 					},
 				);
 			}
@@ -261,6 +279,14 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
 
 pub fn load_service_entries() -> BTreeMap<String, ServiceEntry> {
 	load_projects()
+}
+
+pub fn autostart_project_names() -> Vec<String> {
+	load_projects()
+		.into_iter()
+		.filter(|(_, entry)| entry.autostart)
+		.map(|(name, _)| name)
+		.collect()
 }
 
 // ── Loading a service (processes) from a ServiceEntry ────────────────────────

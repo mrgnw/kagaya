@@ -39,7 +39,7 @@ build-all: build-ui build-release
 dist +targets: build-ui
 	#!/bin/bash
 	set -euo pipefail
-	bin="kagaya"
+	bin="ky"
 	dist="dist"
 	echo "building ${bin} {{tag}}"
 	echo
@@ -100,9 +100,7 @@ publish:
 # Install locally (release build)
 install:
 	cargo install --path crates/kagaya
-	ln -sf ~/.cargo/bin/kagaya ~/.cargo/bin/ky
 
 # Install locally (debug build — fast iteration)
 dev-install:
-	cargo build --bin kagaya && cp target/debug/kagaya ~/.cargo/bin/kagaya
-	ln -sf ~/.cargo/bin/kagaya ~/.cargo/bin/ky
+	cargo build --bin ky && cp target/debug/ky ~/.cargo/bin/ky

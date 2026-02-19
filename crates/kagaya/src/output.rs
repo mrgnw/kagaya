@@ -106,8 +106,11 @@ impl OutputCapture {
 	}
 
 	/// Get bytes written after `offset`, returning (data, new_offset).
-	/// If offset is stale (data evicted), returns whatever is in the ring.
+	/// If offset is stale or zero, returns only the last ~4KB to avoid
+	/// dumping the entire ring buffer (e.g. from crash-loop history).
 	pub async fn snapshot_from(&self, offset: u64) -> (Vec<u8>, u64) {
+		const INITIAL_CAP: usize = 4 * 1024;
+
 		let state = self.ring.lock().await;
 		let new_offset = state.total_written;
 		if offset >= new_offset {
@@ -117,7 +120,7 @@ impl OutputCapture {
 		let skip = if offset > available_from {
 			(offset - available_from) as usize
 		} else {
-			0
+			state.buf.len().saturating_sub(INITIAL_CAP)
 		};
 		let data: Vec<u8> = state.buf.iter().skip(skip).copied().collect();
 		(data, new_offset)

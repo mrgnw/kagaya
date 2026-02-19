@@ -45,6 +45,14 @@ export interface ServiceInfo {
   name: string;
   dir: string;
   running: boolean;
+  autostart: boolean;
+}
+
+export interface AutostartStatus {
+  installed: boolean;
+  active: boolean;
+  agent_path: string | null;
+  projects: string[];
 }
 
 export interface ProcessInfo {
@@ -147,4 +155,18 @@ export function echoWebSocketUrl(name: string): string {
   if (typeof window === "undefined")
     return `ws://localhost:${API_PORT}/ws/echo/${name}`;
   return `ws://${window.location.hostname}:${API_PORT}/ws/echo/${name}`;
+}
+
+export async function getAutostartStatus(): Promise<AutostartStatus> {
+  return httpGet("/api/autostart");
+}
+
+export async function enableAutostart(): Promise<string> {
+  const res = await httpPost<{ message: string }>("/api/autostart/on");
+  return res.message;
+}
+
+export async function disableAutostart(): Promise<string> {
+  const res = await httpPost<{ message: string }>("/api/autostart/off");
+  return res.message;
 }

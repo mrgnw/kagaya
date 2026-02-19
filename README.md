@@ -130,11 +130,20 @@ api = "~/dev/api-server"
 frontend = "~/dev/frontend"
 ```
 
+For more options (like autostart on login), use the table form:
+
+```toml
+[myapp]
+dir = "~/dev/myapp"
+autostart = true           # start on login (ky autostart on)
+```
+
 You can also define standalone commands directly:
 
 ```toml
 [tunnel]
 run = "ssh -N -L 5432:localhost:5432 prod-server"
+autostart = true
 
 [sync]
 run = "watchman-wait . --max-events 0 -p '*.json' | xargs ./sync.sh"
@@ -174,6 +183,39 @@ ky echo [name]         # live stream logs from project(s)
 ky logs [name]         # show last 100 lines of log file
 ky tail [name]         # follow log file (tail -f)
 ky serve [-p PORT]     # start web UI server (default port: 13369)
+
+ky autostart on        # install boot agent (start services on login)
+ky autostart off       # remove boot agent
+ky autostart status    # show autostart status
+```
+
+### Autostart
+
+Start services automatically when you log in. Uses LaunchAgent on macOS and systemd on Linux.
+
+**1. Mark projects for boot** in `~/.config/kagaya/projects.toml`:
+
+```toml
+[myapp]
+dir = "~/dev/myapp"
+autostart = true
+
+[tunnel]
+run = "ssh -N -L 5432:localhost:5432 prod-server"
+autostart = true
+```
+
+**2. Install the boot agent:**
+
+```sh
+ky autostart on
+```
+
+On login, kagaya runs `ky start --autostart` which starts only projects with `autostart = true`.
+
+```sh
+ky autostart status    # check if agent is installed + which projects autostart
+ky autostart off       # remove the boot agent
 ```
 
 ### Watch mode
@@ -232,11 +274,16 @@ Lives at `~/.config/kagaya/projects.toml` (respects `$XDG_CONFIG_HOME`).
 # directory-based projects (each has its own services.toml)
 myapp = "~/dev/myapp"
 api = "~/dev/api-server"
-frontend = "~/dev/frontend"
+
+# table form — supports autostart
+[frontend]
+dir = "~/dev/frontend"
+autostart = true
 
 # standalone commands (no project directory needed)
 [tunnel]
 run = "ssh -N -L 5432:localhost:5432 prod-server"
+autostart = true
 
 [db-backup]
 run = "pg_dump mydb > backup.sql"

@@ -1,3 +1,4 @@
+mod autostart;
 mod config;
 mod daemon;
 mod koku_client;
@@ -59,6 +60,7 @@ fn main() {
 			migrate::cmd_migrate(force);
 		}
 		"cron" => cmd_cron(&args[1..]),
+		"autostart" => autostart::cmd_autostart(&args[1..]),
 		"launchd" | "launch" | "lctl" => launchd::cmd_launchd(&args[1..]),
 		"self" => {
 			match args.get(1).map(|s| s.as_str()) {
@@ -111,7 +113,7 @@ fn main() {
 }
 
 fn print_usage() {
-	eprintln!("{} {} — process daemon manager", "kagaya".bold(), env!("CARGO_PKG_VERSION"));
+	eprintln!("{} {} — process daemon manager", "ky".bold(), env!("CARGO_PKG_VERSION"));
 	eprintln!();
 	eprintln!("usage: {} [command] [service] [options]", "ky".bold());
 	eprintln!();
@@ -147,6 +149,7 @@ fn print_usage() {
 	eprintln!();
 
 	eprintln!("{}", "system".cyan().bold());
+	eprintln!("  {} [on|off|status]   Start services on login", "autostart".bold());
 	eprintln!("  {} [start|stop|status]   Manage the daemon", "daemon".bold());
 	eprintln!("  {} [-d|--stop|--status]   HTTP server for web UI", "serve".bold());
 	eprintln!("  {} [command]            macOS launchd agents", "launchd".bold());
@@ -175,7 +178,7 @@ fn cmd_init() {
 
 	let projects_file = config_dir.join("projects.toml");
 	if !projects_file.exists() {
-		let content = "# myapp = \"~/dev/myapp\"\n#\n# [tunnel]\n# run = \"ssh -N -L 5432:localhost:5432 myserver\"\n";
+		let content = "# myapp = \"~/dev/myapp\"\n#\n# [myapp]\n# dir = \"~/dev/myapp\"\n# autostart = true          # start on login (ky autostart on)\n#\n# [tunnel]\n# run = \"ssh -N -L 5432:localhost:5432 myserver\"\n";
 		let _ = std::fs::write(&projects_file, content);
 		eprintln!("created {}", projects_file.display());
 	} else {
@@ -363,8 +366,37 @@ fn cmd_start(args: &[String]) {
 	let (mut watch, rest) = parse_watch_opts(args, Some(4));
 	let entries = config::load_service_entries();
 
+	let autostart_only = rest.iter().any(|a| a == "--autostart");
 	let start_all = rest.iter().any(|a| is_all_flag(a));
-	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && a != "--autostart").collect();
+
+	if autostart_only {
+		let names = config::autostart_project_names();
+		if names.is_empty() {
+			eprintln!("no projects with autostart = true");
+			return;
+		}
+		let response = send_request(&Request::Start {
+			names: names.clone(),
+			all: true,
+			processes: vec![],
+		});
+		match response {
+			Response::Ok { message } => {
+				if let Some(msg) = message {
+					for line in msg.lines() {
+						eprintln!("{}", line);
+					}
+				}
+			}
+			Response::Error { message } => {
+				eprintln!("error: {}", message);
+				std::process::exit(1);
+			}
+			_ => {}
+		}
+		return;
+	}
 
 	let mut target_processes: Vec<String> = Vec::new();
 	let resolved: Vec<String> = if start_all && rest.is_empty() {
@@ -438,14 +470,54 @@ fn cmd_start(args: &[String]) {
 fn cmd_stop(args: &[String]) {
 	let (mut watch, rest) = parse_watch_opts(args, Some(4));
 	let entries = config::load_service_entries();
-	let names = resolve_target_names(&rest, &entries);
+
+	let stop_all = rest.iter().any(|a| is_all_flag(a));
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
+
+	let mut target_processes: Vec<String> = Vec::new();
+	let names: Vec<String> = if stop_all && rest.is_empty() {
+		entries.keys().cloned().collect()
+	} else if rest.is_empty() {
+		resolve_target_names(&[], &entries)
+	} else {
+		let mut service_names = Vec::new();
+		for arg in &rest {
+			let (svc, proc) = resolve_dot_target(arg, &entries);
+			if let Some(p) = proc {
+				if !service_names.contains(&svc) {
+					service_names.push(svc);
+				}
+				if !target_processes.contains(&p) {
+					target_processes.push(p);
+				}
+			} else if entries.contains_key(&svc) {
+				if !service_names.contains(&svc) {
+					service_names.push(svc);
+				}
+			} else if let Some(current) = get_current_project(&entries) {
+				if !service_names.contains(&current) {
+					service_names.push(current);
+				}
+				if !target_processes.contains(&svc) {
+					target_processes.push(svc);
+				}
+			} else {
+				eprintln!("unknown service: {}", svc);
+				std::process::exit(1);
+			}
+		}
+		service_names
+	};
 
 	if names.is_empty() {
 		eprintln!("no services to stop");
 		std::process::exit(1);
 	}
 
-	let response = send_request(&Request::Stop { names: names.clone() });
+	let response = send_request(&Request::Stop {
+		names: names.clone(),
+		processes: target_processes,
+	});
 	match response {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
@@ -475,7 +547,39 @@ fn cmd_reload(args: &[String]) {
 
 	let reload_all = rest.iter().any(|a| is_all_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
-	let names = resolve_target_names(&rest, &entries);
+
+	let mut target_processes: Vec<String> = Vec::new();
+	let names: Vec<String> = if rest.is_empty() {
+		resolve_target_names(&[], &entries)
+	} else {
+		let mut service_names = Vec::new();
+		for arg in &rest {
+			let (svc, proc) = resolve_dot_target(arg, &entries);
+			if let Some(p) = proc {
+				if !service_names.contains(&svc) {
+					service_names.push(svc);
+				}
+				if !target_processes.contains(&p) {
+					target_processes.push(p);
+				}
+			} else if entries.contains_key(&svc) {
+				if !service_names.contains(&svc) {
+					service_names.push(svc);
+				}
+			} else if let Some(current) = get_current_project(&entries) {
+				if !service_names.contains(&current) {
+					service_names.push(current);
+				}
+				if !target_processes.contains(&svc) {
+					target_processes.push(svc);
+				}
+			} else {
+				eprintln!("unknown service: {}", svc);
+				std::process::exit(1);
+			}
+		}
+		service_names
+	};
 
 	if names.is_empty() {
 		eprintln!("no services to reload");
@@ -485,7 +589,7 @@ fn cmd_reload(args: &[String]) {
 	let response = send_request(&Request::Reload {
 		names: names.clone(),
 		all: reload_all,
-		processes: Vec::new(),
+		processes: target_processes,
 	});
 	match response {
 		Response::Ok { message } => {
@@ -773,17 +877,21 @@ fn cmd_show(args: &[String]) {
 			std::process::exit(0);
 		}
 	} else if filtered_args.len() == 1 {
-		if entries.contains_key(&filtered_args[0]) {
-			(filtered_args[0].clone(), None)
+		let (svc, proc) = resolve_dot_target(&filtered_args[0], &entries);
+		if proc.is_some() {
+			(svc, proc)
+		} else if entries.contains_key(&svc) {
+			(svc, None)
 		} else if let Some(current) = get_current_project(&entries) {
-			(current, Some(filtered_args[0].clone()))
+			(current, Some(svc))
 		} else {
 			eprintln!("unknown service: {}", filtered_args[0]);
 			eprintln!("registered services: {}", entries.keys().cloned().collect::<Vec<_>>().join(", "));
 			std::process::exit(1);
 		}
 	} else {
-		(filtered_args[0].clone(), Some(filtered_args[1].clone()))
+		let (svc, proc) = resolve_dot_target(&filtered_args[0], &entries);
+		(svc, proc.or_else(|| Some(filtered_args[1].clone())))
 	};
 
 	let service_entry = match entries.get(&service_name) {
@@ -1290,30 +1398,16 @@ fn resolve_target_names(args: &[String], entries: &BTreeMap<String, ServiceEntry
 }
 
 fn check_alias_hint() {
-	let shell = detect_shell();
-	let rc_file = shell_rc_file(&shell);
-
-	let mut hints: Vec<String> = Vec::new();
-
-	// Check if 'ky' alias/binary exists
-	if !command_exists("ky") {
-		hints.push("alias ky='kagaya'".to_string());
-	}
-
-	// Check if 'lctl' alias/binary exists
-	if !command_exists("lctl") {
-		hints.push("alias lctl='ky launchd'".to_string());
-	}
-
-	if hints.is_empty() {
+	if command_exists("lctl") {
 		return;
 	}
 
+	let shell = detect_shell();
+	let rc_file = shell_rc_file(&shell);
+
 	eprintln!();
 	eprintln!("tip: add to {}:", rc_file);
-	for hint in &hints {
-		eprintln!("  {}", hint);
-	}
+	eprintln!("  alias lctl='ky launchd'");
 }
 
 fn detect_shell() -> String {

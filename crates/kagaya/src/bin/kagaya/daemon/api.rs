@@ -1,3 +1,5 @@
+use crate::autostart;
+use crate::config;
 use crate::daemon::supervisor::Supervisor;
 use kagaya::{ProcessState, ServiceType};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -44,6 +46,9 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
 		.route("/api/cron/{name}/run", post(cron_run))
 		.route("/api/cron/{name}/pause", post(cron_pause))
 		.route("/api/cron/{name}/resume", post(cron_resume))
+		.route("/api/autostart", get(autostart_status))
+		.route("/api/autostart/on", post(autostart_on))
+		.route("/api/autostart/off", post(autostart_off))
 		.fallback(static_handler)
 		.layer(CorsLayer::permissive())
 		.with_state(state)
@@ -54,6 +59,7 @@ struct ServiceInfo {
 	name: String,
 	dir: String,
 	running: bool,
+	autostart: bool,
 }
 
 #[derive(Serialize)]
@@ -87,12 +93,17 @@ struct ErrorResponse {
 
 async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> {
 	let statuses = state.supervisor.status().await;
+	let entries = config::load_service_entries();
 	let services = statuses
 		.iter()
-		.map(|s| ServiceInfo {
-			name: s.name.clone(),
-			dir: s.dir.to_string_lossy().to_string(),
-			running: s.is_running(),
+		.map(|s| {
+			let autostart = entries.get(&s.name).map(|e| e.autostart).unwrap_or(false);
+			ServiceInfo {
+				name: s.name.clone(),
+				dir: s.dir.to_string_lossy().to_string(),
+				running: s.is_running(),
+				autostart,
+			}
 		})
 		.collect();
 	Json(services)
@@ -367,6 +378,40 @@ async fn handle_ws_echo(mut socket: WebSocket, state: AppState, name: String) {
 		}
 	}
 }
+
+// ── Autostart ────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct AutostartStatusResponse {
+	installed: bool,
+	active: bool,
+	agent_path: Option<String>,
+	projects: Vec<String>,
+}
+
+async fn autostart_status() -> Json<AutostartStatusResponse> {
+	let info = autostart::status_info();
+	Json(AutostartStatusResponse {
+		installed: info.installed,
+		active: info.active,
+		agent_path: info.agent_path,
+		projects: info.projects,
+	})
+}
+
+async fn autostart_on() -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	autostart::enable()
+		.map(|msg| Json(ActionResponse { message: msg }))
+		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+async fn autostart_off() -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	autostart::disable()
+		.map(|msg| Json(ActionResponse { message: msg }))
+		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+// ── Static files ─────────────────────────────────────────────────────────────
 
 async fn static_handler(uri: Uri) -> impl IntoResponse {
 	let path = uri.path().trim_start_matches('/');

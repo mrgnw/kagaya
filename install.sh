@@ -2,7 +2,7 @@
 set -eu
 
 repo="mrgnw/kagaya"
-bin="kagaya"
+bin="ky"
 install_dir="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 detect_target() {
@@ -67,10 +67,8 @@ tar -xzf "${tmpdir}/${archive}" -C "${tmpdir}"
 mkdir -p "${install_dir}"
 mv "${tmpdir}/${bin}" "${install_dir}/${bin}"
 chmod +x "${install_dir}/${bin}"
-ln -sf "${install_dir}/${bin}" "${install_dir}/ky"
 
 echo "installed ${install_dir}/${bin}"
-echo "created alias ${install_dir}/ky"
 
 # --- install shell completions ---
 

@@ -10,7 +10,7 @@ keywords = ["supervisor", "process-manager", "daemon", "procfile", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "kagaya"
+name = "ky"
 path = "src/bin/kagaya/main.rs"
 
 [dependencies]

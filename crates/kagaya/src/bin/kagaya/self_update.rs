@@ -21,11 +21,11 @@ pub fn cmd_self_update() {
 		return;
 	}
 
-	eprintln!("updating kagaya {} -> {}", CURRENT_VERSION, latest_clean);
+	eprintln!("updating ky {} -> {}", CURRENT_VERSION, latest_clean);
 
 	let target = detect_target();
 	let tag = if latest.starts_with('v') { latest.clone() } else { format!("v{}", latest) };
-	let archive_name = format!("kagaya-{}-{}.tar.gz", tag, target);
+	let archive_name = format!("ky-{}-{}.tar.gz", tag, target);
 	let url = format!(
 		"https://github.com/{}/releases/download/{}/{}",
 		REPO, tag, archive_name
@@ -36,7 +36,7 @@ pub fn cmd_self_update() {
 		Err(_) => PathBuf::from("/usr/local/bin"),
 	};
 
-	let tmpdir = std::env::temp_dir().join(format!("kagaya-update-{}", std::process::id()));
+	let tmpdir = std::env::temp_dir().join(format!("ky-update-{}", std::process::id()));
 	let _ = fs::create_dir_all(&tmpdir);
 
 	let archive_path = tmpdir.join(&archive_name);
@@ -56,7 +56,7 @@ pub fn cmd_self_update() {
 		std::process::exit(1);
 	}
 
-	for bin_name in &["kagaya"] {
+	for bin_name in &["ky"] {
 		let src = tmpdir.join(bin_name);
 		let dest = install_dir.join(bin_name);
 		if src.exists() {

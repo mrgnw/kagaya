@@ -238,6 +238,39 @@ impl Supervisor {
 		Ok(format!("{}: stopped", name))
 	}
 
+	/// Stop specific processes within a service.
+	pub async fn stop_processes(
+		self: &Arc<Self>,
+		name: &str,
+		processes: &[String],
+	) -> Result<String, String> {
+		let mut services = self.services.write().await;
+		let managed = services
+			.get_mut(name)
+			.ok_or_else(|| format!("{}: not running", name))?;
+
+		let mut messages = Vec::new();
+		for proc_name in processes {
+			if let Some(mp) = managed.processes.get_mut(proc_name.as_str()) {
+				if mp.state.is_running() {
+					if let Some(cancel) = mp.cancel.take() {
+						let _ = cancel.send(true);
+					}
+					if let ProcessState::Running { pid, .. } = &mp.state {
+						kill_process_tree(*pid);
+					}
+					mp.state = ProcessState::Stopped;
+					messages.push(format!("{}/{}: stopped", name, proc_name));
+				} else {
+					messages.push(format!("{}/{}: not running", name, proc_name));
+				}
+			} else {
+				messages.push(format!("{}/{}: not found", name, proc_name));
+			}
+		}
+		Ok(messages.join("\n"))
+	}
+
 	/// Stop then start a service (with 200ms gap).
 	pub async fn reload_service(
 		self: &Arc<Self>,
