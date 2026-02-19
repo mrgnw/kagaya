@@ -11,6 +11,7 @@
 		type ServiceDetail,
 	} from '$lib/api';
 	import Terminal from '$lib/components/Terminal.svelte';
+	import StatusIcon from '$lib/components/StatusIcon.svelte';
 
 	let detail = $state<ServiceDetail | null>(null);
 	let error = $state('');
@@ -96,7 +97,7 @@
 		<a href="/" class="back" title="Back to services">
 			<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 3L5 8l5 5" /></svg>
 		</a>
-		<span class="dot" class:running={detail?.running ?? false}></span>
+		<StatusIcon status={detail?.running ? "running" : "stopped"} size="calc(16px * var(--scale, 1))" />
 		<h1>{name}</h1>
 		{#if detail}
 			<span class="actions">
@@ -127,7 +128,7 @@
 			</div>
 		{:else if !detail.running}
 			<div class="stopped-state">
-				<span class="stopped-dot"></span>
+				<StatusIcon status="stopped" size="calc(40px * var(--scale, 1))" />
 				<span class="stopped-label">stopped</span>
 				<button class="start-btn" onclick={() => handleAction('start')} disabled={loading}>
 					<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5z" /></svg>
@@ -174,18 +175,6 @@
 
 	.back:hover {
 		color: #ccc;
-	}
-
-	.dot {
-		width: calc(18px * var(--scale, 1));
-		height: calc(18px * var(--scale, 1));
-		border-radius: 50%;
-		background: #cc4444;
-		flex-shrink: 0;
-	}
-
-	.dot.running {
-		background: #44bb44;
 	}
 
 	h1 {
@@ -250,13 +239,6 @@
 		align-items: center;
 		justify-content: center;
 		gap: calc(16px * var(--scale, 1));
-	}
-
-	.stopped-dot {
-		width: calc(48px * var(--scale, 1));
-		height: calc(48px * var(--scale, 1));
-		border-radius: 50%;
-		background: #cc4444;
 	}
 
 	.stopped-label {

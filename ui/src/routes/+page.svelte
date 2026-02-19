@@ -2,15 +2,19 @@
     import { onMount } from "svelte";
     import {
         getServices,
+        getAutostartStatus,
         startService,
         stopService,
         reloadService,
         type ServiceInfo,
+        type AutostartStatus,
     } from "$lib/api";
     import ServiceRow from "$lib/components/ServiceRow.svelte";
+    import StatusIcon from "$lib/components/StatusIcon.svelte";
     import logoSvg from "$lib/assets/logo.svg";
 
     let services = $state<ServiceInfo[]>([]);
+    let autostartStatus = $state<AutostartStatus | null>(null);
     let error = $state("");
     let refreshTimer: ReturnType<typeof setInterval>;
     let selectedNames = $state<Set<string>>(new Set());
@@ -53,6 +57,11 @@
             queueMicrotask(syncIndeterminate);
         } catch (e) {
             error = e instanceof Error ? e.message : String(e);
+        }
+        try {
+            autostartStatus = await getAutostartStatus();
+        } catch {
+            autostartStatus = null;
         }
     }
 
@@ -192,17 +201,25 @@
             <div class="stats" aria-label="Project status">
                 {#if runningCount > 0}
                     <span class="stat">
-                        <span class="stat-dot running"></span>
+                        <StatusIcon status="running" size="0.6em" />
                         <span class="stat-num">{runningCount}</span>
                         <span class="stat-label">running</span>
                     </span>
                 {/if}
                 {#if stoppedCount > 0}
                     <span class="stat">
-                        <span class="stat-dot stopped"></span>
+                        <StatusIcon status="stopped" size="0.6em" />
                         <span class="stat-num">{stoppedCount}</span>
                         <span class="stat-label">stopped</span>
                     </span>
+                {/if}
+                {#if autostartStatus?.installed}
+                    <a href="/settings" class="stat autostart-stat" title="autostart settings">
+                        <svg class="autostart-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                            <path d="M8 2v4" /><path d="M5.2 4.2A5 5 0 1 0 10.8 4.2" />
+                        </svg>
+                        <span class="stat-label">autostart</span>
+                    </a>
                 {/if}
             </div>
         </header>
@@ -410,19 +427,6 @@
         color: #555;
     }
 
-    .stat-dot {
-        width: 0.6em;
-        height: 0.6em;
-        border-radius: 50%;
-    }
-
-    .stat-dot.running {
-        background: #44bb44;
-    }
-    .stat-dot.stopped {
-        background: #cc4444;
-    }
-
     .stat-num {
         font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
         font-weight: 600;
@@ -432,6 +436,25 @@
     .stat-label {
         color: #555;
         font-size: 0.85em;
+    }
+
+    .autostart-stat {
+        text-decoration: none;
+        transition: color 0.15s;
+    }
+
+    .autostart-stat:hover {
+        color: #888;
+    }
+
+    .autostart-stat:hover .stat-label {
+        color: #888;
+    }
+
+    .autostart-icon {
+        width: 0.85em;
+        height: 0.85em;
+        color: #555;
     }
 
     /* ── Toolbar ── */
