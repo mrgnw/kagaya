@@ -33,6 +33,7 @@ fn simple_proc(name: &str, command: &str) -> ProcessDef {
 		restart_delay_secs: 1,
 		env: HashMap::new(),
 		autostart: true,
+		pre_start: None,
 	}
 }
 
@@ -239,6 +240,7 @@ async fn task_does_not_restart_on_failure() {
 		restart_delay_secs: 0,
 		env: HashMap::new(),
 		autostart: true,
+		pre_start: None,
 	}];
 
 	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
@@ -322,6 +324,7 @@ async fn supervisor_passes_env_vars() {
 		restart_delay_secs: 0,
 		env,
 		autostart: true,
+		pre_start: None,
 	}];
 
 	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
