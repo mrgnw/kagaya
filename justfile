@@ -62,15 +62,10 @@ dist +targets: build-ui
 
 # Publish dist archives as a GitHub release
 [private]
+[confirm("create github release {{tag}}?")]
 gh-release:
 	#!/bin/bash
 	set -euo pipefail
-	echo
-	read -p "create github release {{tag}}? [y/N] " confirm
-	if [[ "${confirm}" != "y" ]]; then
-		echo "skipped"
-		exit 0
-	fi
 	gh release create "{{tag}}" \
 		--title "{{tag}}" \
 		--generate-notes \
