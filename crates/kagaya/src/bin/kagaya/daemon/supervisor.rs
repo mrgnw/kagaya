@@ -47,10 +47,18 @@ impl Supervisor {
 							ProcessState::Running { pid, .. } => Some(*pid),
 							_ => None,
 						};
-						let ports = pid
+						let mut ports = pid
 							.and_then(|p| pid_ports.get(&p))
 							.cloned()
 							.unwrap_or_default();
+						// Fall back to configured ports if runtime discovery found nothing
+						if ports.is_empty() && pid.is_some() {
+							for &p in &mp.def.ports {
+								if !ports.contains(&p) {
+									ports.push(p);
+								}
+							}
+						}
 						ProcessStatus {
 							name: pname.clone(),
 							state: mp.state.clone(),

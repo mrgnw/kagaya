@@ -46,12 +46,33 @@ pub fn listening_ports_for_pids(target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
 
 	let mut result: HashMap<u32, Vec<u16>> = HashMap::new();
 	for &pid in target_pids {
-		if let Some(ports) = all_ports.get(&pid) {
-			result.insert(pid, ports.clone());
-			continue;
-		}
-		let group_pids = pids_by_type(ProcFilter::ByProgramGroup { pgrpid: pid }).unwrap_or_default();
 		let mut ports: Vec<u16> = Vec::new();
+
+		// Check the pid itself
+		if let Some(p) = all_ports.get(&pid) {
+			ports.extend(p);
+		}
+
+		// Walk all descendants recursively by parent PID
+		let mut stack = vec![pid];
+		while let Some(parent) = stack.pop() {
+			let children = pids_by_type(ProcFilter::ByParentProcess { ppid: parent }).unwrap_or_default();
+			for child in children {
+				if child != 0 && child != pid {
+					if let Some(p) = all_ports.get(&child) {
+						for port in p {
+							if !ports.contains(port) {
+								ports.push(*port);
+							}
+						}
+					}
+					stack.push(child);
+				}
+			}
+		}
+
+		// Also check process group as fallback
+		let group_pids = pids_by_type(ProcFilter::ByProgramGroup { pgrpid: pid }).unwrap_or_default();
 		for gpid in &group_pids {
 			if let Some(p) = all_ports.get(gpid) {
 				for port in p {
@@ -61,6 +82,7 @@ pub fn listening_ports_for_pids(target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
 				}
 			}
 		}
+
 		if !ports.is_empty() {
 			ports.sort();
 			result.insert(pid, ports);

@@ -23,6 +23,7 @@ pub fn cmd_launchd(args: &[String]) {
 		"create" => cmd_create(rest),
 		"edit" => cmd_edit(rest),
 		"remove" | "rm" => cmd_remove(rest),
+		"alias" => cmd_alias(),
 		label => {
 			cmd_status(&[label.to_string()]);
 		}
@@ -46,6 +47,7 @@ fn print_launchd_usage() {
 	eprintln!("  create <label> -- <cmd>      Create a new agent plist");
 	eprintln!("  edit <label>                 Open plist in $EDITOR");
 	eprintln!("  remove <label> [--yes]       Unload and delete agent plist");
+	eprintln!("  alias                        Print shell alias command");
 	eprintln!();
 	eprintln!("options:");
 	eprintln!("  --all, -a                    Include all loaded agents (not just plist files)");
@@ -1358,5 +1360,32 @@ fn cmd_remove(args: &[String]) {
 			eprintln!("error removing {}: {}", plist_path.display(), e);
 			std::process::exit(1);
 		}
+	}
+}
+
+fn cmd_alias() {
+	let shell = detect_shell();
+	let rc_file = shell_rc_file(&shell);
+	let alias_line = "alias lctl='ky launchd'";
+
+	println!("echo \"{}\" >> {}", alias_line, rc_file);
+}
+
+fn detect_shell() -> String {
+	if let Ok(shell) = std::env::var("SHELL") {
+		if let Some(name) = shell.rsplit('/').next() {
+			return name.to_string();
+		}
+	}
+	"bash".to_string()
+}
+
+fn shell_rc_file(shell: &str) -> String {
+	let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+	match shell {
+		"zsh" => format!("{}/.zshrc", home),
+		"fish" => format!("{}/.config/fish/config.fish", home),
+		"bash" => format!("{}/.bashrc", home),
+		_ => format!("~/.{}rc", shell),
 	}
 }

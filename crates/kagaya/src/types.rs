@@ -37,6 +37,8 @@ pub struct ProcessDef {
 	#[serde(default = "default_true")]
 	pub autostart: bool,
 	pub pre_start: Option<String>,
+	#[serde(default)]
+	pub ports: Vec<u16>,
 }
 
 fn default_true() -> bool {

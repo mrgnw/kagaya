@@ -125,6 +125,8 @@ enum ServiceDef {
 		env: HashMap<String, String>,
 		autostart: Option<bool>,
 		pre_start: Option<String>,
+		#[serde(default)]
+		ports: Vec<u16>,
 	},
 }
 
@@ -141,8 +143,9 @@ impl ServiceDef {
 			env: defaults.env.clone(),
 			autostart: true,
 			pre_start: None,
+			ports: Vec::new(),
 		},
-		ServiceDef::Full { run, service_type, restart, max_retries, restart_delay, env, autostart, pre_start } => {
+		ServiceDef::Full { run, service_type, restart, max_retries, restart_delay, env, autostart, pre_start, ports } => {
 			let is_task = service_type == ServiceType::Task;
 			let mut merged_env = defaults.env.clone();
 			merged_env.extend(env);
@@ -156,6 +159,7 @@ impl ServiceDef {
 				env: merged_env,
 				autostart: autostart.unwrap_or(!is_task),
 				pre_start,
+				ports,
 			}
 		}
 		}
@@ -310,6 +314,7 @@ pub fn load_service(entry: &ServiceEntry, defaults: &DefaultsConfig) -> Service 
 			env,
 			autostart: !is_task,
 			pre_start: None,
+			ports: Vec::new(),
 		};
 		return Service { name: entry.name.clone(), dir: entry.dir.clone(), processes: vec![proc] };
 	}

@@ -85,6 +85,8 @@ pub enum Cmd {
 		all: bool,
 		#[arg(long)]
 		autostart: bool,
+		#[arg(long, short = 'e')]
+		echo: bool,
 		#[arg(long, short, hide = true)]
 		watch: bool,
 		#[arg(long, hide = true)]
@@ -96,26 +98,21 @@ pub enum Cmd {
 		names: Vec<String>,
 		#[arg(long, short)]
 		all: bool,
+		#[arg(long, short = 'e')]
+		echo: bool,
 		#[arg(long, short, hide = true)]
 		watch: bool,
 		#[arg(long, hide = true)]
 		watch_interval: Option<u64>,
 	},
 
-	/// Reload (stop + start)
-	Reload {
-		names: Vec<String>,
-		#[arg(long, short)]
-		all: bool,
-		#[arg(long, short, hide = true)]
-		watch: bool,
-		#[arg(long, hide = true)]
-		watch_interval: Option<u64>,
-	},
-
-	/// Restart a single process
+	/// Restart service(s) or a single process
 	Restart {
 		target: Vec<String>,
+		#[arg(long, short)]
+		all: bool,
+		#[arg(long, short = 'e')]
+		echo: bool,
 		#[arg(long, short, hide = true)]
 		watch: bool,
 		#[arg(long, hide = true)]
@@ -127,7 +124,8 @@ pub enum Cmd {
 		args: Vec<String>,
 	},
 
-	/// Follow log file (tail -f)
+	/// Deprecated: use echo instead
+	#[command(hide = true)]
 	Tail {
 		args: Vec<String>,
 	},

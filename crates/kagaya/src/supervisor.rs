@@ -313,7 +313,7 @@ impl Supervisor {
 			let _ = cancel.send(true);
 		}
 		if let ProcessState::Running { pid, .. } = &mp.state {
-			kill_process_tree(*pid).await;
+			cleanup_process_and_ports(*pid, &mp.def.ports).await;
 		}
 		mp.state = ProcessState::Stopped;
 		mp.retry_count = 0;
@@ -585,6 +585,8 @@ async fn run_process_loop(
 						},
 					)
 					.await;
+					// Clean up orphaned descendants and free ports before retry
+					cleanup_process_and_ports(pid, &def.ports).await;
 					tokio::time::sleep(std::time::Duration::from_secs(def.restart_delay_secs))
 						.await;
 					continue;
@@ -821,3 +823,71 @@ pub async fn kill_port_holders(ports: &[u16]) {
 
 #[cfg(not(target_os = "macos"))]
 pub async fn kill_port_holders(_ports: &[u16]) {}
+
+/// Check if any of the given ports are still in use (TCP LISTEN).
+#[cfg(target_os = "macos")]
+fn ports_in_use(ports: &[u16]) -> Vec<u16> {
+	use netstat2::*;
+	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+	let proto = ProtocolFlags::TCP;
+	let sockets = match get_sockets_info(af, proto) {
+		Ok(s) => s,
+		Err(_) => return Vec::new(),
+	};
+	let mut in_use = Vec::new();
+	for si in &sockets {
+		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
+			if tcp.state == TcpState::Listen && ports.contains(&tcp.local_port) && !in_use.contains(&tcp.local_port) {
+				in_use.push(tcp.local_port);
+			}
+		}
+	}
+	in_use
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ports_in_use(_ports: &[u16]) -> Vec<u16> {
+	Vec::new()
+}
+
+/// Wait for the given ports to become free, polling every 100ms up to 5 seconds.
+/// Returns the ports that are still in use after the timeout (empty = all clear).
+pub async fn wait_for_ports_free(ports: &[u16]) -> Vec<u16> {
+	if ports.is_empty() {
+		return Vec::new();
+	}
+	let ports = ports.to_vec();
+	tokio::task::spawn_blocking(move || {
+		for _ in 0..50 {
+			let still_used = ports_in_use(&ports);
+			if still_used.is_empty() {
+				return Vec::new();
+			}
+			std::thread::sleep(std::time::Duration::from_millis(100));
+		}
+		let still_used = ports_in_use(&ports);
+		if !still_used.is_empty() {
+			tracing::warn!("ports still in use after 5s: {:?}", still_used);
+		}
+		still_used
+	})
+	.await
+	.unwrap_or_default()
+}
+
+/// Kill a process tree, clean up port holders, and wait for ports to be free.
+/// Merges runtime-discovered ports with any configured ports from the ProcessDef.
+pub async fn cleanup_process_and_ports(pid: u32, configured_ports: &[u16]) {
+	let mut ports = kill_process_tree(pid).await;
+	for &p in configured_ports {
+		if !ports.contains(&p) {
+			ports.push(p);
+		}
+	}
+	kill_port_holders(&ports).await;
+	let stuck = wait_for_ports_free(&ports).await;
+	if !stuck.is_empty() {
+		// Last resort: try killing port holders again
+		kill_port_holders(&stuck).await;
+	}
+}
