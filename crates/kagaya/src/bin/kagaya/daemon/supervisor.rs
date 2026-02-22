@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{self, GlobalConfig};
 use kagaya::*;
@@ -39,6 +40,8 @@ impl Supervisor {
 
 		for (name, entry) in &entries {
 			if let Some(managed) = services.get(name) {
+				let now_instant = Instant::now();
+				let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 				let processes = managed
 					.processes
 					.iter()
@@ -51,7 +54,6 @@ impl Supervisor {
 							.and_then(|p| pid_ports.get(&p))
 							.cloned()
 							.unwrap_or_default();
-						// Fall back to configured ports if runtime discovery found nothing
 						if ports.is_empty() && pid.is_some() {
 							for &p in &mp.def.ports {
 								if !ports.contains(&p) {
@@ -59,6 +61,8 @@ impl Supervisor {
 								}
 							}
 						}
+						let elapsed = now_instant.duration_since(mp.state_changed_at).as_secs();
+						let state_since = Some(now_unix.saturating_sub(elapsed));
 						ProcessStatus {
 							name: pname.clone(),
 							state: mp.state.clone(),
@@ -66,6 +70,7 @@ impl Supervisor {
 							autostart: mp.def.autostart,
 							service_type: mp.def.service_type.clone(),
 							ports,
+							state_since,
 						}
 					})
 					.collect();
@@ -86,6 +91,7 @@ impl Supervisor {
 						autostart: p.autostart,
 						service_type: p.service_type.clone(),
 						ports: vec![],
+						state_since: None,
 					})
 					.collect();
 				result.push(ServiceStatus {

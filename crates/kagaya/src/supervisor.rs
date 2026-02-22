@@ -34,6 +34,7 @@ pub struct ManagedProcess {
 	pub state: ProcessState,
 	pub output: OutputCapture,
 	pub retry_count: u32,
+	pub state_changed_at: Instant,
 	cancel: Option<tokio::sync::watch::Sender<bool>>,
 }
 
@@ -59,14 +60,20 @@ impl Supervisor {
 						ProcessState::Running { pid, .. } => Some(*pid),
 						_ => None,
 					};
+				let elapsed = mp.state_changed_at.elapsed().as_secs();
+					let now_unix = std::time::SystemTime::now()
+						.duration_since(std::time::UNIX_EPOCH)
+						.unwrap()
+						.as_secs();
 					ProcessStatus {
-						name: pname.clone(),
-						state: mp.state.clone(),
-						pid,
-						autostart: mp.def.autostart,
-						service_type: mp.def.service_type.clone(),
-						ports: vec![],
-					}
+					name: pname.clone(),
+					state: mp.state.clone(),
+					pid,
+					autostart: mp.def.autostart,
+					service_type: mp.def.service_type.clone(),
+					ports: vec![],
+					state_since: Some(now_unix.saturating_sub(elapsed)),
+				}
 				})
 				.collect();
 			result.push(ServiceStatus {
@@ -164,13 +171,14 @@ impl Supervisor {
 			);
 			let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
-			let mp = ManagedProcess {
-				def: proc_def.clone(),
-				state: ProcessState::Stopped,
-				output: output.clone(),
-				retry_count: 0,
-				cancel: Some(cancel_tx),
-			};
+		let mp = ManagedProcess {
+			def: proc_def.clone(),
+			state: ProcessState::Stopped,
+			output: output.clone(),
+			retry_count: 0,
+			state_changed_at: Instant::now(),
+			cancel: Some(cancel_tx),
+		};
 			managed_processes.insert(proc_def.name.clone(), mp);
 
 			if should_start {
@@ -658,6 +666,10 @@ async fn update_state(
 	let mut services = supervisor.services.write().await;
 	if let Some(managed) = services.get_mut(service) {
 		if let Some(mp) = managed.processes.get_mut(process) {
+			let variant_changed = std::mem::discriminant(&mp.state) != std::mem::discriminant(&state);
+			if variant_changed {
+				mp.state_changed_at = Instant::now();
+			}
 			mp.state = state;
 		}
 	}

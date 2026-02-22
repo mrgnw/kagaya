@@ -34,6 +34,7 @@ fn simple_proc(name: &str, command: &str) -> ProcessDef {
 		env: HashMap::new(),
 		autostart: true,
 		pre_start: None,
+		ports: vec![],
 	}
 }
 
@@ -53,30 +54,32 @@ fn service_status_is_running() {
 		name: "test".into(),
 		dir: "/tmp".into(),
 		processes: vec![
-			ProcessStatus {
-				name: "web".into(),
-				state: ProcessState::Running { pid: 1, uptime_secs: 5 },
-				pid: Some(1),
-				autostart: true,
-				service_type: ServiceType::Service,
-				ports: vec![],
-			},
-		],
-	};
-	assert!(s.is_running());
+		ProcessStatus {
+			name: "web".into(),
+			state: ProcessState::Running { pid: 1, uptime_secs: 5 },
+			pid: Some(1),
+			autostart: true,
+			service_type: ServiceType::Service,
+			ports: vec![],
+			state_since: None,
+		},
+	],
+};
+assert!(s.is_running());
 
-	let s2 = ServiceStatus {
-		name: "test".into(),
-		dir: "/tmp".into(),
-		processes: vec![
-			ProcessStatus {
-				name: "web".into(),
-				state: ProcessState::Stopped,
-				pid: None,
-				autostart: true,
-				service_type: ServiceType::Service,
-				ports: vec![],
-			},
+let s2 = ServiceStatus {
+	name: "test".into(),
+	dir: "/tmp".into(),
+	processes: vec![
+		ProcessStatus {
+			name: "web".into(),
+			state: ProcessState::Stopped,
+			pid: None,
+			autostart: true,
+			service_type: ServiceType::Service,
+			ports: vec![],
+			state_since: None,
+		},
 		],
 	};
 	assert!(!s2.is_running());
@@ -241,6 +244,7 @@ async fn task_does_not_restart_on_failure() {
 		env: HashMap::new(),
 		autostart: true,
 		pre_start: None,
+		ports: vec![],
 	}];
 
 	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
@@ -325,6 +329,7 @@ async fn supervisor_passes_env_vars() {
 		env,
 		autostart: true,
 		pre_start: None,
+		ports: vec![],
 	}];
 
 	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;

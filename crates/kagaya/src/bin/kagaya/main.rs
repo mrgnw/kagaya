@@ -53,20 +53,21 @@ fn main() {
 						print_usage();
 						if connect_daemon().is_some() {
 							eprintln!();
-							render_status(&[]);
+							render_condensed_status(&[]);
 						}
 						check_alias_hint();
 					}
 				}
-				Some(Cmd::Status { names, all, watch, watch_interval }) => {
-					let mut args = names;
-					if all { args.push("--all".to_string()); }
-					if watch || cli.watch { args.push("--watch".to_string()); }
-					if let Some(iv) = watch_interval {
-						args.push("--watch-interval".to_string());
-						args.push(iv.to_string());
-					}
-					cmd_status(&args);
+			Some(Cmd::Status { names, all, expanded, watch, watch_interval }) => {
+				let mut args = names;
+				if all { args.push("--all".to_string()); }
+				if expanded { args.push("--expanded".to_string()); }
+				if watch || cli.watch { args.push("--watch".to_string()); }
+				if let Some(iv) = watch_interval {
+					args.push("--watch-interval".to_string());
+					args.push(iv.to_string());
+				}
+				cmd_status(&args);
 				}
 			Some(Cmd::Start { names, all, autostart, echo, watch, watch_interval }) => {
 				let mut args = names.clone();
@@ -418,38 +419,149 @@ fn cmd_status(args: &[String]) {
 	if watch.enabled && !output_format().is_plain() {
 		watch_status(&rest, &watch);
 	} else {
-		render_status(&rest);
+		let expanded = rest.iter().any(|a| is_expanded_flag(a));
+		if expanded {
+			render_expanded_status(&rest);
+		} else {
+			render_condensed_status(&rest);
+		}
+	}
+}
+
+fn format_state_duration(state_since: Option<u64>) -> String {
+	match state_since {
+		Some(ts) => format_uptime(utils::duration_since_timestamp(ts)),
+		None => String::new(),
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AggregateState {
+	On,
+	Degraded,
+	Err,
+	Off,
+}
+
+fn aggregate_state(status: &ServiceStatus) -> AggregateState {
+	let any_running = status.processes.iter().any(|p| p.state.is_running());
+	let any_failed = status.processes.iter().any(|p| matches!(p.state, ProcessState::Failed { .. } | ProcessState::Crashed { .. }));
+	match (any_running, any_failed) {
+		(true, true) => AggregateState::Degraded,
+		(false, true) => AggregateState::Err,
+		(true, false) => AggregateState::On,
+		(false, false) => AggregateState::Off,
+	}
+}
+
+fn aggregate_symbol(agg: AggregateState) -> String {
+	match agg {
+		AggregateState::On => "●".green().to_string(),
+		AggregateState::Degraded => "⚠".yellow().to_string(),
+		AggregateState::Err => "✖".red().to_string(),
+		AggregateState::Off => "◻".dimmed().to_string(),
+	}
+}
+
+fn aggregate_label(agg: AggregateState) -> String {
+	match agg {
+		AggregateState::On => "on".green().to_string(),
+		AggregateState::Degraded => "deg".yellow().to_string(),
+		AggregateState::Err => "err".red().to_string(),
+		AggregateState::Off => "off".dimmed().to_string(),
+	}
+}
+
+fn color_duration(duration: &str, agg: AggregateState) -> String {
+	if duration.is_empty() { return String::new(); }
+	match agg {
+		AggregateState::On => duration.green().to_string(),
+		AggregateState::Degraded => duration.yellow().to_string(),
+		AggregateState::Err => duration.red().to_string(),
+		AggregateState::Off => duration.dimmed().to_string(),
+	}
+}
+
+fn process_mini_icon(proc: &ProcessStatus) -> String {
+	match &proc.state {
+		ProcessState::Running { .. } => "•".green().to_string(),
+		ProcessState::Stopped if !proc.autostart => "◦".dimmed().to_string(),
+		ProcessState::Stopped => "◦".dimmed().to_string(),
+		ProcessState::Crashed { .. } => "⚠".yellow().to_string(),
+		ProcessState::Failed { .. } => "✖".red().to_string(),
+	}
+}
+
+fn process_state_color(proc: &ProcessStatus) -> AggregateState {
+	match &proc.state {
+		ProcessState::Running { .. } => AggregateState::On,
+		ProcessState::Stopped => AggregateState::Off,
+		ProcessState::Crashed { .. } => AggregateState::Degraded,
+		ProcessState::Failed { .. } => AggregateState::Err,
+	}
+}
+
+fn relevant_state_since(status: &ServiceStatus, agg: AggregateState) -> Option<u64> {
+	match agg {
+		AggregateState::On | AggregateState::Degraded => {
+			status.processes.iter()
+				.filter(|p| p.state.is_running())
+				.filter_map(|p| p.state_since)
+				.max()
+		}
+		AggregateState::Err => {
+			status.processes.iter()
+				.filter(|p| matches!(p.state, ProcessState::Failed { .. } | ProcessState::Crashed { .. }))
+				.filter_map(|p| p.state_since)
+				.max()
+		}
+		AggregateState::Off => {
+			status.processes.iter()
+				.filter_map(|p| p.state_since)
+				.max()
+		}
 	}
 }
 
 fn print_process_line(proc: &ProcessStatus, name_width: usize) {
+	let pcolor = process_state_color(proc);
 	let (symbol, label, extra) = match &proc.state {
-		ProcessState::Running { pid, uptime_secs } => {
+		ProcessState::Running { pid, .. } => {
+			let duration = format_state_duration(proc.state_since);
 			let ports = if proc.ports.is_empty() {
 				String::new()
 			} else {
 				proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
 			};
-			let extra = format!("{:<8} {:<8} {}", format_uptime(*uptime_secs), pid, ports);
-			("●".green().to_string(), "on".green().to_string(), extra)
+			let extra = format!("{:<8} {:<8} {}", color_duration(&duration, pcolor), pid, ports);
+			("•".green().to_string(), "on".green().to_string(), extra)
 		}
 		ProcessState::Stopped if !proc.autostart => {
-			("○".dimmed().to_string(), "optional".dimmed().to_string(), String::new())
+			let duration = format_state_duration(proc.state_since);
+			let extra = if duration.is_empty() { String::new() } else { color_duration(&duration, pcolor) };
+			("◦".dimmed().to_string(), "optional".dimmed().to_string(), extra)
 		}
 		ProcessState::Stopped => {
-			("◻".dimmed().to_string(), "off".dimmed().to_string(), String::new())
+			let duration = format_state_duration(proc.state_since);
+			let extra = if duration.is_empty() { String::new() } else { color_duration(&duration, pcolor) };
+			("◦".dimmed().to_string(), "off".dimmed().to_string(), extra)
 		}
 		ProcessState::Crashed { exit_code, retries } => {
-			let extra = format!("exit {}  retry {}", exit_code, retries);
+			let duration = format_state_duration(proc.state_since);
+			let dur_str = if duration.is_empty() { String::new() } else { format!("{}  ", color_duration(&duration, pcolor)) };
+			let extra = format!("{}exit {}  retry {}", dur_str, exit_code, retries);
 			("⚠".yellow().to_string(), "crashed".yellow().to_string(), extra)
 		}
 		ProcessState::Failed { exit_code } => {
-			let extra = format!("exit {}", exit_code);
+			let duration = format_state_duration(proc.state_since);
+			let dur_str = if duration.is_empty() { String::new() } else { format!("{}  ", color_duration(&duration, pcolor)) };
+			let extra = format!("{}exit {}", dur_str, exit_code);
 			("✖".red().to_string(), "failed".red().to_string(), extra)
 		}
 	};
+	let dotname = format!(".{}", proc.name);
 	let extra_str = if extra.is_empty() { String::new() } else { format!("  {}", extra.trim_end()) };
-	println!("  {} {:<width$} {}{}", symbol, proc.name, label, extra_str, width = name_width);
+	println!("{} {:<width$} {}{}", symbol, dotname, label, extra_str, width = name_width);
 }
 
 fn handle_action_response(response: &Response) {
@@ -1275,9 +1387,16 @@ struct StatusData {
 	status_map: std::collections::HashMap<String, ServiceStatus>,
 	process_filter: Option<String>,
 	max_proc_name_width: usize,
+	max_svc_name_width: usize,
 	show_extras: bool,
+	expanded: bool,
+	is_single_service: bool,
 	http_port: Option<u16>,
 	cron_jobs: Option<Vec<koku::JobStatus>>,
+}
+
+fn is_expanded_flag(s: &str) -> bool {
+	matches!(s, "--expanded" | "-e")
 }
 
 fn gather_status_data(args: &[String]) -> StatusData {
@@ -1285,19 +1404,25 @@ fn gather_status_data(args: &[String]) -> StatusData {
 	let entries = config::load_service_entries();
 
 	let show_all = args.iter().any(|a| is_all_flag(a));
+	let expanded = args.iter().any(|a| is_expanded_flag(a));
 	let current_project = get_current_project(&entries);
 
-	let (filter, process_filter) = if args.is_empty() {
+	let filtered_args: Vec<String> = args.iter()
+		.filter(|a| !is_all_flag(a) && !is_expanded_flag(a))
+		.cloned()
+		.collect();
+
+	let (filter, process_filter) = if show_all {
+		(entries.keys().cloned().collect(), None)
+	} else if filtered_args.is_empty() {
 		let svcs = if let Some(ref current) = current_project {
 			vec![current.clone()]
 		} else {
 			entries.keys().cloned().collect()
 		};
 		(svcs, None)
-	} else if show_all {
-		(entries.keys().cloned().collect(), None)
 	} else {
-		let (svcs, procs) = resolve_service_targets(args, &entries);
+		let (svcs, procs) = resolve_service_targets(&filtered_args, &entries);
 		let proc_filter = procs.into_iter().next();
 		(svcs, proc_filter)
 	};
@@ -1347,11 +1472,18 @@ fn gather_status_data(args: &[String]) -> StatusData {
 	let max_proc_name_width = sorted_filter
 		.iter()
 		.filter_map(|name| status_map.get(name))
-		.flat_map(|s| s.processes.iter().map(|p| p.name.len()))
+		.flat_map(|s| s.processes.iter().map(|p| p.name.len() + 1))
 		.max()
 		.unwrap_or(0);
 
-	let show_extras = show_all || (args.is_empty() && current_project.is_none());
+	let max_svc_name_width = sorted_filter
+		.iter()
+		.map(|name| name.len())
+		.max()
+		.unwrap_or(0);
+
+	let is_single_service = sorted_filter.len() == 1 && !filtered_args.is_empty() && !show_all;
+	let show_extras = show_all || (filtered_args.is_empty() && current_project.is_none());
 	let cron_jobs = if show_extras { koku_client::fetch_status() } else { None };
 
 	StatusData {
@@ -1359,13 +1491,16 @@ fn gather_status_data(args: &[String]) -> StatusData {
 		status_map,
 		process_filter,
 		max_proc_name_width,
+		max_svc_name_width,
 		show_extras,
+		expanded,
+		is_single_service,
 		http_port,
 		cron_jobs,
 	}
 }
 
-fn render_status(args: &[String]) -> usize {
+fn render_condensed_status(args: &[String]) -> usize {
 	let data = gather_status_data(args);
 
 	if let Some(ref proc_name) = data.process_filter {
@@ -1373,7 +1508,7 @@ fn render_status(args: &[String]) -> usize {
 			if let Some(status) = data.status_map.get(name) {
 				for proc in &status.processes {
 					if proc.name == *proc_name {
-						print_process_line(proc, proc.name.len());
+						print_process_line(proc, proc.name.len() + 1);
 						return 1;
 					}
 				}
@@ -1388,17 +1523,183 @@ fn render_status(args: &[String]) -> usize {
 	}
 
 	let mut lines = 0usize;
+	let name_w = data.max_svc_name_width;
+
 	for name in &data.sorted_filter {
 		let status = data.status_map.get(name);
-		let running = status.map(|s| s.is_running()).unwrap_or(false);
+		let agg = status.map(|s| aggregate_state(s)).unwrap_or(AggregateState::Off);
+		let sym = aggregate_symbol(agg);
+		let label = aggregate_label(agg);
+		let duration = status.and_then(|s| relevant_state_since(s, agg));
+		let dur_str = format_state_duration(duration);
+		let dur_colored = color_duration(&dur_str, agg);
 
-		let symbol = if running { "●".green().to_string() } else { "◻".dimmed().to_string() };
-		println!("{} {}", symbol, name.bold());
+		let has_multi = status.map(|s| s.processes.len() > 1).unwrap_or(false);
+
+		let mini_icons = if has_multi {
+			let icons: String = status.unwrap().processes.iter().map(|p| process_mini_icon(p)).collect();
+			icons
+		} else {
+			String::new()
+		};
+
+		let pids_ports: String = if let Some(status) = status {
+			let parts: Vec<String> = status.processes.iter()
+				.filter(|p| p.state.is_running())
+				.map(|p| {
+					let pid = match &p.state {
+						ProcessState::Running { pid, .. } => pid.to_string(),
+						_ => String::new(),
+					};
+					if p.ports.is_empty() {
+						pid
+					} else {
+						let ports = p.ports.iter().map(|pt| format!(":{}", pt)).collect::<Vec<_>>().join(",");
+						format!("{}{}", pid, ports)
+					}
+				})
+				.collect();
+			parts.join(", ")
+		} else {
+			String::new()
+		};
+
+		let mut line = format!("{} {:<nw$}  {:<3}", sym, name, label, nw = name_w);
+		if !dur_colored.is_empty() {
+			line.push_str(&format!("  {:>7}", dur_colored));
+		} else if !mini_icons.is_empty() || !pids_ports.is_empty() {
+			line.push_str(&format!("  {:>7}", ""));
+		}
+		if !mini_icons.is_empty() {
+			line.push_str(&format!(" {}", mini_icons));
+		}
+		if !pids_ports.is_empty() {
+			line.push_str(&format!("  {}", pids_ports));
+		}
+		println!("{}", line.trim_end());
+		lines += 1;
+	}
+
+	if data.show_extras {
+		println!();
+		lines += 1;
+		if let Some(port) = data.http_port {
+			println!("{} {:<nw$}  {}  http://127.0.0.1:{}", "●".green(), "serve", "on".green(), port, nw = name_w);
+		} else {
+			println!("{} {:<nw$}  {}", "○".dimmed(), "serve", "off".dimmed(), nw = name_w);
+		}
 		lines += 1;
 
-		if let Some(status) = status {
-			for proc in &status.processes {
-				print_process_line(proc, data.max_proc_name_width);
+		if let Some(ref jobs) = data.cron_jobs {
+			if !jobs.is_empty() {
+				println!();
+				lines += 1;
+				for job in jobs {
+					let sym = koku_client::state_symbol(&job.state);
+					let state_str = job.state.to_string();
+					let (sym_colored, state_colored) = match job.state {
+						koku::JobState::Running => (sym.green().to_string(), state_str.green().to_string()),
+						koku::JobState::Idle => (sym.dimmed().to_string(), state_str.dimmed().to_string()),
+						koku::JobState::Paused => (sym.dimmed().to_string(), state_str.dimmed().to_string()),
+						koku::JobState::Failing => (sym.yellow().to_string(), state_str.yellow().to_string()),
+						koku::JobState::Stopped => (sym.red().to_string(), state_str.red().to_string()),
+					};
+					println!("{} {:<nw$}  {}", sym_colored, job.name, state_colored, nw = name_w);
+					lines += 1;
+				}
+			}
+		}
+	}
+
+	lines
+}
+
+fn render_expanded_status(args: &[String]) -> usize {
+	let data = gather_status_data(args);
+
+	if let Some(ref proc_name) = data.process_filter {
+		if let Some(name) = data.sorted_filter.first() {
+			if let Some(status) = data.status_map.get(name) {
+				for proc in &status.processes {
+					if proc.name == *proc_name {
+						print_process_line(proc, proc.name.len() + 1);
+						return 1;
+					}
+				}
+				eprintln!("process '{}' not found in {}", proc_name, name);
+				std::process::exit(1);
+			} else {
+				eprintln!("service '{}' not running", name);
+				std::process::exit(1);
+			}
+		}
+		return 0;
+	}
+
+	let name_w = data.max_proc_name_width.max(data.max_svc_name_width);
+
+	let mut lines = 0usize;
+	for name in &data.sorted_filter {
+		let status = data.status_map.get(name);
+		let agg = status.map(|s| aggregate_state(s)).unwrap_or(AggregateState::Off);
+
+		let show_procs = status.map(|s| s.processes.len() > 1 || data.is_single_service).unwrap_or(false);
+
+		if show_procs {
+			let sym = aggregate_symbol(agg);
+			println!("{} {}", sym, name.bold());
+			lines += 1;
+
+			if let Some(status) = status {
+				for proc in &status.processes {
+					print_process_line(proc, name_w);
+					lines += 1;
+				}
+			}
+		} else {
+			if let Some(status) = status {
+				if let Some(proc) = status.processes.first() {
+					let pcolor = process_state_color(proc);
+					let (symbol, label, extra) = match &proc.state {
+						ProcessState::Running { pid, .. } => {
+							let duration = format_state_duration(proc.state_since);
+							let ports = if proc.ports.is_empty() {
+								String::new()
+							} else {
+								proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+							};
+							let extra = format!("{:<8} {:<8} {}", color_duration(&duration, pcolor), pid, ports);
+							("●".green().to_string(), "on".green().to_string(), extra)
+						}
+						ProcessState::Stopped if !proc.autostart => {
+							let duration = format_state_duration(proc.state_since);
+							let extra = if duration.is_empty() { String::new() } else { color_duration(&duration, pcolor) };
+							("○".dimmed().to_string(), "off".dimmed().to_string(), extra)
+						}
+						ProcessState::Stopped => {
+							let duration = format_state_duration(proc.state_since);
+							let extra = if duration.is_empty() { String::new() } else { color_duration(&duration, pcolor) };
+							("◻".dimmed().to_string(), "off".dimmed().to_string(), extra)
+						}
+						ProcessState::Crashed { exit_code, retries } => {
+							let duration = format_state_duration(proc.state_since);
+							let dur_str = if duration.is_empty() { String::new() } else { format!("{}  ", color_duration(&duration, pcolor)) };
+							let extra = format!("{}exit {}  retry {}", dur_str, exit_code, retries);
+							("⚠".yellow().to_string(), "crashed".yellow().to_string(), extra)
+						}
+						ProcessState::Failed { exit_code } => {
+							let duration = format_state_duration(proc.state_since);
+							let dur_str = if duration.is_empty() { String::new() } else { format!("{}  ", color_duration(&duration, pcolor)) };
+							let extra = format!("{}exit {}", dur_str, exit_code);
+							("✖".red().to_string(), "failed".red().to_string(), extra)
+						}
+					};
+					let extra_str = if extra.is_empty() { String::new() } else { format!("  {}", extra.trim_end()) };
+					println!("{} {:<w$} {}{}", symbol, name, label, extra_str, w = name_w);
+					lines += 1;
+				}
+			} else {
+				println!("{} {:<w$} {}", "◻".dimmed(), name, "off".dimmed(), w = name_w);
 				lines += 1;
 			}
 		}
@@ -1408,9 +1709,9 @@ fn render_status(args: &[String]) -> usize {
 		println!();
 		lines += 1;
 		if let Some(port) = data.http_port {
-			println!("{} {}  http://127.0.0.1:{}", "●".green(), "serve".bold(), port);
+			println!("{} {:<w$} {}  http://127.0.0.1:{}", "●".green(), "serve", "on".green(), port, w = name_w);
 		} else {
-			println!("{} {}  not running", "○".dimmed(), "serve".bold());
+			println!("{} {:<w$} {}", "○".dimmed(), "serve", "off".dimmed(), w = name_w);
 		}
 		lines += 1;
 
@@ -1424,7 +1725,7 @@ fn render_status(args: &[String]) -> usize {
 				println!("{} {}", symbol, "cron".bold());
 				lines += 1;
 
-				let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
+				let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0).max(name_w);
 
 				for job in jobs {
 					let sym = koku_client::state_symbol(&job.state);
@@ -1461,48 +1762,108 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as RLine, Span};
 use ratatui::widgets::Paragraph;
 
+fn process_state_style(proc: &ProcessStatus) -> Style {
+	match &proc.state {
+		ProcessState::Running { .. } => Style::default().fg(Color::Green),
+		ProcessState::Stopped => Style::default().add_modifier(Modifier::DIM),
+		ProcessState::Crashed { .. } => Style::default().fg(Color::Yellow),
+		ProcessState::Failed { .. } => Style::default().fg(Color::Red),
+	}
+}
+
 fn process_line_spans<'a>(proc: &ProcessStatus, name_width: usize) -> RLine<'a> {
 	let green = Style::default().fg(Color::Green);
 	let dim = Style::default().add_modifier(Modifier::DIM);
 	let yellow = Style::default().fg(Color::Yellow);
 	let red = Style::default().fg(Color::Red);
+	let state_style = process_state_style(proc);
+
+	let dur_str = format_state_duration(proc.state_since);
 
 	let (symbol, label, extra) = match &proc.state {
-		ProcessState::Running { pid, uptime_secs } => {
+		ProcessState::Running { pid, .. } => {
 			let ports = if proc.ports.is_empty() {
 				String::new()
 			} else {
 				proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
 			};
-			let extra = format!("{:<8} {:<8} {}", format_uptime(*uptime_secs), pid, ports);
-			(Span::styled("●", green), Span::styled("on", green), extra)
+			let extra = format!("{:<8} {:<8} {}", dur_str, pid, ports);
+			(Span::styled("•", green), Span::styled("on", green), extra)
 		}
 		ProcessState::Stopped if !proc.autostart => {
-			(Span::styled("○", dim), Span::styled("optional", dim), String::new())
+			(Span::styled("◦", dim), Span::styled("optional", dim), dur_str.clone())
 		}
 		ProcessState::Stopped => {
-			(Span::styled("◻", dim), Span::styled("off", dim), String::new())
+			(Span::styled("◦", dim), Span::styled("off", dim), dur_str.clone())
 		}
 		ProcessState::Crashed { exit_code, retries } => {
-			let extra = format!("exit {}  retry {}", exit_code, retries);
+			let dur_prefix = if dur_str.is_empty() { String::new() } else { format!("{}  ", dur_str) };
+			let extra = format!("{}exit {}  retry {}", dur_prefix, exit_code, retries);
 			(Span::styled("⚠", yellow), Span::styled("crashed", yellow), extra)
 		}
 		ProcessState::Failed { exit_code } => {
-			let extra = format!("exit {}", exit_code);
+			let dur_prefix = if dur_str.is_empty() { String::new() } else { format!("{}  ", dur_str) };
+			let extra = format!("{}exit {}", dur_prefix, exit_code);
 			(Span::styled("✖", red), Span::styled("failed", red), extra)
 		}
 	};
-	let extra_str = if extra.is_empty() { String::new() } else { format!("  {}", extra.trim_end()) };
-	let padded_name = format!("{:<width$}", proc.name, width = name_width);
-	RLine::from(vec![
-		Span::raw("  "),
+	let dotname = format!(".{}", proc.name);
+	let padded_name = format!("{:<width$}", dotname, width = name_width);
+
+	let mut spans = vec![
 		symbol,
 		Span::raw(" "),
 		Span::raw(padded_name),
 		Span::raw(" "),
 		label,
-		Span::raw(extra_str),
-	])
+	];
+	if !extra.is_empty() {
+		spans.push(Span::raw("  "));
+		spans.push(Span::styled(extra.trim_end().to_string(), state_style));
+	}
+	RLine::from(spans)
+}
+
+fn aggregate_state_style(agg: AggregateState) -> Style {
+	match agg {
+		AggregateState::On => Style::default().fg(Color::Green),
+		AggregateState::Degraded => Style::default().fg(Color::Yellow),
+		AggregateState::Err => Style::default().fg(Color::Red),
+		AggregateState::Off => Style::default().add_modifier(Modifier::DIM),
+	}
+}
+
+fn aggregate_symbol_span(agg: AggregateState) -> Span<'static> {
+	let style = aggregate_state_style(agg);
+	match agg {
+		AggregateState::On => Span::styled("●", style),
+		AggregateState::Degraded => Span::styled("⚠", style),
+		AggregateState::Err => Span::styled("✖", style),
+		AggregateState::Off => Span::styled("◻", style),
+	}
+}
+
+fn aggregate_label_span(agg: AggregateState) -> Span<'static> {
+	let style = aggregate_state_style(agg);
+	match agg {
+		AggregateState::On => Span::styled("on", style),
+		AggregateState::Degraded => Span::styled("deg", style),
+		AggregateState::Err => Span::styled("err", style),
+		AggregateState::Off => Span::styled("off", style),
+	}
+}
+
+fn process_mini_icon_span(proc: &ProcessStatus) -> Span<'static> {
+	let green = Style::default().fg(Color::Green);
+	let dim = Style::default().add_modifier(Modifier::DIM);
+	let yellow = Style::default().fg(Color::Yellow);
+	let red = Style::default().fg(Color::Red);
+	match &proc.state {
+		ProcessState::Running { .. } => Span::styled("•", green),
+		ProcessState::Stopped => Span::styled("◦", dim),
+		ProcessState::Crashed { .. } => Span::styled("⚠", yellow),
+		ProcessState::Failed { .. } => Span::styled("✖", red),
+	}
 }
 
 fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
@@ -1515,7 +1876,7 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 			if let Some(status) = data.status_map.get(name) {
 				for proc in &status.processes {
 					if proc.name == *proc_name {
-						return vec![process_line_spans(proc, proc.name.len())];
+						return vec![process_line_spans(proc, proc.name.len() + 1)];
 					}
 				}
 			}
@@ -1525,40 +1886,161 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 
 	let mut lines: Vec<RLine> = Vec::new();
 
-	for name in &data.sorted_filter {
-		let status = data.status_map.get(name);
-		let running = status.map(|s| s.is_running()).unwrap_or(false);
+	if data.expanded {
+		let name_w = data.max_proc_name_width.max(data.max_svc_name_width);
 
-		let symbol = if running {
-			Span::styled("●", green)
-		} else {
-			Span::styled("◻", dim)
-		};
-		lines.push(RLine::from(vec![symbol, Span::raw(" "), Span::styled(name.clone(), bold)]));
+		for name in &data.sorted_filter {
+			let status = data.status_map.get(name);
+			let agg = status.map(|s| aggregate_state(s)).unwrap_or(AggregateState::Off);
+			let show_procs = status.map(|s| s.processes.len() > 1 || data.is_single_service).unwrap_or(false);
 
-		if let Some(status) = status {
-			for proc in &status.processes {
-				lines.push(process_line_spans(proc, data.max_proc_name_width));
+			if show_procs {
+				let sym = aggregate_symbol_span(agg);
+				lines.push(RLine::from(vec![sym, Span::raw(" "), Span::styled(name.clone(), bold)]));
+				if let Some(status) = status {
+					for proc in &status.processes {
+						lines.push(process_line_spans(proc, name_w));
+					}
+				}
+			} else if let Some(status) = status {
+				if let Some(proc) = status.processes.first() {
+					let pstyle = process_state_style(proc);
+					let dur_str = format_state_duration(proc.state_since);
+					let (symbol, label, extra) = match &proc.state {
+						ProcessState::Running { pid, .. } => {
+							let ports = if proc.ports.is_empty() { String::new() } else {
+								proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+							};
+							let extra = format!("{:<8} {:<8} {}", dur_str, pid, ports);
+							(Span::styled("●", green), Span::styled("on", green), extra)
+						}
+						ProcessState::Stopped if !proc.autostart => {
+							(Span::styled("○", dim), Span::styled("off", dim), dur_str.clone())
+						}
+						ProcessState::Stopped => {
+							(Span::styled("◻", dim), Span::styled("off", dim), dur_str.clone())
+						}
+						ProcessState::Crashed { exit_code, retries } => {
+							let dur_prefix = if dur_str.is_empty() { String::new() } else { format!("{}  ", dur_str) };
+							let extra = format!("{}exit {}  retry {}", dur_prefix, exit_code, retries);
+							let y = Style::default().fg(Color::Yellow);
+							(Span::styled("⚠", y), Span::styled("crashed", y), extra)
+						}
+						ProcessState::Failed { exit_code } => {
+							let dur_prefix = if dur_str.is_empty() { String::new() } else { format!("{}  ", dur_str) };
+							let extra = format!("{}exit {}", dur_prefix, exit_code);
+							let r = Style::default().fg(Color::Red);
+							(Span::styled("✖", r), Span::styled("failed", r), extra)
+						}
+					};
+					let padded = format!("{:<w$}", name, w = name_w);
+					let mut spans = vec![symbol, Span::raw(" "), Span::raw(padded), Span::raw(" "), label];
+					if !extra.is_empty() {
+						spans.push(Span::raw("  "));
+						spans.push(Span::styled(extra.trim_end().to_string(), pstyle));
+					}
+					lines.push(RLine::from(spans));
+				}
+			} else {
+				let padded = format!("{:<w$}", name, w = name_w);
+				lines.push(RLine::from(vec![Span::styled("◻", dim), Span::raw(" "), Span::raw(padded), Span::raw(" "), Span::styled("off", dim)]));
 			}
+		}
+	} else {
+		let name_w = data.max_svc_name_width;
+
+		for name in &data.sorted_filter {
+			let status = data.status_map.get(name);
+			let agg = status.map(|s| aggregate_state(s)).unwrap_or(AggregateState::Off);
+			let agg_style = aggregate_state_style(agg);
+			let sym = aggregate_symbol_span(agg);
+			let label = aggregate_label_span(agg);
+
+			let duration = status.and_then(|s| relevant_state_since(s, agg));
+			let dur_str = format_state_duration(duration);
+
+			let has_multi = status.map(|s| s.processes.len() > 1).unwrap_or(false);
+
+			let pids_ports: String = if let Some(status) = status {
+				let parts: Vec<String> = status.processes.iter()
+					.filter(|p| p.state.is_running())
+					.map(|p| {
+						let pid = match &p.state {
+							ProcessState::Running { pid, .. } => pid.to_string(),
+							_ => String::new(),
+						};
+						if p.ports.is_empty() { pid }
+						else {
+							let ports = p.ports.iter().map(|pt| format!(":{}", pt)).collect::<Vec<_>>().join(",");
+							format!("{}{}", pid, ports)
+						}
+					})
+					.collect();
+				parts.join(", ")
+			} else {
+				String::new()
+			};
+
+			let padded = format!("{:<w$}", name, w = name_w);
+			let mut spans: Vec<Span> = vec![sym, Span::raw(" "), Span::raw(padded), Span::raw("  "), label];
+
+			if !dur_str.is_empty() {
+				spans.push(Span::raw("  "));
+				spans.push(Span::styled(format!("{:>7}", dur_str), agg_style));
+			} else if has_multi || !pids_ports.is_empty() {
+				spans.push(Span::raw(format!("  {:>7}", "")));
+			}
+
+			if has_multi {
+				spans.push(Span::raw(" "));
+				if let Some(status) = status {
+					for proc in &status.processes {
+						spans.push(process_mini_icon_span(proc));
+					}
+				}
+			}
+
+			if !pids_ports.is_empty() {
+				spans.push(Span::raw("  "));
+				spans.push(Span::raw(pids_ports));
+			}
+
+			lines.push(RLine::from(spans));
 		}
 	}
 
 	if data.show_extras {
 		lines.push(RLine::from(""));
-		if let Some(port) = data.http_port {
-			lines.push(RLine::from(vec![
-				Span::styled("●", green),
-				Span::raw(" "),
-				Span::styled("serve", bold),
-				Span::raw(format!("  http://127.0.0.1:{}", port)),
-			]));
+		if data.expanded {
+			let name_w = data.max_proc_name_width.max(data.max_svc_name_width);
+			if let Some(port) = data.http_port {
+				let padded = format!("{:<w$}", "serve", w = name_w);
+				lines.push(RLine::from(vec![
+					Span::styled("●", green), Span::raw(" "), Span::raw(padded), Span::raw(" "),
+					Span::styled("on", green), Span::raw(format!("  http://127.0.0.1:{}", port)),
+				]));
+			} else {
+				let padded = format!("{:<w$}", "serve", w = name_w);
+				lines.push(RLine::from(vec![
+					Span::styled("○", dim), Span::raw(" "), Span::raw(padded), Span::raw(" "),
+					Span::styled("off", dim),
+				]));
+			}
 		} else {
-			lines.push(RLine::from(vec![
-				Span::styled("○", dim),
-				Span::raw(" "),
-				Span::styled("serve", bold),
-				Span::raw("  not running"),
-			]));
+			let name_w = data.max_svc_name_width;
+			if let Some(port) = data.http_port {
+				let padded = format!("{:<w$}", "serve", w = name_w);
+				lines.push(RLine::from(vec![
+					Span::styled("●", green), Span::raw(" "), Span::raw(padded), Span::raw("  "),
+					Span::styled("on", green), Span::raw(format!("  http://127.0.0.1:{}", port)),
+				]));
+			} else {
+				let padded = format!("{:<w$}", "serve", w = name_w);
+				lines.push(RLine::from(vec![
+					Span::styled("○", dim), Span::raw(" "), Span::raw(padded), Span::raw("  "),
+					Span::styled("off", dim),
+				]));
+			}
 		}
 
 		if let Some(ref jobs) = data.cron_jobs {
@@ -1864,6 +2346,7 @@ mod tests {
 			autostart: true,
 			service_type: ServiceType::Service,
 			ports: vec![],
+			state_since: None,
 		}
 	}
 
@@ -1878,9 +2361,10 @@ mod tests {
 	fn test_status_data(services: Vec<ServiceStatus>) -> StatusData {
 		let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
 		let max_w = services.iter()
-			.flat_map(|s| s.processes.iter().map(|p| p.name.len()))
+			.flat_map(|s| s.processes.iter().map(|p| p.name.len() + 1))
 			.max()
 			.unwrap_or(0);
+		let max_svc = names.iter().map(|n| n.len()).max().unwrap_or(0);
 		let mut map = std::collections::HashMap::new();
 		for s in services {
 			map.insert(s.name.clone(), s);
@@ -1890,7 +2374,10 @@ mod tests {
 			status_map: map,
 			process_filter: None,
 			max_proc_name_width: max_w,
+			max_svc_name_width: max_svc,
 			show_extras: false,
+			expanded: false,
+			is_single_service: false,
 			http_port: None,
 			cron_jobs: None,
 		}
@@ -1943,13 +2430,11 @@ mod tests {
 		let line = process_line_spans(&proc, 10);
 		let text = span_text(&line);
 
-		assert!(text.starts_with("  "));
-		assert!(text.contains("●"));
+		assert!(text.contains("•"));
+		assert!(text.contains(".web"));
 		assert!(text.contains("on"));
-		assert!(text.contains("1m5s"));
-		assert!(text.contains("1234"));
 
-		let dot = find_span(&line, "●").unwrap();
+		let dot = find_span(&line, "•").unwrap();
 		assert_eq!(dot.style, Style::default().fg(Color::Green));
 		let on = find_span(&line, "on").unwrap();
 		assert_eq!(on.style, Style::default().fg(Color::Green));
@@ -1970,8 +2455,8 @@ mod tests {
 		let proc = test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 0 });
 		let line = process_line_spans(&proc, 10);
 		let text = span_text(&line);
-		// "web" padded to 10 chars
-		assert!(text.contains("web       "));
+		// ".web" padded to 10 chars
+		assert!(text.contains(".web      "));
 	}
 
 	// --- process_line_spans: stopped ---
@@ -1982,12 +2467,11 @@ mod tests {
 		let line = process_line_spans(&proc, 8);
 		let text = span_text(&line);
 
-		assert!(text.contains("◻"));
+		assert!(text.contains("◦"));
 		assert!(text.contains("off"));
-		// No extra info for stopped
 		assert!(!text.contains("exit"));
 
-		let sq = find_span(&line, "◻").unwrap();
+		let sq = find_span(&line, "◦").unwrap();
 		assert_eq!(sq.style, Style::default().add_modifier(Modifier::DIM));
 	}
 
@@ -1995,13 +2479,13 @@ mod tests {
 	fn spans_stopped_optional() {
 		let mut proc = test_proc("optional-svc", ProcessState::Stopped);
 		proc.autostart = false;
-		let line = process_line_spans(&proc, 12);
+		let line = process_line_spans(&proc, 14);
 		let text = span_text(&line);
 
-		assert!(text.contains("○"));
+		assert!(text.contains("◦"));
 		assert!(text.contains("optional"));
 
-		let circle = find_span(&line, "○").unwrap();
+		let circle = find_span(&line, "◦").unwrap();
 		assert_eq!(circle.style, Style::default().add_modifier(Modifier::DIM));
 	}
 
@@ -2042,45 +2526,41 @@ mod tests {
 		assert_eq!(failed.style, Style::default().fg(Color::Red));
 	}
 
-	// --- status_data_to_lines: service headers ---
+	// --- status_data_to_lines: condensed (default) ---
 
 	#[test]
-	fn lines_running_service_header() {
+	fn lines_condensed_running_service() {
 		let svc = test_service("myapp", vec![
 			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 10 }),
 		]);
 		let data = test_status_data(vec![svc]);
 		let lines = status_data_to_lines(&data);
 
-		assert_eq!(lines.len(), 2); // header + 1 process
-		let header = &lines[0];
-		let header_text = span_text(header);
-		assert!(header_text.contains("●"));
-		assert!(header_text.contains("myapp"));
+		assert_eq!(lines.len(), 1);
+		let text = span_text(&lines[0]);
+		assert!(text.contains("●"));
+		assert!(text.contains("myapp"));
+		assert!(text.contains("on"));
 
-		let dot = find_span(header, "●").unwrap();
+		let dot = find_span(&lines[0], "●").unwrap();
 		assert_eq!(dot.style, Style::default().fg(Color::Green));
-		let name = find_span(header, "myapp").unwrap();
-		assert_eq!(name.style, Style::default().add_modifier(Modifier::BOLD));
 	}
 
 	#[test]
-	fn lines_stopped_service_header() {
+	fn lines_condensed_stopped_service() {
 		let svc = test_service("myapp", vec![
 			test_proc("web", ProcessState::Stopped),
 		]);
 		let data = test_status_data(vec![svc]);
 		let lines = status_data_to_lines(&data);
 
-		let header = &lines[0];
-		let dot = find_span(header, "◻").unwrap();
+		assert_eq!(lines.len(), 1);
+		let dot = find_span(&lines[0], "◻").unwrap();
 		assert_eq!(dot.style, Style::default().add_modifier(Modifier::DIM));
 	}
 
-	// --- status_data_to_lines: multiple services ---
-
 	#[test]
-	fn lines_multiple_services() {
+	fn lines_condensed_multiple_services() {
 		let svc1 = test_service("alpha", vec![
 			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 0 }),
 			test_proc("worker", ProcessState::Stopped),
@@ -2091,27 +2571,61 @@ mod tests {
 		let data = test_status_data(vec![svc1, svc2]);
 		let lines = status_data_to_lines(&data);
 
-		// alpha header + web + worker + beta header + api = 5
-		assert_eq!(lines.len(), 5);
+		// condensed: 1 line per service
+		assert_eq!(lines.len(), 2);
 		assert!(span_text(&lines[0]).contains("alpha"));
-		assert!(span_text(&lines[3]).contains("beta"));
+		assert!(span_text(&lines[1]).contains("beta"));
 	}
 
 	#[test]
-	fn lines_name_width_consistent_across_services() {
-		let svc1 = test_service("a", vec![
-			test_proc("short", ProcessState::Stopped),
+	fn lines_condensed_multi_proc_has_mini_icons() {
+		let svc = test_service("myapp", vec![
+			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 0 }),
+			test_proc("worker", ProcessState::Stopped),
 		]);
-		let svc2 = test_service("b", vec![
-			test_proc("very-long-name", ProcessState::Stopped),
-		]);
-		let data = test_status_data(vec![svc1, svc2]);
+		let data = test_status_data(vec![svc]);
 		let lines = status_data_to_lines(&data);
 
-		// Both process lines should pad to max_proc_name_width = 14 ("very-long-name")
-		let short_line = span_text(&lines[1]);
-		// "short" should be padded to 14 chars
-		assert!(short_line.contains("short         "));
+		assert_eq!(lines.len(), 1);
+		let text = span_text(&lines[0]);
+		assert!(text.contains("•"));
+		assert!(text.contains("◦"));
+	}
+
+	// --- status_data_to_lines: expanded ---
+
+	#[test]
+	fn lines_expanded_running_service() {
+		let svc = test_service("myapp", vec![
+			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 10 }),
+			test_proc("worker", ProcessState::Stopped),
+		]);
+		let mut data = test_status_data(vec![svc]);
+		data.expanded = true;
+		let lines = status_data_to_lines(&data);
+
+		// header + 2 processes
+		assert_eq!(lines.len(), 3);
+		let header_text = span_text(&lines[0]);
+		assert!(header_text.contains("myapp"));
+
+		let dot = find_span(&lines[0], "●").unwrap();
+		assert_eq!(dot.style, Style::default().fg(Color::Green));
+	}
+
+	#[test]
+	fn lines_expanded_single_proc_inlined() {
+		let svc = test_service("myapp", vec![
+			test_proc("web", ProcessState::Stopped),
+		]);
+		let mut data = test_status_data(vec![svc]);
+		data.expanded = true;
+		let lines = status_data_to_lines(&data);
+
+		// single proc, not is_single_service => inlined to 1 line
+		assert_eq!(lines.len(), 1);
+		assert!(span_text(&lines[0]).contains("myapp"));
+		assert!(span_text(&lines[0]).contains("off"));
 	}
 
 	// --- status_data_to_lines: show_extras ---
@@ -2123,7 +2637,6 @@ mod tests {
 		data.http_port = Some(13369);
 		let lines = status_data_to_lines(&data);
 
-		// empty line + serve line = 2
 		assert_eq!(lines.len(), 2);
 		let serve_text = span_text(&lines[1]);
 		assert!(serve_text.contains("serve"));
@@ -2142,7 +2655,7 @@ mod tests {
 
 		assert_eq!(lines.len(), 2);
 		let serve_text = span_text(&lines[1]);
-		assert!(serve_text.contains("not running"));
+		assert!(serve_text.contains("off"));
 
 		let circle = find_span(&lines[1], "○").unwrap();
 		assert_eq!(circle.style, Style::default().add_modifier(Modifier::DIM));
@@ -2205,7 +2718,6 @@ mod tests {
 		assert_eq!(lines.len(), 6);
 		let cron_header = span_text(&lines[3]);
 		assert!(cron_header.contains("cron"));
-		// has_running = true, so green dot
 		let dot = find_span(&lines[3], "●").unwrap();
 		assert_eq!(dot.style, Style::default().fg(Color::Green));
 
@@ -2262,34 +2774,40 @@ mod tests {
 	}
 
 	fn capture_print_process_line(proc: &ProcessStatus, width: usize) -> String {
-		// Reproduce print_process_line logic without println
+		let pcolor = process_state_color(proc);
+		let dur_str = format_state_duration(proc.state_since);
 		let (symbol, label, extra) = match &proc.state {
-			ProcessState::Running { pid, uptime_secs } => {
+			ProcessState::Running { pid, .. } => {
 				let ports = if proc.ports.is_empty() {
 					String::new()
 				} else {
 					proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
 				};
-				let extra = format!("{:<8} {:<8} {}", format_uptime(*uptime_secs), pid, ports);
-				("●".green().to_string(), "on".green().to_string(), extra)
+				let extra = format!("{:<8} {:<8} {}", color_duration(&dur_str, pcolor), pid, ports);
+				("•".green().to_string(), "on".green().to_string(), extra)
 			}
 			ProcessState::Stopped if !proc.autostart => {
-				("○".dimmed().to_string(), "optional".dimmed().to_string(), String::new())
+				let extra = if dur_str.is_empty() { String::new() } else { color_duration(&dur_str, pcolor) };
+				("◦".dimmed().to_string(), "optional".dimmed().to_string(), extra)
 			}
 			ProcessState::Stopped => {
-				("◻".dimmed().to_string(), "off".dimmed().to_string(), String::new())
+				let extra = if dur_str.is_empty() { String::new() } else { color_duration(&dur_str, pcolor) };
+				("◦".dimmed().to_string(), "off".dimmed().to_string(), extra)
 			}
 			ProcessState::Crashed { exit_code, retries } => {
-				let extra = format!("exit {}  retry {}", exit_code, retries);
+				let dur_prefix = if dur_str.is_empty() { String::new() } else { format!("{}  ", color_duration(&dur_str, pcolor)) };
+				let extra = format!("{}exit {}  retry {}", dur_prefix, exit_code, retries);
 				("⚠".yellow().to_string(), "crashed".yellow().to_string(), extra)
 			}
 			ProcessState::Failed { exit_code } => {
-				let extra = format!("exit {}", exit_code);
+				let dur_prefix = if dur_str.is_empty() { String::new() } else { format!("{}  ", color_duration(&dur_str, pcolor)) };
+				let extra = format!("{}exit {}", dur_prefix, exit_code);
 				("✖".red().to_string(), "failed".red().to_string(), extra)
 			}
 		};
+		let dotname = format!(".{}", proc.name);
 		let extra_str = if extra.is_empty() { String::new() } else { format!("  {}", extra.trim_end()) };
-		format!("  {} {:<w$} {}{}", symbol, proc.name, label, extra_str, w = width)
+		format!("{} {:<w$} {}{}", symbol, dotname, label, extra_str, w = width)
 	}
 
 	#[test]
@@ -2320,16 +2838,16 @@ mod tests {
 	#[test]
 	fn parity_crashed() {
 		let proc = test_proc("api", ProcessState::Crashed { exit_code: 1, retries: 3 });
-		let println_out = strip_ansi(&capture_print_process_line(&proc, 5));
-		let ratatui_out = span_text(&process_line_spans(&proc, 5));
+		let println_out = strip_ansi(&capture_print_process_line(&proc, 6));
+		let ratatui_out = span_text(&process_line_spans(&proc, 6));
 		assert_eq!(println_out, ratatui_out);
 	}
 
 	#[test]
 	fn parity_failed() {
 		let proc = test_proc("bg", ProcessState::Failed { exit_code: 127 });
-		let println_out = strip_ansi(&capture_print_process_line(&proc, 4));
-		let ratatui_out = span_text(&process_line_spans(&proc, 4));
+		let println_out = strip_ansi(&capture_print_process_line(&proc, 5));
+		let ratatui_out = span_text(&process_line_spans(&proc, 5));
 		assert_eq!(println_out, ratatui_out);
 	}
 
@@ -2337,8 +2855,43 @@ mod tests {
 	fn parity_running_with_ports() {
 		let mut proc = test_proc("web", ProcessState::Running { pid: 100, uptime_secs: 30 });
 		proc.ports = vec![8080, 8443];
-		let println_out = strip_ansi(&capture_print_process_line(&proc, 6));
-		let ratatui_out = span_text(&process_line_spans(&proc, 6));
+		let println_out = strip_ansi(&capture_print_process_line(&proc, 7));
+		let ratatui_out = span_text(&process_line_spans(&proc, 7));
 		assert_eq!(println_out, ratatui_out);
+	}
+
+	// --- aggregate_state ---
+
+	#[test]
+	fn aggregate_all_running() {
+		let svc = test_service("app", vec![
+			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 0 }),
+		]);
+		assert_eq!(aggregate_state(&svc), AggregateState::On);
+	}
+
+	#[test]
+	fn aggregate_all_stopped() {
+		let svc = test_service("app", vec![
+			test_proc("web", ProcessState::Stopped),
+		]);
+		assert_eq!(aggregate_state(&svc), AggregateState::Off);
+	}
+
+	#[test]
+	fn aggregate_all_failed() {
+		let svc = test_service("app", vec![
+			test_proc("web", ProcessState::Failed { exit_code: 1 }),
+		]);
+		assert_eq!(aggregate_state(&svc), AggregateState::Err);
+	}
+
+	#[test]
+	fn aggregate_mixed_running_failed() {
+		let svc = test_service("app", vec![
+			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 0 }),
+			test_proc("worker", ProcessState::Failed { exit_code: 1 }),
+		]);
+		assert_eq!(aggregate_state(&svc), AggregateState::Degraded);
 	}
 }
