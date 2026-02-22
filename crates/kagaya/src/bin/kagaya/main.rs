@@ -14,7 +14,6 @@ mod utils;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Instant;
 use cli::{Cli, Cmd, OutputFormat, output_format, set_output_format};
 use config::ServiceEntry;
@@ -69,46 +68,40 @@ fn main() {
 					}
 					cmd_status(&args);
 				}
-				Some(Cmd::Start { names, all, autostart, watch, watch_interval }) => {
-					let mut args = names;
-					if all { args.push("--all".to_string()); }
-					if autostart { args.push("--autostart".to_string()); }
-					if watch || cli.watch { args.push("--watch".to_string()); }
-					if let Some(iv) = watch_interval {
-						args.push("--watch-interval".to_string());
-						args.push(iv.to_string());
-					}
-					cmd_start(&args);
+			Some(Cmd::Start { names, all, autostart, echo, watch, watch_interval }) => {
+				let mut args = names.clone();
+				if all { args.push("--all".to_string()); }
+				if autostart { args.push("--autostart".to_string()); }
+				if watch || cli.watch { args.push("--watch".to_string()); }
+				if let Some(iv) = watch_interval {
+					args.push("--watch-interval".to_string());
+					args.push(iv.to_string());
 				}
-				Some(Cmd::Stop { names, all, watch, watch_interval }) => {
-					let mut args = names;
-					if all { args.push("--all".to_string()); }
-					if watch || cli.watch { args.push("--watch".to_string()); }
-					if let Some(iv) = watch_interval {
-						args.push("--watch-interval".to_string());
-						args.push(iv.to_string());
-					}
-					cmd_stop(&args);
+				cmd_start(&args);
+				if echo { echo_after_action(&names, None); }
+			}
+			Some(Cmd::Stop { names, all, echo, watch, watch_interval }) => {
+				let mut args = names.clone();
+				if all { args.push("--all".to_string()); }
+				if watch || cli.watch { args.push("--watch".to_string()); }
+				if let Some(iv) = watch_interval {
+					args.push("--watch-interval".to_string());
+					args.push(iv.to_string());
 				}
-				Some(Cmd::Reload { names, all, watch, watch_interval }) => {
-					let mut args = names;
-					if all { args.push("--all".to_string()); }
-					if watch || cli.watch { args.push("--watch".to_string()); }
-					if let Some(iv) = watch_interval {
-						args.push("--watch-interval".to_string());
-						args.push(iv.to_string());
-					}
-					cmd_reload(&args);
+				cmd_stop(&args);
+				if echo { echo_after_stop(&names); }
+			}
+			Some(Cmd::Restart { target, all, echo, watch, watch_interval }) => {
+				let mut args = target.clone();
+				if all { args.push("--all".to_string()); }
+				if watch || cli.watch { args.push("--watch".to_string()); }
+				if let Some(iv) = watch_interval {
+					args.push("--watch-interval".to_string());
+					args.push(iv.to_string());
 				}
-				Some(Cmd::Restart { target, watch, watch_interval }) => {
-					let mut args = target;
-					if watch || cli.watch { args.push("--watch".to_string()); }
-					if let Some(iv) = watch_interval {
-						args.push("--watch-interval".to_string());
-						args.push(iv.to_string());
-					}
-					cmd_restart(&args);
-				}
+				cmd_restart(&args);
+				if echo { echo_after_action(&target, None); }
+			}
 				Some(Cmd::Logs { args }) => cmd_logs(&args),
 				Some(Cmd::Tail { args }) => cmd_tail(&args),
 				Some(Cmd::Echo { args }) => cmd_echo(&args),
@@ -168,18 +161,17 @@ fn dispatch_external(args: &[String]) {
 		match args[1].as_str() {
 			"start" => cmd_start(&[args[0].clone()]),
 			"stop" => cmd_stop(&[args[0].clone()]),
-			"reload" => cmd_reload(&[args[0].clone()]),
 			"status" | "st" => cmd_status(&[args[0].clone()]),
 			"logs" => cmd_logs(args),
 			"tail" => cmd_tail(args),
 			"echo" => cmd_echo(args),
 			"show" => cmd_show(args),
 			"restart" => {
+				let mut restart_args = vec![args[0].clone()];
 				if args.len() > 2 {
-					cmd_restart(&[args[0].clone(), args[2].clone()]);
-				} else {
-					cmd_reload(&[args[0].clone()]);
+					restart_args.push(args[2].clone());
 				}
+				cmd_restart(&restart_args);
 			}
 			_ => {
 				eprintln!("unknown command: {}", args[1]);
@@ -208,16 +200,14 @@ fn print_usage() {
 
 	eprintln!("{}", "services".cyan().bold());
 	eprintln!("  {} [name|--all]          Show status (default command)", "status".bold());
-	eprintln!("  {} [name|--all]           Start service(s)", "start".bold());
-	eprintln!("  {} [name|--all]            Stop service(s)", "stop".bold());
-	eprintln!("  {} [name|--all]          Reload (stop + start)", "reload".bold());
-	eprintln!("  {} [name] [process]     Restart a single process", "restart".bold());
+	eprintln!("  {} [name|--all] [-e]      Start service(s)", "start".bold());
+	eprintln!("  {} [name|--all] [-e]       Stop service(s)", "stop".bold());
+	eprintln!("  {} [name|--all] [-e]    Restart service(s) or a single process", "restart".bold());
 	eprintln!();
 
 	eprintln!("{}", "logs".cyan().bold());
-	eprintln!("  {} <name> [process]        Last 100 lines of log file", "logs".bold());
-	eprintln!("  {} <name> [process]        Follow log file (tail -f)", "tail".bold());
-	eprintln!("  {} <name> [process]        Live output stream from daemon", "echo".bold());
+	eprintln!("  {} <name> [process]        Show log file paths", "logs".bold());
+	eprintln!("  {} <name> [process] [-n N]  Tail + stream live output", "echo".bold());
 	eprintln!();
 
 	eprintln!("{}", "config".cyan().bold());
@@ -238,7 +228,7 @@ fn print_usage() {
 
 	eprintln!("{}", "system".cyan().bold());
 	eprintln!("  {} [on|off|status]   Start services on login", "autostart".bold());
-	eprintln!("  {} [start|stop|status]   Manage the daemon", "daemon".bold());
+	eprintln!("  {} [start|stop|restart|status]   Manage the daemon", "daemon".bold());
 	eprintln!("  {} [-d|--stop|--status]   HTTP server for web UI", "serve".bold());
 	eprintln!("  {} [command]            macOS launchd agents", "launchd".bold());
 	eprintln!("  {}                  Update to latest version", "self update".bold());
@@ -544,7 +534,7 @@ fn cmd_start(args: &[String]) {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
 				for line in msg.lines() {
-					eprintln!("{}", line);
+					println!("{}", line);
 				}
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
@@ -597,56 +587,7 @@ fn cmd_stop(args: &[String]) {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
 				for line in msg.lines() {
-					eprintln!("{}", line);
-				}
-			}
-			std::thread::sleep(std::time::Duration::from_millis(500));
-
-			if !watch.enabled {
-				watch.enabled = true;
-				watch.duration = Some(4);
-			}
-			watch_status(&names, &watch);
-		}
-		Response::Error { message } => {
-			eprintln!("error: {}", message);
-			std::process::exit(1);
-		}
-		_ => {}
-	}
-}
-
-fn cmd_reload(args: &[String]) {
-	let (mut watch, rest) = parse_watch_opts(args, Some(4));
-	let entries = config::load_service_entries();
-	let plain = output_format().is_plain();
-
-	let reload_all = rest.iter().any(|a| is_all_flag(a));
-	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
-
-	let (names, target_processes) = resolve_service_targets(&rest, &entries);
-
-	if names.is_empty() {
-		eprintln!("no services to reload");
-		std::process::exit(1);
-	}
-
-	let response = send_request(&Request::Reload {
-		names: names.clone(),
-		all: reload_all,
-		processes: target_processes,
-	});
-
-	if plain {
-		handle_action_response(&response);
-		return;
-	}
-
-	match response {
-		Response::Ok { message } => {
-			if let Some(msg) = message {
-				for line in msg.lines() {
-					eprintln!("{}", line);
+					println!("{}", line);
 				}
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
@@ -670,35 +611,89 @@ fn cmd_restart(args: &[String]) {
 	let entries = config::load_service_entries();
 	let plain = output_format().is_plain();
 
+	let restart_all = rest.iter().any(|a| is_all_flag(a));
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
+
 	if !watch.enabled && !plain {
 		watch.enabled = true;
 		watch.duration = Some(4);
 	}
 
-	let mut reload_extra: Vec<String> = Vec::new();
-	if !plain {
-		reload_extra.push("--watch".to_string());
-		if let Some(d) = watch.duration {
-			reload_extra.push(d.to_string());
+	// If --all or multiple services, do a full reload (stop+start all processes)
+	if restart_all || rest.is_empty() || rest.len() > 1 {
+		let (names, target_processes) = resolve_service_targets(&rest, &entries);
+		if names.is_empty() {
+			eprintln!("no services to restart");
+			std::process::exit(1);
 		}
-		if watch.interval != 1 {
-			reload_extra.push("--watch-interval".to_string());
-			reload_extra.push(watch.interval.to_string());
+
+		let response = send_request(&Request::Reload {
+			names: names.clone(),
+			all: restart_all,
+			processes: target_processes,
+		});
+
+		if plain {
+			handle_action_response(&response);
+			return;
 		}
+
+	match response {
+		Response::Ok { message } => {
+			if let Some(msg) = message {
+				for line in msg.lines() {
+					println!("{}", line);
+				}
+			}
+			std::thread::sleep(std::time::Duration::from_millis(500));
+			watch_status(&names, &watch);
+		}
+		Response::Error { message } => {
+			eprintln!("error: {}", message);
+			std::process::exit(1);
+		}
+		_ => {}
+	}
+	return;
 	}
 
+	// Single target: could be "service" or "service process"
 	let (service, process) = resolve_single_target(&rest, &entries);
 
-	// No process name means reload (restart all processes in the service)
-	let process_name = match process {
-		Some(p) => p,
-		None => {
-			let mut reload_args = vec![service];
-			reload_args.extend(reload_extra);
-			return cmd_reload(&reload_args);
-		}
-	};
+	// No process name means restart all processes in the service
+	if process.is_none() {
+		let response = send_request(&Request::Reload {
+			names: vec![service.clone()],
+			all: false,
+			processes: vec![],
+		});
 
+		if plain {
+			handle_action_response(&response);
+			return;
+		}
+
+	match response {
+		Response::Ok { message } => {
+			if let Some(msg) = message {
+				for line in msg.lines() {
+					println!("{}", line);
+				}
+			}
+			std::thread::sleep(std::time::Duration::from_millis(500));
+			watch_status(&[service], &watch);
+		}
+		Response::Error { message } => {
+			eprintln!("error: {}", message);
+			std::process::exit(1);
+		}
+		_ => {}
+	}
+	return;
+	}
+
+	// Restart a single process
+	let process_name = process.unwrap();
 	let response = send_request(&Request::Restart {
 		service: service.clone(),
 		process: process_name.clone(),
@@ -712,7 +707,7 @@ fn cmd_restart(args: &[String]) {
 	match response {
 		Response::Ok { message } => {
 			if let Some(msg) = message {
-				eprintln!("{}", msg);
+				println!("{}", msg);
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
 			watch_status(&[service], &watch);
@@ -725,16 +720,10 @@ fn cmd_restart(args: &[String]) {
 	}
 }
 
-fn cmd_logs(args: &[String]) {
-	let svc_entries = config::load_service_entries();
-	let json = output_format() == OutputFormat::Json;
-
-	let (service, process) = resolve_single_target(args, &svc_entries);
-
-	let log_dir = logs::service_log_dir(&service);
+fn find_log_files(service: &str, process: &Option<String>) -> Vec<PathBuf> {
+	let log_dir = logs::service_log_dir(service);
 	if !log_dir.exists() {
-		eprintln!("no logs for {}", service);
-		std::process::exit(1);
+		return Vec::new();
 	}
 
 	let mut files: Vec<PathBuf> = Vec::new();
@@ -759,35 +748,26 @@ fn cmd_logs(args: &[String]) {
 	}
 
 	files.sort();
+	files
+}
 
+fn tail_log_lines(service: &str, process: &Option<String>, n: usize) {
+	let files = find_log_files(service, process);
 	if files.is_empty() {
-		eprintln!("no log files found");
-		std::process::exit(1);
+		return;
 	}
-
 	let latest = files.last().unwrap();
 	let content = std::fs::read_to_string(latest).unwrap_or_default();
-
 	let lines: Vec<&str> = content.lines().collect();
-	let start = if lines.len() > 100 {
-		lines.len() - 100
-	} else {
-		0
-	};
-
-	if json {
-		for (i, line) in lines[start..].iter().enumerate() {
-			format::json_log_line(line, (start + i) as u64);
-		}
-	} else {
-		for line in &lines[start..] {
-			println!("{}", line);
-		}
+	let start = if lines.len() > n { lines.len() - n } else { 0 };
+	for line in &lines[start..] {
+		println!("{}", line);
 	}
 }
 
-fn cmd_tail(args: &[String]) {
+fn cmd_logs(args: &[String]) {
 	let svc_entries = config::load_service_entries();
+	let json = output_format() == OutputFormat::Json;
 
 	let (service, process) = resolve_single_target(args, &svc_entries);
 
@@ -797,47 +777,63 @@ fn cmd_tail(args: &[String]) {
 		std::process::exit(1);
 	}
 
-	let mut files: Vec<PathBuf> = Vec::new();
-	if let Ok(dir_entries) = std::fs::read_dir(&log_dir) {
-		for entry in dir_entries.flatten() {
-			let path = entry.path();
-			let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-			if !name.ends_with(".log") {
-				continue;
-			}
-			if let Some(ref proc_filter) = process {
-				if !name.starts_with(proc_filter.as_str()) {
-					continue;
-				}
-			}
-			files.push(path);
-		}
-	}
-
-	files.sort();
+	let files = find_log_files(&service, &process);
 
 	if files.is_empty() {
 		eprintln!("no log files found");
 		std::process::exit(1);
 	}
 
-	let latest = files.last().unwrap();
-	let mut cmd = Command::new("tail");
-	cmd.args(["-f", "-n", "100"]);
-	cmd.arg(latest);
-	let status = cmd.status().unwrap_or_else(|e| {
-		eprintln!("error: {}", e);
-		std::process::exit(1);
-	});
-	std::process::exit(status.code().unwrap_or(1));
+	if json {
+		let paths: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+		format::json_value(&paths);
+	} else {
+		eprintln!("{}", log_dir.display().to_string().dimmed());
+		for f in &files {
+			println!("{}", f.display());
+		}
+	}
+}
+
+fn cmd_tail(args: &[String]) {
+	eprintln!("{}: use 'ky echo' instead", "tail is deprecated".yellow());
+	cmd_echo(args);
+}
+
+const DEFAULT_ECHO_TAIL: usize = 14;
+
+fn parse_echo_opts(args: &[String]) -> (usize, Vec<String>) {
+	let mut tail_lines = DEFAULT_ECHO_TAIL;
+	let mut rest = Vec::new();
+	let mut i = 0;
+	while i < args.len() {
+		match args[i].as_str() {
+			"-n" | "--lines" => {
+				if i + 1 < args.len() {
+					if let Ok(n) = args[i + 1].parse::<usize>() {
+						tail_lines = n;
+						i += 1;
+					}
+				}
+			}
+			_ => rest.push(args[i].clone()),
+		}
+		i += 1;
+	}
+	(tail_lines, rest)
 }
 
 fn cmd_echo(args: &[String]) {
 	let svc_entries = config::load_service_entries();
 	let json = output_format() == OutputFormat::Json;
 
-	let (service, process) = resolve_single_target(args, &svc_entries);
+	let (tail_lines, rest) = parse_echo_opts(args);
+	let (service, process) = resolve_single_target(&rest, &svc_entries);
 
+	// Tail last N lines from log file first
+	tail_log_lines(&service, &process, tail_lines);
+
+	// Stream live output from daemon
 	let mut offset = 0u64;
 	loop {
 		let response = send_request(&Request::Logs {
@@ -868,6 +864,60 @@ fn cmd_echo(args: &[String]) {
 
 		std::thread::sleep(std::time::Duration::from_millis(100));
 	}
+}
+
+fn echo_after_action(names: &[String], process: Option<String>) {
+	let svc_entries = config::load_service_entries();
+	let service = if names.is_empty() {
+		if let Some(current) = get_current_project(&svc_entries) {
+			current
+		} else {
+			return;
+		}
+	} else {
+		names[0].clone()
+	};
+
+	tail_log_lines(&service, &process, DEFAULT_ECHO_TAIL);
+
+	let mut offset = 0u64;
+	loop {
+		let response = send_request(&Request::Logs {
+			service: service.clone(),
+			process: process.clone(),
+			follow: true,
+			offset,
+		});
+
+		match response {
+			Response::Log { line, offset: new_offset } => {
+				if !line.is_empty() {
+					print!("{}", line);
+					let _ = io::stdout().flush();
+				}
+				offset = new_offset;
+			}
+			Response::Error { .. } => break,
+			_ => {}
+		}
+
+		std::thread::sleep(std::time::Duration::from_millis(100));
+	}
+}
+
+fn echo_after_stop(names: &[String]) {
+	let svc_entries = config::load_service_entries();
+	let service = if names.is_empty() {
+		if let Some(current) = get_current_project(&svc_entries) {
+			current
+		} else {
+			return;
+		}
+	} else {
+		names[0].clone()
+	};
+
+	tail_log_lines(&service, &None, DEFAULT_ECHO_TAIL);
 }
 
 fn cmd_show(args: &[String]) {
@@ -1107,8 +1157,35 @@ fn cmd_daemon(args: &[String]) {
 				eprintln!("daemon not running");
 			}
 		}
+		"restart" => {
+			// Stop if running
+			if muzan::client::is_running(&paths) {
+				let _ = send_request(&Request::Shutdown);
+				// Wait for daemon to die (up to 3s)
+				for _ in 0..30 {
+					if !muzan::client::is_running(&paths) { break; }
+					std::thread::sleep(std::time::Duration::from_millis(100));
+				}
+			}
+			// Start
+			let mut spawn_args: Vec<String> = vec!["daemon".to_string(), "run".to_string()];
+			spawn_args.extend(args[1..].iter().cloned());
+			let spawn_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
+			let daemon = muzan::Daemon::new("kagaya");
+			match daemon.start_background_with_args(&spawn_refs) {
+				Ok(_) => {
+					if json { format::json_ok(Some("daemon restarted".into())); }
+					else { eprintln!("daemon restarted"); }
+				}
+				Err(e) => {
+					if json { format::json_error(&format!("{}", e)); }
+					else { eprintln!("error: {}", e); }
+					std::process::exit(1);
+				}
+			}
+		}
 		_ => {
-			eprintln!("usage: ky daemon [start|stop|status|run]");
+			eprintln!("usage: ky daemon [start|stop|restart|status|run]");
 		}
 	}
 }
