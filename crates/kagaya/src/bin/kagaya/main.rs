@@ -601,7 +601,8 @@ fn cmd_start(args: &[String]) {
 
 	let autostart_only = rest.iter().any(|a| a == "--autostart");
 	let start_all = rest.iter().any(|a| is_all_flag(a));
-	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && a != "--autostart").collect();
+	let detailed = rest.iter().any(|a| is_detailed_flag(a));
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--autostart").collect();
 
 	if autostart_only {
 		let names = config::autostart_project_names();
@@ -658,7 +659,9 @@ fn cmd_start(args: &[String]) {
 				watch.enabled = true;
 				watch.duration = Some(4);
 			}
-			watch_status(&resolved, &watch);
+			let mut status_args = resolved.clone();
+			if detailed { status_args.push("--detailed".to_string()); }
+			watch_status(&status_args, &watch);
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -674,7 +677,8 @@ fn cmd_stop(args: &[String]) {
 	let plain = output_format().is_plain();
 
 	let stop_all = rest.iter().any(|a| is_all_flag(a));
-	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
+	let detailed = rest.iter().any(|a| is_detailed_flag(a));
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a)).collect();
 
 	let args_for_resolve: Vec<String> = if stop_all && rest.is_empty() {
 		vec!["--all".to_string()]
@@ -711,7 +715,9 @@ fn cmd_stop(args: &[String]) {
 				watch.enabled = true;
 				watch.duration = Some(4);
 			}
-			watch_status(&names, &watch);
+			let mut status_args = names.clone();
+			if detailed { status_args.push("--detailed".to_string()); }
+			watch_status(&status_args, &watch);
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -727,7 +733,8 @@ fn cmd_restart(args: &[String]) {
 	let plain = output_format().is_plain();
 
 	let restart_all = rest.iter().any(|a| is_all_flag(a));
-	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a)).collect();
+	let detailed = rest.iter().any(|a| is_detailed_flag(a));
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a)).collect();
 
 	if !watch.enabled && !plain {
 		watch.enabled = true;
@@ -2618,7 +2625,7 @@ mod tests {
 	}
 
 	#[test]
-	fn lines_expanded_single_proc_inlined() {
+	fn lines_detailed_single_proc_inlined() {
 		let svc = test_service("myapp", vec![
 			test_proc("web", ProcessState::Stopped),
 		]);
