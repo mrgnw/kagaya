@@ -58,51 +58,54 @@ fn main() {
 						check_alias_hint();
 					}
 				}
-			Some(Cmd::Status { names, all, expanded, watch, watch_interval }) => {
-				let mut args = names;
-				if all { args.push("--all".to_string()); }
-				if expanded { args.push("--expanded".to_string()); }
-				if watch || cli.watch { args.push("--watch".to_string()); }
-				if let Some(iv) = watch_interval {
-					args.push("--watch-interval".to_string());
-					args.push(iv.to_string());
-				}
-				cmd_status(&args);
-				}
-			Some(Cmd::Start { names, all, autostart, echo, watch, watch_interval }) => {
-				let mut args = names.clone();
-				if all { args.push("--all".to_string()); }
-				if autostart { args.push("--autostart".to_string()); }
-				if watch || cli.watch { args.push("--watch".to_string()); }
-				if let Some(iv) = watch_interval {
-					args.push("--watch-interval".to_string());
-					args.push(iv.to_string());
-				}
-				cmd_start(&args);
-				if echo { echo_after_action(&names, None); }
+		Some(Cmd::Status { names, all, detailed, watch, watch_interval }) => {
+			let mut args = names;
+			if all { args.push("--all".to_string()); }
+			if detailed { args.push("--detailed".to_string()); }
+			if watch || cli.watch { args.push("--watch".to_string()); }
+			if let Some(iv) = watch_interval {
+				args.push("--watch-interval".to_string());
+				args.push(iv.to_string());
 			}
-			Some(Cmd::Stop { names, all, echo, watch, watch_interval }) => {
-				let mut args = names.clone();
-				if all { args.push("--all".to_string()); }
-				if watch || cli.watch { args.push("--watch".to_string()); }
-				if let Some(iv) = watch_interval {
-					args.push("--watch-interval".to_string());
-					args.push(iv.to_string());
-				}
-				cmd_stop(&args);
-				if echo { echo_after_stop(&names); }
+			cmd_status(&args);
+		}
+		Some(Cmd::Start { names, all, autostart, detailed, echo, watch, watch_interval }) => {
+			let mut args = names.clone();
+			if all { args.push("--all".to_string()); }
+			if detailed { args.push("--detailed".to_string()); }
+			if autostart { args.push("--autostart".to_string()); }
+			if watch || cli.watch { args.push("--watch".to_string()); }
+			if let Some(iv) = watch_interval {
+				args.push("--watch-interval".to_string());
+				args.push(iv.to_string());
 			}
-			Some(Cmd::Restart { target, all, echo, watch, watch_interval }) => {
-				let mut args = target.clone();
-				if all { args.push("--all".to_string()); }
-				if watch || cli.watch { args.push("--watch".to_string()); }
-				if let Some(iv) = watch_interval {
-					args.push("--watch-interval".to_string());
-					args.push(iv.to_string());
-				}
-				cmd_restart(&args);
-				if echo { echo_after_action(&target, None); }
+			cmd_start(&args);
+			if echo { echo_after_action(&names, None); }
+		}
+		Some(Cmd::Stop { names, all, detailed, echo, watch, watch_interval }) => {
+			let mut args = names.clone();
+			if all { args.push("--all".to_string()); }
+			if detailed { args.push("--detailed".to_string()); }
+			if watch || cli.watch { args.push("--watch".to_string()); }
+			if let Some(iv) = watch_interval {
+				args.push("--watch-interval".to_string());
+				args.push(iv.to_string());
 			}
+			cmd_stop(&args);
+			if echo { echo_after_stop(&names); }
+		}
+		Some(Cmd::Restart { target, all, detailed, echo, watch, watch_interval }) => {
+			let mut args = target.clone();
+			if all { args.push("--all".to_string()); }
+			if detailed { args.push("--detailed".to_string()); }
+			if watch || cli.watch { args.push("--watch".to_string()); }
+			if let Some(iv) = watch_interval {
+				args.push("--watch-interval".to_string());
+				args.push(iv.to_string());
+			}
+			cmd_restart(&args);
+			if echo { echo_after_action(&target, None); }
+		}
 				Some(Cmd::Logs { args }) => cmd_logs(&args),
 				Some(Cmd::Tail { args }) => cmd_tail(&args),
 				Some(Cmd::Echo { args }) => cmd_echo(&args),
@@ -419,9 +422,9 @@ fn cmd_status(args: &[String]) {
 	if watch.enabled && !output_format().is_plain() {
 		watch_status(&rest, &watch);
 	} else {
-		let expanded = rest.iter().any(|a| is_expanded_flag(a));
-		if expanded {
-			render_expanded_status(&rest);
+		let detailed = rest.iter().any(|a| is_detailed_flag(a));
+		if detailed {
+			render_detailed_status(&rest);
 		} else {
 			render_condensed_status(&rest);
 		}
@@ -1389,14 +1392,14 @@ struct StatusData {
 	max_proc_name_width: usize,
 	max_svc_name_width: usize,
 	show_extras: bool,
-	expanded: bool,
+	detailed: bool,
 	is_single_service: bool,
 	http_port: Option<u16>,
 	cron_jobs: Option<Vec<koku::JobStatus>>,
 }
 
-fn is_expanded_flag(s: &str) -> bool {
-	matches!(s, "--expanded" | "-e")
+fn is_detailed_flag(s: &str) -> bool {
+	matches!(s, "--detailed" | "-d")
 }
 
 fn gather_status_data(args: &[String]) -> StatusData {
@@ -1404,11 +1407,11 @@ fn gather_status_data(args: &[String]) -> StatusData {
 	let entries = config::load_service_entries();
 
 	let show_all = args.iter().any(|a| is_all_flag(a));
-	let expanded = args.iter().any(|a| is_expanded_flag(a));
+	let detailed = args.iter().any(|a| is_detailed_flag(a));
 	let current_project = get_current_project(&entries);
 
 	let filtered_args: Vec<String> = args.iter()
-		.filter(|a| !is_all_flag(a) && !is_expanded_flag(a))
+		.filter(|a| !is_all_flag(a) && !is_detailed_flag(a))
 		.cloned()
 		.collect();
 
@@ -1493,7 +1496,7 @@ fn gather_status_data(args: &[String]) -> StatusData {
 		max_proc_name_width,
 		max_svc_name_width,
 		show_extras,
-		expanded,
+		detailed,
 		is_single_service,
 		http_port,
 		cron_jobs,
@@ -1614,7 +1617,7 @@ fn render_condensed_status(args: &[String]) -> usize {
 	lines
 }
 
-fn render_expanded_status(args: &[String]) -> usize {
+fn render_detailed_status(args: &[String]) -> usize {
 	let data = gather_status_data(args);
 
 	if let Some(ref proc_name) = data.process_filter {
@@ -1886,7 +1889,7 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 
 	let mut lines: Vec<RLine> = Vec::new();
 
-	if data.expanded {
+	if data.detailed {
 		let name_w = data.max_proc_name_width.max(data.max_svc_name_width);
 
 		for name in &data.sorted_filter {
@@ -2011,7 +2014,7 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 
 	if data.show_extras {
 		lines.push(RLine::from(""));
-		if data.expanded {
+		if data.detailed {
 			let name_w = data.max_proc_name_width.max(data.max_svc_name_width);
 			if let Some(port) = data.http_port {
 				let padded = format!("{:<w$}", "serve", w = name_w);
@@ -2111,6 +2114,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 	let initial_lines = build_status_lines(args);
 	let height = (initial_lines.len() as u16).max(1);
 
+	println!();
 	terminal::enable_raw_mode().unwrap();
 	let backend = CrosstermBackend::new(io::stdout());
 	let mut term = Terminal::with_options(
@@ -2376,7 +2380,7 @@ mod tests {
 			max_proc_name_width: max_w,
 			max_svc_name_width: max_svc,
 			show_extras: false,
-			expanded: false,
+			detailed: false,
 			is_single_service: false,
 			http_port: None,
 			cron_jobs: None,
@@ -2592,16 +2596,16 @@ mod tests {
 		assert!(text.contains("◦"));
 	}
 
-	// --- status_data_to_lines: expanded ---
+	// --- status_data_to_lines: detailed ---
 
 	#[test]
-	fn lines_expanded_running_service() {
+	fn lines_detailed_running_service() {
 		let svc = test_service("myapp", vec![
 			test_proc("web", ProcessState::Running { pid: 1, uptime_secs: 10 }),
 			test_proc("worker", ProcessState::Stopped),
 		]);
 		let mut data = test_status_data(vec![svc]);
-		data.expanded = true;
+		data.detailed = true;
 		let lines = status_data_to_lines(&data);
 
 		// header + 2 processes
@@ -2619,7 +2623,7 @@ mod tests {
 			test_proc("web", ProcessState::Stopped),
 		]);
 		let mut data = test_status_data(vec![svc]);
-		data.expanded = true;
+		data.detailed = true;
 		let lines = status_data_to_lines(&data);
 
 		// single proc, not is_single_service => inlined to 1 line

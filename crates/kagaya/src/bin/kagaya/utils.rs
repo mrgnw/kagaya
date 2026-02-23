@@ -18,7 +18,7 @@ pub fn format_uptime(secs: u64) -> String {
         if s == 0 {
             format!("{}m", m)
         } else {
-            format!("{}m{}s", m, s)
+            format!("{}m {}s", m, s)
         }
     } else if secs < 86400 {
         let h = secs / 3600;
@@ -26,7 +26,7 @@ pub fn format_uptime(secs: u64) -> String {
         if m == 0 {
             format!("{}h", h)
         } else {
-            format!("{}h{}m", h, m)
+            format!("{}h {}m", h, m)
         }
     } else {
         let d = secs / 86400;
@@ -34,7 +34,7 @@ pub fn format_uptime(secs: u64) -> String {
         if h == 0 {
             format!("{}d", d)
         } else {
-            format!("{}d{}h", d, h)
+            format!("{}d {}h", d, h)
         }
     }
 }

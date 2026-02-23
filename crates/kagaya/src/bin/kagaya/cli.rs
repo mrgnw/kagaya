@@ -73,7 +73,7 @@ pub enum Cmd {
         #[arg(long, short)]
         all: bool,
         #[arg(long, short)]
-        expanded: bool,
+        detailed: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
         #[arg(long, hide = true)]
@@ -87,6 +87,8 @@ pub enum Cmd {
         all: bool,
         #[arg(long)]
         autostart: bool,
+        #[arg(long, short)]
+        detailed: bool,
         #[arg(long, short = 'e')]
         echo: bool,
         #[arg(long, short, hide = true)]
@@ -100,6 +102,8 @@ pub enum Cmd {
         names: Vec<String>,
         #[arg(long, short)]
         all: bool,
+        #[arg(long, short)]
+        detailed: bool,
         #[arg(long, short = 'e')]
         echo: bool,
         #[arg(long, short, hide = true)]
@@ -113,6 +117,8 @@ pub enum Cmd {
         target: Vec<String>,
         #[arg(long, short)]
         all: bool,
+        #[arg(long, short)]
+        detailed: bool,
         #[arg(long, short = 'e')]
         echo: bool,
         #[arg(long, short, hide = true)]
