@@ -768,7 +768,9 @@ fn cmd_restart(args: &[String]) {
 				}
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
-			watch_status(&names, &watch);
+			let mut status_args: Vec<String> = names.clone();
+			if detailed { status_args.push("--detailed".to_string()); }
+			watch_status(&status_args, &watch);
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -803,7 +805,9 @@ fn cmd_restart(args: &[String]) {
 				}
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
-			watch_status(&[service], &watch);
+			let mut status_args = vec![service.clone()];
+			if detailed { status_args.push("--detailed".to_string()); }
+			watch_status(&status_args, &watch);
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -832,7 +836,9 @@ fn cmd_restart(args: &[String]) {
 				println!("{}", msg);
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
-			watch_status(&[service], &watch);
+			let mut status_args = vec![service.clone()];
+			if detailed { status_args.push("--detailed".to_string()); }
+			watch_status(&status_args, &watch);
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -2414,22 +2420,22 @@ mod tests {
 	#[test]
 	fn uptime_minutes() {
 		assert_eq!(format_uptime(60), "1m");
-		assert_eq!(format_uptime(192), "3m12s");
+		assert_eq!(format_uptime(192), "3m 12s");
 		assert_eq!(format_uptime(300), "5m");
-		assert_eq!(format_uptime(3599), "59m59s");
+		assert_eq!(format_uptime(3599), "59m 59s");
 	}
 
 	#[test]
 	fn uptime_hours() {
 		assert_eq!(format_uptime(3600), "1h");
-		assert_eq!(format_uptime(9000), "2h30m");
-		assert_eq!(format_uptime(86399), "23h59m");
+		assert_eq!(format_uptime(9000), "2h 30m");
+		assert_eq!(format_uptime(86399), "23h 59m");
 	}
 
 	#[test]
 	fn uptime_days() {
 		assert_eq!(format_uptime(86400), "1d");
-		assert_eq!(format_uptime(104400), "1d5h");
+		assert_eq!(format_uptime(104400), "1d 5h");
 		assert_eq!(format_uptime(172800), "2d");
 	}
 
