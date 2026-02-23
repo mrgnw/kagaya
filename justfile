@@ -100,6 +100,17 @@ install:
 update:
 	cargo install --path crates/kagaya --force
 
+# Bump, commit, update, publish, release
+ship part="patch": (bump part)
+	#!/bin/bash
+	set -euo pipefail
+	version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+	git add Cargo.toml && git commit -m "chore(release): bump version to ${version}"
+	git push origin main
+	just update
+	just publish
+	just release
+
 # Install locally (debug build — fast iteration)
 dev-install:
 	cargo build --bin ky && cp target/debug/ky ~/.cargo/bin/ky

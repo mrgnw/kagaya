@@ -39,27 +39,21 @@ pub fn format_uptime(secs: u64) -> String {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub fn listening_ports_for_pids(target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
-    use libproc::processes::{pids_by_type, ProcFilter};
-    use netstat2::*;
-
-    let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-    let proto = ProtocolFlags::TCP;
-    let sockets = match get_sockets_info(af, proto) {
-        Ok(s) => s,
+    let all_listeners = match listeners::get_all() {
+        Ok(l) => l,
         Err(_) => return HashMap::new(),
     };
 
+    // Build pid -> ports map from all TCP listeners
     let mut all_ports: HashMap<u32, Vec<u16>> = HashMap::new();
-    for si in &sockets {
-        if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
-            if tcp.state == TcpState::Listen {
-                for pid in &si.associated_pids {
-                    let ports = all_ports.entry(*pid).or_default();
-                    if !ports.contains(&tcp.local_port) {
-                        ports.push(tcp.local_port);
-                    }
+    for l in &all_listeners {
+        if l.protocol == listeners::Protocol::TCP {
+            let port = l.socket.port();
+            if port != 0 {
+                let ports = all_ports.entry(l.process.pid).or_default();
+                if !ports.contains(&port) {
+                    ports.push(port);
                 }
             }
         }
@@ -75,32 +69,36 @@ pub fn listening_ports_for_pids(target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
         }
 
         // Walk all descendants recursively by parent PID
-        let mut stack = vec![pid];
-        while let Some(parent) = stack.pop() {
-            let children =
-                pids_by_type(ProcFilter::ByParentProcess { ppid: parent }).unwrap_or_default();
-            for child in children {
-                if child != 0 && child != pid {
-                    if let Some(p) = all_ports.get(&child) {
-                        for port in p {
-                            if !ports.contains(port) {
-                                ports.push(*port);
+        #[cfg(target_os = "macos")]
+        {
+            use libproc::processes::{pids_by_type, ProcFilter};
+            let mut stack = vec![pid];
+            while let Some(parent) = stack.pop() {
+                let children =
+                    pids_by_type(ProcFilter::ByParentProcess { ppid: parent }).unwrap_or_default();
+                for child in children {
+                    if child != 0 && child != pid {
+                        if let Some(p) = all_ports.get(&child) {
+                            for port in p {
+                                if !ports.contains(port) {
+                                    ports.push(*port);
+                                }
                             }
                         }
+                        stack.push(child);
                     }
-                    stack.push(child);
                 }
             }
-        }
 
-        // Also check process group as fallback
-        let group_pids =
-            pids_by_type(ProcFilter::ByProgramGroup { pgrpid: pid }).unwrap_or_default();
-        for gpid in &group_pids {
-            if let Some(p) = all_ports.get(gpid) {
-                for port in p {
-                    if !ports.contains(port) {
-                        ports.push(*port);
+            // Also check process group as fallback
+            let group_pids =
+                pids_by_type(ProcFilter::ByProgramGroup { pgrpid: pid }).unwrap_or_default();
+            for gpid in &group_pids {
+                if let Some(p) = all_ports.get(gpid) {
+                    for port in p {
+                        if !ports.contains(port) {
+                            ports.push(*port);
+                        }
                     }
                 }
             }
@@ -112,9 +110,4 @@ pub fn listening_ports_for_pids(target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
         }
     }
     result
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn listening_ports_for_pids(_target_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
-    HashMap::new()
 }

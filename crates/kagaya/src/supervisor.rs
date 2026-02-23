@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::output::OutputCapture;
 use crate::types::*;
@@ -36,6 +36,9 @@ pub struct ManagedProcess {
 	pub retry_count: u32,
 	pub state_changed_at: Instant,
 	cancel: Option<tokio::sync::watch::Sender<bool>>,
+	/// Ports discovered at runtime (from scanning the process's listening sockets).
+	/// Merged with def.ports for cleanup/restart gates.
+	pub runtime_ports: Arc<Mutex<Vec<u16>>>,
 }
 
 impl Supervisor {
@@ -125,15 +128,16 @@ impl Supervisor {
 					mp.output = output.clone();
 					mp.cancel = Some(cancel_tx);
 
-					let sup = Arc::clone(self);
-					let svc = name.to_string();
-					let pname = proc_name.clone();
-					let def = mp.def.clone();
-					let d = dir.to_path_buf();
-					tokio::spawn(async move {
-						run_process_loop(sup, svc, pname, def, d, output, cancel_rx).await;
-					});
-					started.push(format!("{}/{}: starting", name, proc_name));
+				let sup = Arc::clone(self);
+				let svc = name.to_string();
+				let pname = proc_name.clone();
+				let def = mp.def.clone();
+				let d = dir.to_path_buf();
+				let rp = Arc::clone(&mp.runtime_ports);
+				tokio::spawn(async move {
+					run_process_loop(sup, svc, pname, def, d, output, cancel_rx, rp).await;
+				});
+				started.push(format!("{}/{}: starting", name, proc_name));
 				}
 				return Ok(started.join("\n"));
 			}
@@ -171,36 +175,39 @@ impl Supervisor {
 			);
 			let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
-		let mp = ManagedProcess {
-			def: proc_def.clone(),
-			state: ProcessState::Stopped,
-			output: output.clone(),
-			retry_count: 0,
-			state_changed_at: Instant::now(),
-			cancel: Some(cancel_tx),
-		};
+	let rp = Arc::new(Mutex::new(Vec::new()));
+	let mp = ManagedProcess {
+		def: proc_def.clone(),
+		state: ProcessState::Stopped,
+		output: output.clone(),
+		retry_count: 0,
+		state_changed_at: Instant::now(),
+		cancel: Some(cancel_tx),
+		runtime_ports: Arc::clone(&rp),
+	};
 			managed_processes.insert(proc_def.name.clone(), mp);
 
-			if should_start {
-				let sup = Arc::clone(self);
-				let service_name = name.to_string();
-				let process_name = proc_def.name.clone();
-				let proc_def_clone = proc_def.clone();
-				let dir = dir.to_path_buf();
+		if should_start {
+			let sup = Arc::clone(self);
+			let service_name = name.to_string();
+			let process_name = proc_def.name.clone();
+			let proc_def_clone = proc_def.clone();
+			let dir = dir.to_path_buf();
 
-				tokio::spawn(async move {
-					run_process_loop(
-						sup,
-						service_name,
-						process_name,
-						proc_def_clone,
-						dir,
-						output,
-						cancel_rx,
-					)
-					.await;
-				});
-			}
+			tokio::spawn(async move {
+				run_process_loop(
+					sup,
+					service_name,
+					process_name,
+					proc_def_clone,
+					dir,
+					output,
+					cancel_rx,
+					rp,
+				)
+				.await;
+			});
+		}
 		}
 
 		{
@@ -232,6 +239,14 @@ impl Supervisor {
 				any_running = true;
 				if let Some(cancel) = mp.cancel.take() {
 					let _ = cancel.send(true);
+				}
+				// Collect runtime-discovered ports before killing
+				if let Ok(rp) = mp.runtime_ports.try_lock() {
+					for &p in rp.iter() {
+						if !all_ports.contains(&p) {
+							all_ports.push(p);
+						}
+					}
 				}
 				if let ProcessState::Running { pid, .. } = &mp.state {
 					let ports = kill_process_tree(*pid).await;
@@ -270,6 +285,13 @@ impl Supervisor {
 				if mp.state.is_running() {
 					if let Some(cancel) = mp.cancel.take() {
 						let _ = cancel.send(true);
+					}
+					if let Ok(rp) = mp.runtime_ports.try_lock() {
+						for &p in rp.iter() {
+							if !all_ports.contains(&p) {
+								all_ports.push(p);
+							}
+						}
 					}
 					if let ProcessState::Running { pid, .. } = &mp.state {
 						let ports = kill_process_tree(*pid).await;
@@ -321,7 +343,15 @@ impl Supervisor {
 			let _ = cancel.send(true);
 		}
 		if let ProcessState::Running { pid, .. } = &mp.state {
-			cleanup_process_and_ports(*pid, &mp.def.ports).await;
+			let rp = mp.runtime_ports.lock().await;
+			let mut all_ports = mp.def.ports.clone();
+			for &p in rp.iter() {
+				if !all_ports.contains(&p) {
+					all_ports.push(p);
+				}
+			}
+			drop(rp);
+			cleanup_process_and_ports(*pid, &all_ports).await;
 		}
 		mp.state = ProcessState::Stopped;
 		mp.retry_count = 0;
@@ -341,9 +371,10 @@ impl Supervisor {
 		let process_name = process.to_string();
 		let proc_def = mp.def.clone();
 		let dir = dir.to_path_buf();
+		let rp = Arc::clone(&mp.runtime_ports);
 
 		tokio::spawn(async move {
-			run_process_loop(sup, service_name, process_name, proc_def, dir, output, cancel_rx)
+			run_process_loop(sup, service_name, process_name, proc_def, dir, output, cancel_rx, rp)
 				.await;
 		});
 
@@ -369,7 +400,14 @@ impl Supervisor {
 			let _ = cancel.send(true);
 		}
 		if let ProcessState::Running { pid, .. } = &mp.state {
-			let ports = kill_process_tree(*pid).await;
+			let mut ports = kill_process_tree(*pid).await;
+			if let Ok(rp) = mp.runtime_ports.try_lock() {
+				for &p in rp.iter() {
+					if !ports.contains(&p) {
+						ports.push(p);
+					}
+				}
+			}
 			kill_port_holders(&ports).await;
 		}
 		mp.state = ProcessState::Stopped;
@@ -421,6 +459,7 @@ impl Supervisor {
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_process_loop(
 	supervisor: Arc<Supervisor>,
 	service: String,
@@ -429,6 +468,7 @@ async fn run_process_loop(
 	dir: PathBuf,
 	output: OutputCapture,
 	mut cancel: tokio::sync::watch::Receiver<bool>,
+	runtime_ports: Arc<Mutex<Vec<u16>>>,
 ) {
 	let mut retry_count: u32 = 0;
 
@@ -451,6 +491,64 @@ async fn run_process_loop(
 			if let Err(e) = status {
 				let msg = format!("[kagaya] pre_start failed for {}/{}: {}\n", service, process, e);
 				output.write(msg.as_bytes()).await;
+			}
+		}
+
+		// Port-free gate: verify configured + runtime-discovered ports are available
+		{
+			let rp = runtime_ports.lock().await;
+			let mut check_ports: Vec<u16> = def.ports.clone();
+			for &p in rp.iter() {
+				if !check_ports.contains(&p) {
+					check_ports.push(p);
+				}
+			}
+			drop(rp);
+
+			if !check_ports.is_empty() {
+				let busy = ports_in_use(&check_ports);
+				if !busy.is_empty() {
+					for &port in &busy {
+						if let Some((holder_pid, holder_name)) = port_holder(port) {
+							let msg = format!(
+								"[kagaya] {}/{} port {} held by pid {} ({}), killing before start\n",
+								service, process, port, holder_pid, holder_name
+							);
+							output.write(msg.as_bytes()).await;
+						}
+					}
+					kill_port_holders(&busy).await;
+					let stuck = wait_for_ports_free(&busy).await;
+					if !stuck.is_empty() {
+						kill_port_holders(&stuck).await;
+						let still_stuck = wait_for_ports_free(&stuck).await;
+						if !still_stuck.is_empty() {
+							let holders: Vec<String> = still_stuck.iter().filter_map(|&p| {
+								port_holder(p).map(|(pid, name)| format!("port {} by pid {} ({})", p, pid, name))
+							}).collect();
+							let msg = format!(
+								"[kagaya] {}/{} cannot start: ports still occupied: {}\n",
+								service, process,
+								if holders.is_empty() { format!("{:?}", still_stuck) } else { holders.join(", ") }
+							);
+							output.write(msg.as_bytes()).await;
+							retry_count += 1;
+							if retry_count > def.max_retries {
+								update_state(
+									&supervisor, &service, &process,
+									ProcessState::Failed { exit_code: -1 },
+								).await;
+								return;
+							}
+							update_state(
+								&supervisor, &service, &process,
+								ProcessState::Crashed { exit_code: -1, retries: retry_count },
+							).await;
+							tokio::time::sleep(std::time::Duration::from_secs(def.restart_delay_secs)).await;
+							continue;
+						}
+					}
+				}
 			}
 		}
 
@@ -513,6 +611,36 @@ async fn run_process_loop(
 			let out = output.clone();
 			tokio::spawn(async move {
 				pipe_output(stderr, out).await;
+			});
+		}
+
+		// Runtime port discovery: scan after a short delay to find what the process bound to
+		{
+			let rp = Arc::clone(&runtime_ports);
+			let configured = def.ports.clone();
+			let svc_name = service.clone();
+			let proc_name_for_ports = process.clone();
+			let out = output.clone();
+			tokio::spawn(async move {
+				// Wait for the process to bind its ports
+				tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+				let descendants = get_all_descendants(pid);
+				let discovered = get_listening_ports(pid, &descendants);
+				if !discovered.is_empty() {
+					let mut rp = rp.lock().await;
+					*rp = discovered.clone();
+					let new_ports: Vec<u16> = discovered.iter()
+						.filter(|p| !configured.contains(p))
+						.copied()
+						.collect();
+					if !new_ports.is_empty() {
+						let msg = format!(
+							"[kagaya] {}/{} detected listening on port(s) {:?} — consider adding ports = {:?} to services.toml\n",
+							svc_name, proc_name_for_ports, new_ports, new_ports
+						);
+						out.write(msg.as_bytes()).await;
+					}
+				}
 			});
 		}
 
@@ -593,11 +721,19 @@ async fn run_process_loop(
 						},
 					)
 					.await;
-					// Clean up orphaned descendants and free ports before retry
-					cleanup_process_and_ports(pid, &def.ports).await;
-					tokio::time::sleep(std::time::Duration::from_secs(def.restart_delay_secs))
-						.await;
-					continue;
+				// Merge configured + runtime-discovered ports for cleanup
+				let rp = runtime_ports.lock().await;
+				let mut all_ports = def.ports.clone();
+				for &p in rp.iter() {
+					if !all_ports.contains(&p) {
+						all_ports.push(p);
+					}
+				}
+				drop(rp);
+				cleanup_process_and_ports(pid, &all_ports).await;
+				tokio::time::sleep(std::time::Duration::from_secs(def.restart_delay_secs))
+					.await;
+				continue;
 				} else {
 					let msg = format!(
 						"[kagaya] {}/{} failed (exit {}), max retries exceeded\n",
@@ -773,93 +909,60 @@ pub async fn kill_process_tree(pid: u32) -> Vec<u16> {
 }
 
 /// Get TCP listening ports held by a pid and its descendants.
-#[cfg(target_os = "macos")]
 fn get_listening_ports(pid: u32, descendants: &[u32]) -> Vec<u16> {
-	use netstat2::*;
-	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-	let proto = ProtocolFlags::TCP;
-	let sockets = match get_sockets_info(af, proto) {
-		Ok(s) => s,
+	let all_pids: Vec<u32> = std::iter::once(pid).chain(descendants.iter().copied()).collect();
+	let listeners = match listeners::get_all() {
+		Ok(l) => l,
 		Err(_) => return Vec::new(),
 	};
-	let all_pids: Vec<u32> = std::iter::once(pid).chain(descendants.iter().copied()).collect();
 	let mut ports = Vec::new();
-	for si in &sockets {
-		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
-			if tcp.state == TcpState::Listen {
-				for spid in &si.associated_pids {
-					if all_pids.contains(spid) && !ports.contains(&tcp.local_port) {
-						ports.push(tcp.local_port);
-					}
-				}
+	for l in &listeners {
+		if l.protocol == listeners::Protocol::TCP
+			&& all_pids.contains(&l.process.pid)
+		{
+			let port = l.socket.port();
+			if port != 0 && !ports.contains(&port) {
+				ports.push(port);
 			}
 		}
 	}
 	ports
 }
 
-#[cfg(not(target_os = "macos"))]
-fn get_listening_ports(_pid: u32, _descendants: &[u32]) -> Vec<u16> {
-	Vec::new()
-}
-
 /// Kill any process listening on the given ports. Last-resort fallback.
-#[cfg(target_os = "macos")]
 pub async fn kill_port_holders(ports: &[u16]) {
 	if ports.is_empty() {
 		return;
 	}
-	use netstat2::*;
 	use nix::sys::signal::{kill, Signal};
 	use nix::unistd::Pid;
 
-	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-	let proto = ProtocolFlags::TCP;
-	let sockets = match get_sockets_info(af, proto) {
-		Ok(s) => s,
-		Err(_) => return,
-	};
-	for si in &sockets {
-		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
-			if tcp.state == TcpState::Listen && ports.contains(&tcp.local_port) {
-				for &spid in &si.associated_pids {
-					if spid != 0 {
-						tracing::warn!("port {} still held by pid {}, killing", tcp.local_port, spid);
-						let _ = kill(Pid::from_raw(spid as i32), Signal::SIGKILL);
-					}
-				}
+	for &port in ports {
+		if let Ok(proc) = listeners::get_process_by_port(port, listeners::Protocol::TCP) {
+			if proc.pid != 0 {
+				tracing::warn!("port {} still held by pid {} ({}), killing", port, proc.pid, proc.name);
+				let _ = kill(Pid::from_raw(proc.pid as i32), Signal::SIGKILL);
 			}
 		}
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
-pub async fn kill_port_holders(_ports: &[u16]) {}
-
 /// Check if any of the given ports are still in use (TCP LISTEN).
-#[cfg(target_os = "macos")]
 fn ports_in_use(ports: &[u16]) -> Vec<u16> {
-	use netstat2::*;
-	let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-	let proto = ProtocolFlags::TCP;
-	let sockets = match get_sockets_info(af, proto) {
-		Ok(s) => s,
-		Err(_) => return Vec::new(),
-	};
 	let mut in_use = Vec::new();
-	for si in &sockets {
-		if let ProtocolSocketInfo::Tcp(ref tcp) = si.protocol_socket_info {
-			if tcp.state == TcpState::Listen && ports.contains(&tcp.local_port) && !in_use.contains(&tcp.local_port) {
-				in_use.push(tcp.local_port);
-			}
+	for &port in ports {
+		if listeners::get_process_by_port(port, listeners::Protocol::TCP).is_ok() {
+			in_use.push(port);
 		}
 	}
 	in_use
 }
 
-#[cfg(not(target_os = "macos"))]
-fn ports_in_use(_ports: &[u16]) -> Vec<u16> {
-	Vec::new()
+/// Find who is holding a port. Returns (pid, process_name) if found.
+fn port_holder(port: u16) -> Option<(u32, String)> {
+	listeners::get_process_by_port(port, listeners::Protocol::TCP)
+		.ok()
+		.map(|p| (p.pid, p.name))
 }
 
 /// Wait for the given ports to become free, polling every 100ms up to 5 seconds.
