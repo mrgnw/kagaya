@@ -111,6 +111,13 @@ ky add
 # myapp: added (/Users/you/dev/myapp)
 ```
 
+**Standalone commands:** Register a single command without a project directory:
+
+```sh
+ky add opencode --run 'opencode serve --hostname 0.0.0.0'
+# opencode: added (run: opencode serve --hostname 0.0.0.0)
+```
+
 ### 4. Start it
 
 ```sh
@@ -170,8 +177,9 @@ When you run `ky start myapp`, kagaya looks up `myapp` → `~/dev/myapp`, reads 
 ## Usage
 
 ```
-ky init                # create projects config file
-ky add [name] [dir]    # register a project directory (uses cwd if omitted)
+ky init                        # create projects config file
+ky add [name] [dir]            # register a project directory (uses cwd if omitted)
+ky add <name> --run <command>  # register a standalone command
 
 ky status              # show all projects
 ky start [name]        # start project(s)
@@ -295,6 +303,7 @@ Quick add from a project directory:
 cd ~/dev/myapp && ky add              # infers name from directory
 cd ~/dev/myapp && ky add myapp        # uses cwd, custom name
 ky add myapp ~/dev/myapp              # full form with explicit path
+ky add tunnel --run 'ssh -N -L 5432:localhost:5432 prod-server'  # standalone command
 ```
 
 ### services.toml
