@@ -150,7 +150,12 @@ pub enum Cmd {
     Serve { args: Vec<String> },
 
     /// Register a project
-    Add { args: Vec<String> },
+    Add {
+        args: Vec<String>,
+        /// Register a standalone command instead of a project directory
+        #[arg(long)]
+        run: Option<String>,
+    },
 
     /// Unregister a project
     #[command(alias = "rm")]

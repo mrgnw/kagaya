@@ -113,7 +113,7 @@ fn main() {
 				Some(Cmd::Cron { args }) => cmd_cron(&args),
 				Some(Cmd::Daemon { args }) => cmd_daemon(&args),
 				Some(Cmd::Serve { args }) => cmd_serve(&args),
-				Some(Cmd::Add { args }) => cmd_add(&args),
+				Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
 				Some(Cmd::Remove { args }) => cmd_remove(&args),
 				Some(Cmd::Init) => cmd_init(),
 				Some(Cmd::Migrate { force }) => migrate::cmd_migrate(force),
@@ -217,6 +217,7 @@ fn print_usage() {
 	eprintln!("{}", "config".cyan().bold());
 	eprintln!("  {} [name] [process]        Show services.toml or process command", "show".bold());
 	eprintln!("  {} [name] [dir]             Register a project", "add".bold());
+	eprintln!("  {} <name> --run <command>   Register a standalone command", "add".bold());
 	eprintln!("  {} <name>                Unregister a project", "remove".bold());
 	eprintln!("  {}                         Create config files", "init".bold());
 	eprintln!("  {} [--force]             Migrate ubermind Procfiles to kagaya TOML", "migrate".bold());
@@ -279,11 +280,42 @@ fn cmd_init() {
 	eprintln!("  3. check: ky status");
 }
 
-fn cmd_add(args: &[String]) {
+fn cmd_add(args: &[String], run: Option<&str>) {
 	let config_dir = protocol::config_dir();
 	let _ = std::fs::create_dir_all(&config_dir);
 	let projects_file = config_dir.join("projects.toml");
 
+	if let Some(cmd) = run {
+		// Standalone command mode: ky add <name> --run <command>
+		let name = if let Some(n) = args.first() {
+			n.clone()
+		} else {
+			eprintln!("error: --run requires a name: ky add <name> --run <command>");
+			std::process::exit(1);
+		};
+
+		if let Ok(content) = std::fs::read_to_string(&projects_file) {
+			if let Ok(table) = toml::from_str::<toml::Value>(&content) {
+				if let Some(map) = table.as_table() {
+					if map.contains_key(&name) {
+						eprintln!("{}: already registered", name);
+						return;
+					}
+				}
+			}
+		}
+
+		let mut file = std::fs::OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(&projects_file)
+			.unwrap();
+		writeln!(file, "\n[{}]\nrun = {:?}", name, cmd).unwrap();
+		eprintln!("{}: added (run: {})", name, cmd);
+		return;
+	}
+
+	// Directory-based project mode
 	let (name, dir) = if args.len() >= 2 {
 		(args[0].clone(), PathBuf::from(&args[1]))
 	} else if args.len() == 1 {

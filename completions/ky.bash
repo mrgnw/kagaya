@@ -29,11 +29,13 @@ _ky_completion() {
 			status|st|start|stop|reload|kill|echo|connect|restart|quit|run)
 				COMPREPLY=( $(compgen -W "$projects $flags" -- "$cur") )
 				;;
-			add)
-				if [[ $cword -eq 3 ]]; then
-					COMPREPLY=( $(compgen -d -- "$cur") )
-				fi
-				;;
+		add)
+			if [[ $cur == -* ]]; then
+				COMPREPLY=( $(compgen -W "--run" -- "$cur") )
+			elif [[ $cword -eq 3 ]]; then
+				COMPREPLY=( $(compgen -d -- "$cur") )
+			fi
+			;;
 			*)
 				if [[ $cur == -* ]]; then
 					COMPREPLY=( $(compgen -W "$flags" -- "$cur") )

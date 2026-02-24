@@ -14,7 +14,7 @@ _ky() {
 		'echo:view logs'
 		'connect:connect to process'
 		'restart:restart process(es)'
-		'quit:quit overmind'
+		'quit:quit daemon'
 		'run:run command'
 		'init:create config file'
 		'add:add a project'
@@ -60,11 +60,15 @@ _ky() {
 					_describe -t projects 'project' projects
 					_describe -t flags 'flag' flags
 					;;
-				add)
-					if [[ $CURRENT -eq 3 ]]; then
-						_path_files -/
-					fi
-					;;
+			add)
+				if [[ ${words[(i)--run]} -le $CURRENT ]]; then
+					return
+				fi
+				_arguments '*--run[register a standalone command]:command:' && return
+				if [[ $CURRENT -eq 3 ]]; then
+					_path_files -/
+				fi
+				;;
 			serve|ui)
 				_describe -t flags 'flag' flags
 				;;
