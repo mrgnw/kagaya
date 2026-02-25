@@ -280,6 +280,47 @@ fn cmd_init() {
 	eprintln!("  3. check: ky status");
 }
 
+/// Insert text before the first TOML table header (`[section]`).
+/// If there are no table headers, appends to the end.
+/// Ensures a trailing newline before the insertion point.
+fn insert_before_first_table(content: &str, new_line: &str) -> String {
+	let mut insert_pos = None;
+	let mut byte_offset = 0usize;
+	for line in content.lines() {
+		if line.starts_with('[') {
+			insert_pos = Some(byte_offset);
+			break;
+		}
+		byte_offset += line.len() + 1; // +1 for newline
+	}
+
+	match insert_pos {
+		Some(pos) => {
+			let mut result = String::with_capacity(content.len() + new_line.len() + 1);
+			let before = &content[..pos];
+			let after = &content[pos..];
+			result.push_str(before);
+			if !before.is_empty() && !before.ends_with('\n') {
+				result.push('\n');
+			}
+			result.push_str(new_line);
+			if !new_line.ends_with('\n') {
+				result.push('\n');
+			}
+			result.push_str(after);
+			result
+		}
+		None => {
+			let mut result = content.to_string();
+			if !result.is_empty() && !result.ends_with('\n') {
+				result.push('\n');
+			}
+			result.push_str(new_line);
+			result
+		}
+	}
+}
+
 fn cmd_add(args: &[String], run: Option<&str>) {
 	let config_dir = protocol::config_dir();
 	let _ = std::fs::create_dir_all(&config_dir);
@@ -294,13 +335,12 @@ fn cmd_add(args: &[String], run: Option<&str>) {
 			std::process::exit(1);
 		};
 
-		if let Ok(content) = std::fs::read_to_string(&projects_file) {
-			if let Ok(table) = toml::from_str::<toml::Value>(&content) {
-				if let Some(map) = table.as_table() {
-					if map.contains_key(&name) {
-						eprintln!("{}: already registered", name);
-						return;
-					}
+		let existing_content = std::fs::read_to_string(&projects_file).unwrap_or_default();
+		if let Ok(table) = toml::from_str::<toml::Value>(&existing_content) {
+			if let Some(map) = table.as_table() {
+				if map.contains_key(&name) {
+					eprintln!("{}: already registered", name);
+					return;
 				}
 			}
 		}
@@ -341,12 +381,20 @@ fn cmd_add(args: &[String], run: Option<&str>) {
 		std::process::exit(1);
 	}
 
-	if let Ok(content) = std::fs::read_to_string(&projects_file) {
-		if let Ok(table) = toml::from_str::<toml::Value>(&content) {
-			if let Some(map) = table.as_table() {
-				if map.contains_key(&name) {
-					eprintln!("{}: already registered", name);
-					return;
+	let existing_content = std::fs::read_to_string(&projects_file).unwrap_or_default();
+	if let Ok(table) = toml::from_str::<toml::Value>(&existing_content) {
+		if let Some(map) = table.as_table() {
+			if map.contains_key(&name) {
+				eprintln!("{}: already registered", name);
+				return;
+			}
+			// Also check inside table sections for duplicate keys
+			for (_section, val) in map {
+				if let Some(sub) = val.as_table() {
+					if sub.contains_key(&name) {
+						eprintln!("{}: already registered (inside [{}])", name, _section);
+						return;
+					}
 				}
 			}
 		}
@@ -359,12 +407,10 @@ fn cmd_add(args: &[String], run: Option<&str>) {
 		eprintln!("  web = \"npm run dev\"");
 	}
 
-	let mut file = std::fs::OpenOptions::new()
-		.create(true)
-		.append(true)
-		.open(&projects_file)
-		.unwrap();
-	writeln!(file, "{} = {:?}", name, dir.display().to_string()).unwrap();
+	let new_line = format!("{} = {:?}\n", name, dir.display().to_string());
+	// Insert before the first table header so the entry stays top-level
+	let updated = insert_before_first_table(&existing_content, &new_line);
+	std::fs::write(&projects_file, updated).unwrap();
 	eprintln!("{}: added ({})", name, dir.display());
 }
 
