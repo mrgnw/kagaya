@@ -161,6 +161,17 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 				Err(e) => Response::Error { message: e },
 			}
 		}
+		Request::ReloadConfig => {
+			// Config is already loaded fresh on each operation, so we just verify it's valid
+			match std::panic::catch_unwind(|| config::load_service_entries()) {
+				Ok(_) => Response::Ok {
+					message: Some("projects.toml reloaded successfully".to_string()),
+				},
+				Err(_) => Response::Error {
+					message: "failed to parse projects.toml".to_string(),
+				},
+			}
+		}
 		Request::Logs { service, process, follow: _, offset } => {
 			match supervisor.get_output(&service, process.as_deref()).await {
 				Ok(capture) => {

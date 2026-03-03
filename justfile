@@ -62,10 +62,13 @@ dist +targets: build-ui
 
 # Publish dist archives as a GitHub release
 [private]
-[confirm("create github release {{tag}}?")]
-gh-release:
+gh-release confirm="yes":
 	#!/bin/bash
 	set -euo pipefail
+	if [ "{{confirm}}" != "yes" ]; then
+		read -rp "create github release {{tag}}? [y/N] " ans
+		[[ "$ans" =~ ^[Yy] ]] || exit 1
+	fi
 	gh release create "{{tag}}" \
 		--title "{{tag}}" \
 		--generate-notes \
@@ -77,16 +80,16 @@ gh-release:
 	echo "don't forget: just publish"
 
 # Release for macOS ARM (default)
-release: (dist "aarch64-apple-darwin") gh-release
+release confirm="": (dist "aarch64-apple-darwin") (gh-release confirm)
 
 # Release for macOS (ARM + Intel)
-release-macos: (dist "aarch64-apple-darwin x86_64-apple-darwin") gh-release
+release-macos confirm="": (dist "aarch64-apple-darwin x86_64-apple-darwin") (gh-release confirm)
 
 # Release for Linux (ARM + x86_64)
-release-linux: (dist "aarch64-unknown-linux-musl x86_64-unknown-linux-musl") gh-release
+release-linux confirm="": (dist "aarch64-unknown-linux-musl x86_64-unknown-linux-musl") (gh-release confirm)
 
 # Release all platforms
-release-all: (dist "aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl") gh-release
+release-all confirm="": (dist "aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl") (gh-release confirm)
 
 # Publish to crates.io
 publish:
@@ -100,16 +103,16 @@ install:
 update:
 	cargo install --path crates/kagaya --force
 
-# Bump, commit, update, publish, release
+# Bump, commit, update, publish, release (skips confirmation)
 ship part="patch": (bump part)
 	#!/bin/bash
 	set -euo pipefail
 	version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-	git add Cargo.toml && git commit -m "chore(release): bump version to ${version}"
+	git add Cargo.toml Cargo.lock && git commit -m "chore(release): bump version to ${version}"
 	git push origin main
 	just update
 	just publish
-	just release
+	just release yes
 
 # Install locally (debug build — fast iteration)
 dev-install:

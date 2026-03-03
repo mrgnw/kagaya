@@ -67,11 +67,12 @@ pub struct Service {
 
 impl Service {
     pub fn socket_path(&self) -> PathBuf {
-        self.dir.join(".overmind.sock")
+        self.dir.join(".kagaya.sock")
     }
 
     pub fn is_running(&self) -> bool {
-        self.socket_path().exists()
+        // Just check if we can get status - socket existence isn't enough for kagaya daemon
+        self.ky_run(&["status"]).is_ok()
     }
 
     pub fn info(&self) -> ServiceInfo {
@@ -82,12 +83,14 @@ impl Service {
         }
     }
 
-    pub fn overmind_output(&self, args: &[&str]) -> Result<String, String> {
-        Command::new("overmind")
-            .args(args)
-            .current_dir(&self.dir)
+    pub fn ky_output(&self, args: &[&str]) -> Result<String, String> {
+        let mut final_args = vec![self.name.as_str()];
+        final_args.extend(args);
+
+        Command::new("ky")
+            .args(&final_args)
             .output()
-            .map_err(|e| format!("failed to run overmind: {e}"))
+            .map_err(|e| format!("failed to run ky: {e}"))
             .and_then(|out| {
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -99,12 +102,18 @@ impl Service {
             })
     }
 
-    pub fn overmind_run(&self, args: &[&str]) -> Result<String, String> {
-        Command::new("overmind")
-            .args(args)
-            .current_dir(&self.dir)
+    pub fn ky_run(&self, args: &[&str]) -> Result<String, String> {
+        // For commands that target a project, we pass the project name first
+        let mut final_args = vec![args[0]]; // command like "start"
+        final_args.push(self.name.as_str()); // project name
+        if args.len() > 1 {
+            final_args.extend(&args[1..]); // rest of args
+        }
+
+        Command::new("ky")
+            .args(&final_args)
             .output()
-            .map_err(|e| format!("failed to run overmind: {e}"))
+            .map_err(|e| format!("failed to run ky: {e}"))
             .map(|out| {
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -114,11 +123,7 @@ impl Service {
 
     pub fn detail(&self) -> ServiceDetail {
         let running = self.is_running();
-        let processes = if running {
-            self.parse_overmind_status()
-        } else {
-            vec![]
-        };
+        let processes = if running { self.parse_status() } else { vec![] };
         ServiceDetail {
             name: self.name.clone(),
             dir: self.dir.display().to_string(),
@@ -127,25 +132,47 @@ impl Service {
         }
     }
 
-    fn parse_overmind_status(&self) -> Vec<ProcessInfo> {
-        let output = match self.overmind_output(&["status"]) {
+    fn parse_status(&self) -> Vec<ProcessInfo> {
+        // ky status output format:
+        // project   process   pid     status    uptime    ports
+        // myapp     web       12345   running   1h 2m     3000
+        let output = match self.ky_output(&["status"]) {
             Ok(s) => s,
             Err(_) => return vec![],
         };
+
         output
             .lines()
+            .skip(1) // header
             .filter(|line| !line.trim().is_empty())
-            .skip_while(|line| {
-                let first = line.split_whitespace().next().unwrap_or("");
-                first == "PROCESS" || first == "Name"
-            })
             .map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                let name = parts.first().unwrap_or(&"unknown").to_string();
-                let pid = parts.get(1).and_then(|p| p.parse::<u32>().ok());
-                let status = parts.get(2).unwrap_or(&"unknown").to_string();
-                ProcessInfo { name, pid, status, autostart: true, ports: vec![] }
+                // Skip the project name (first column)
+                if parts.len() < 4 {
+                    return None;
+                }
+
+                let name = parts.get(1).unwrap_or(&"unknown").to_string();
+                let pid = parts.get(2).and_then(|p| p.parse::<u32>().ok());
+                let status = parts.get(3).unwrap_or(&"unknown").to_string();
+
+                // Try to parse ports from the end if available
+                let mut ports = vec![];
+                if let Some(last) = parts.last() {
+                    if let Ok(p) = last.parse::<u16>() {
+                        ports.push(p);
+                    }
+                }
+
+                Some(ProcessInfo {
+                    name,
+                    pid,
+                    status,
+                    autostart: true,
+                    ports,
+                })
             })
+            .flatten()
             .collect()
     }
 }
@@ -212,10 +239,8 @@ pub fn start_service(name: &str) -> Result<String, String> {
     let svc = services
         .get(name)
         .ok_or(format!("unknown service: {name}"))?;
-    if svc.is_running() {
-        return Ok(format!("{name}: already running"));
-    }
-    svc.overmind_run(&["start", "-D"])
+    // ky start handles idempotency
+    svc.ky_run(&["start"])
         .map(|out| format!("{name}: started\n{out}"))
 }
 
@@ -224,11 +249,8 @@ pub fn stop_service(name: &str) -> Result<String, String> {
     let svc = services
         .get(name)
         .ok_or(format!("unknown service: {name}"))?;
-    if !svc.is_running() {
-        return Ok(format!("{name}: not running"));
-    }
-    let result = svc.overmind_run(&["quit"]);
-    let _ = fs::remove_file(svc.socket_path());
+
+    let result = svc.ky_run(&["stop"]);
     result.map(|out| format!("{name}: stopped\n{out}"))
 }
 
@@ -237,10 +259,8 @@ pub fn restart_process(service_name: &str, process_name: &str) -> Result<String,
     let svc = services
         .get(service_name)
         .ok_or(format!("unknown service: {service_name}"))?;
-    if !svc.is_running() {
-        return Err(format!("{service_name}: not running"));
-    }
-    svc.overmind_run(&["restart", process_name])
+
+    svc.ky_run(&["restart", process_name])
         .map(|out| format!("{service_name}/{process_name}: restarted\n{out}"))
 }
 
@@ -249,10 +269,8 @@ pub fn kill_process(service_name: &str, process_name: &str) -> Result<String, St
     let svc = services
         .get(service_name)
         .ok_or(format!("unknown service: {service_name}"))?;
-    if !svc.is_running() {
-        return Err(format!("{service_name}: not running"));
-    }
-    svc.overmind_run(&["kill", process_name])
+
+    svc.ky_run(&["kill", process_name])
         .map(|out| format!("{service_name}/{process_name}: killed\n{out}"))
 }
 
@@ -261,11 +279,7 @@ pub fn reload_service(name: &str) -> Result<String, String> {
     let svc = services
         .get(name)
         .ok_or(format!("unknown service: {name}"))?;
-    if svc.is_running() {
-        let _ = svc.overmind_run(&["quit"]);
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let _ = fs::remove_file(svc.socket_path());
-    }
-    svc.overmind_run(&["start", "-D"])
+
+    svc.ky_run(&["reload"])
         .map(|out| format!("{name}: reloaded\n{out}"))
 }
