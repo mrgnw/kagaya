@@ -46,32 +46,27 @@ impl Supervisor {
 					.processes
 					.iter()
 					.map(|(pname, mp)| {
-						let pid = match &mp.state {
-							ProcessState::Running { pid, .. } => Some(*pid),
-							_ => None,
-						};
-						let mut ports = pid
-							.and_then(|p| pid_ports.get(&p))
-							.cloned()
-							.unwrap_or_default();
-						if ports.is_empty() && pid.is_some() {
-							for &p in &mp.def.ports {
-								if !ports.contains(&p) {
-									ports.push(p);
-								}
-							}
-						}
-						let elapsed = now_instant.duration_since(mp.state_changed_at).as_secs();
-						let state_since = Some(now_unix.saturating_sub(elapsed));
-						ProcessStatus {
-							name: pname.clone(),
-							state: mp.state.clone(),
-							pid,
-							autostart: mp.def.autostart,
-							service_type: mp.def.service_type.clone(),
-							ports,
-							state_since,
-						}
+					let pid = match &mp.state {
+						ProcessState::Running { pid, .. } => Some(*pid),
+						_ => None,
+					};
+					let ports = pid
+						.and_then(|p| pid_ports.get(&p))
+						.cloned()
+						.unwrap_or_default();
+					let ports_expected = mp.def.ports.clone();
+					let elapsed = now_instant.duration_since(mp.state_changed_at).as_secs();
+					let state_since = Some(now_unix.saturating_sub(elapsed));
+					ProcessStatus {
+						name: pname.clone(),
+						state: mp.state.clone(),
+						pid,
+						autostart: mp.def.autostart,
+						service_type: mp.def.service_type.clone(),
+						ports,
+						ports_expected,
+						state_since,
+					}
 					})
 					.collect();
 				result.push(ServiceStatus {
@@ -85,13 +80,14 @@ impl Supervisor {
 					.processes
 					.iter()
 					.map(|p| ProcessStatus {
-						name: p.name.clone(),
-						state: ProcessState::Stopped,
-						pid: None,
-						autostart: p.autostart,
-						service_type: p.service_type.clone(),
-						ports: vec![],
-						state_since: None,
+					name: p.name.clone(),
+					state: ProcessState::Stopped,
+					pid: None,
+					autostart: p.autostart,
+					service_type: p.service_type.clone(),
+					ports: vec![],
+					ports_expected: p.ports.clone(),
+					state_since: None,
 					})
 					.collect();
 				result.push(ServiceStatus {

@@ -228,22 +228,28 @@ ky autostart off       # remove the boot agent
 
 ### Watch mode
 
-Commands that modify services automatically watch status for 4 seconds:
+Commands that modify services automatically watch status afterward to confirm the operation worked:
 
 ```sh
-ky start myapp               # starts and watches for 4 seconds
-ky stop myapp                # stops and watches for 4 seconds
-ky reload myapp              # reloads and watches for 4 seconds
-ky restart myapp web         # restarts process and watches for 4 seconds
+ky start myapp               # starts, watches for 4s
+ky stop myapp                # stops, exits once confirmed stopped
+ky restart myapp             # restarts, watches for 6s
+ky restart myapp web         # restarts process, watches for 6s
 ```
 
-Override the default watch duration or use with status:
+The watch window adapts based on what happened:
+- **Condensed → detailed** — if any process fails, the view auto-expands to show which process and why
+- **Log tailing** — failed processes show their last 10 log lines inline
+- **Port readiness** — processes with configured ports show "starting" until the port is actually listening
+- **Exit code** — exits with code 1 if processes are crashed/failed at the end of the watch window
+
+Override the default watch behavior:
 
 ```sh
 ky status --watch            # watch indefinitely (refreshes every 1s)
 ky status --watch 10         # watch for 10 seconds
-ky start myapp --watch 8     # start and watch for 8 seconds (overrides default)
-ky reload myapp --watch 0    # reload without watching
+ky start myapp --watch 8     # start and watch for 8 seconds
+ky start myapp -W            # start without watching (--no-watch)
 ```
 
 ### Live logs

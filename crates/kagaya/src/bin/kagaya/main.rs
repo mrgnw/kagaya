@@ -69,12 +69,13 @@ fn main() {
 			}
 			cmd_status(&args);
 		}
-		Some(Cmd::Start { names, all, autostart, detailed, echo, watch, watch_interval }) => {
+		Some(Cmd::Start { names, all, autostart, detailed, echo, watch, no_watch, watch_interval }) => {
 			let mut args = names.clone();
 			if all { args.push("--all".to_string()); }
 			if detailed { args.push("--detailed".to_string()); }
 			if autostart { args.push("--autostart".to_string()); }
 			if watch || cli.watch { args.push("--watch".to_string()); }
+			if no_watch { args.push("--no-watch".to_string()); }
 			if let Some(iv) = watch_interval {
 				args.push("--watch-interval".to_string());
 				args.push(iv.to_string());
@@ -82,11 +83,12 @@ fn main() {
 			cmd_start(&args);
 			if echo { echo_after_action(&names, None); }
 		}
-		Some(Cmd::Stop { names, all, detailed, echo, watch, watch_interval }) => {
+		Some(Cmd::Stop { names, all, detailed, echo, watch, no_watch, watch_interval }) => {
 			let mut args = names.clone();
 			if all { args.push("--all".to_string()); }
 			if detailed { args.push("--detailed".to_string()); }
 			if watch || cli.watch { args.push("--watch".to_string()); }
+			if no_watch { args.push("--no-watch".to_string()); }
 			if let Some(iv) = watch_interval {
 				args.push("--watch-interval".to_string());
 				args.push(iv.to_string());
@@ -94,11 +96,12 @@ fn main() {
 			cmd_stop(&args);
 			if echo { echo_after_stop(&names); }
 		}
-		Some(Cmd::Restart { target, all, detailed, echo, watch, watch_interval }) => {
+		Some(Cmd::Restart { target, all, detailed, echo, watch, no_watch, watch_interval }) => {
 			let mut args = target.clone();
 			if all { args.push("--all".to_string()); }
 			if detailed { args.push("--detailed".to_string()); }
 			if watch || cli.watch { args.push("--watch".to_string()); }
+			if no_watch { args.push("--no-watch".to_string()); }
 			if let Some(iv) = watch_interval {
 				args.push("--watch-interval".to_string());
 				args.push(iv.to_string());
@@ -111,8 +114,9 @@ fn main() {
 				Some(Cmd::Echo { args }) => cmd_echo(&args),
 				Some(Cmd::Show { args }) => cmd_show(&args),
 				Some(Cmd::Cron { args }) => cmd_cron(&args),
-				Some(Cmd::Daemon { args }) => cmd_daemon(&args),
-				Some(Cmd::Serve { args }) => cmd_serve(&args),
+			Some(Cmd::Daemon { args }) => cmd_daemon(&args),
+			Some(Cmd::ReloadConfig) => cmd_reload_config(),
+			Some(Cmd::Serve { args }) => cmd_serve(&args),
 				Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
 				Some(Cmd::Remove { args }) => cmd_remove(&args),
 				Some(Cmd::Init) => cmd_init(),
@@ -187,10 +191,13 @@ fn dispatch_external(args: &[String]) {
 	} else {
 		eprintln!("unknown command or service: {}", name);
 		eprintln!();
+		eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, daemon, reload-config, serve, cron, autostart");
+		eprintln!();
 		let names: Vec<&str> = services.keys().map(|s| s.as_str()).collect();
 		if !names.is_empty() {
 			eprintln!("registered services: {}", names.join(", "));
 		}
+		eprintln!();
 		eprintln!("run 'ky help' for usage");
 		std::process::exit(1);
 	}
@@ -234,6 +241,7 @@ fn print_usage() {
 	eprintln!("{}", "system".cyan().bold());
 	eprintln!("  {} [on|off|status]   Start services on login", "autostart".bold());
 	eprintln!("  {} [start|stop|restart|status]   Manage the daemon", "daemon".bold());
+	eprintln!("  {}              Reload projects.toml without restarting services", "reload-config".bold());
 	eprintln!("  {} [-d|--stop|--status]   HTTP server for web UI", "serve".bold());
 	eprintln!("  {} [command]            macOS launchd agents", "launchd".bold());
 	eprintln!("  {}                  Update to latest version", "self update".bold());
@@ -500,8 +508,8 @@ fn cmd_status(args: &[String]) {
 	if watch.enabled && !output_format().is_plain() {
 		watch_status(&rest, &watch);
 	} else {
-		let detailed = rest.iter().any(|a| is_detailed_flag(a));
-		if detailed {
+		let data = gather_status_data(&rest);
+		if data.detailed {
 			render_detailed_status(&rest);
 		} else {
 			render_condensed_status(&rest);
@@ -565,6 +573,7 @@ fn color_duration(duration: &str, agg: AggregateState) -> String {
 
 fn process_mini_icon(proc: &ProcessStatus) -> String {
 	match &proc.state {
+		ProcessState::Running { .. } if is_port_pending(proc) => "◌".cyan().to_string(),
 		ProcessState::Running { .. } => "•".green().to_string(),
 		ProcessState::Stopped if !proc.autostart => "◦".dimmed().to_string(),
 		ProcessState::Stopped => "◦".dimmed().to_string(),
@@ -607,6 +616,11 @@ fn relevant_state_since(status: &ServiceStatus, agg: AggregateState) -> Option<u
 fn print_process_line(proc: &ProcessStatus, name_width: usize) {
 	let pcolor = process_state_color(proc);
 	let (symbol, label, extra) = match &proc.state {
+		ProcessState::Running { pid, .. } if is_port_pending(proc) => {
+			let duration = format_state_duration(proc.state_since);
+			let extra = format!("{:<8} {:<8}", color_duration(&duration, pcolor), pid);
+			("◌".cyan().to_string(), "starting".cyan().to_string(), extra)
+		}
 		ProcessState::Running { pid, .. } => {
 			let duration = format_state_duration(proc.state_since);
 			let ports = if proc.ports.is_empty() {
@@ -733,13 +747,19 @@ fn cmd_start(args: &[String]) {
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
 
-			if !watch.enabled {
+			if !watch.enabled && !watch.no_watch {
 				watch.enabled = true;
 				watch.duration = Some(4);
 			}
-			let mut status_args = resolved.clone();
-			if detailed { status_args.push("--detailed".to_string()); }
-			watch_status(&status_args, &watch);
+			watch.mode = WatchMode::Start;
+			if watch.enabled {
+				let mut status_args = resolved.clone();
+				if detailed { status_args.push("--detailed".to_string()); }
+				let success = watch_status(&status_args, &watch);
+				if !success {
+					std::process::exit(1);
+				}
+			}
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -789,13 +809,19 @@ fn cmd_stop(args: &[String]) {
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
 
-			if !watch.enabled {
+			if !watch.enabled && !watch.no_watch {
 				watch.enabled = true;
 				watch.duration = Some(4);
 			}
-			let mut status_args = names.clone();
-			if detailed { status_args.push("--detailed".to_string()); }
-			watch_status(&status_args, &watch);
+			watch.mode = WatchMode::Stop;
+			if watch.enabled {
+				let mut status_args = names.clone();
+				if detailed { status_args.push("--detailed".to_string()); }
+				let success = watch_status(&status_args, &watch);
+				if !success {
+					std::process::exit(1);
+				}
+			}
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -814,10 +840,11 @@ fn cmd_restart(args: &[String]) {
 	let detailed = rest.iter().any(|a| is_detailed_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a)).collect();
 
-	if !watch.enabled && !plain {
+	if !watch.enabled && !plain && !watch.no_watch {
 		watch.enabled = true;
-		watch.duration = Some(4);
+		watch.duration = Some(6);
 	}
+	watch.mode = WatchMode::Restart;
 
 	// If --all or multiple services, do a full reload (stop+start all processes)
 	if restart_all || rest.is_empty() || rest.len() > 1 {
@@ -848,7 +875,10 @@ fn cmd_restart(args: &[String]) {
 			std::thread::sleep(std::time::Duration::from_millis(500));
 			let mut status_args: Vec<String> = names.clone();
 			if detailed { status_args.push("--detailed".to_string()); }
-			watch_status(&status_args, &watch);
+			if watch.enabled {
+				let success = watch_status(&status_args, &watch);
+				if !success { std::process::exit(1); }
+			}
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -885,7 +915,10 @@ fn cmd_restart(args: &[String]) {
 			std::thread::sleep(std::time::Duration::from_millis(500));
 			let mut status_args = vec![service.clone()];
 			if detailed { status_args.push("--detailed".to_string()); }
-			watch_status(&status_args, &watch);
+			if watch.enabled {
+				let success = watch_status(&status_args, &watch);
+				if !success { std::process::exit(1); }
+			}
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -916,7 +949,10 @@ fn cmd_restart(args: &[String]) {
 			std::thread::sleep(std::time::Duration::from_millis(500));
 			let mut status_args = vec![service.clone()];
 			if detailed { status_args.push("--detailed".to_string()); }
-			watch_status(&status_args, &watch);
+			if watch.enabled {
+				let success = watch_status(&status_args, &watch);
+				if !success { std::process::exit(1); }
+			}
 		}
 		Response::Error { message } => {
 			eprintln!("error: {}", message);
@@ -1299,6 +1335,28 @@ fn cmd_cron(args: &[String]) {
 	}
 }
 
+fn cmd_reload_config() {
+	let response = send_request(&Request::ReloadConfig);
+	let json = output_format() == OutputFormat::Json;
+	if json {
+		handle_action_response(&response);
+	} else {
+		match response {
+			Response::Ok { message } => {
+				println!("{}", message.unwrap_or_else(|| "config reloaded".to_string()));
+			}
+			Response::Error { message } => {
+				eprintln!("error: {}", message);
+				std::process::exit(1);
+			}
+			_ => {
+				eprintln!("unexpected response");
+				std::process::exit(1);
+			}
+		}
+	}
+}
+
 fn cmd_daemon(args: &[String]) {
 	let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
 	let paths = daemon_paths();
@@ -1414,10 +1472,20 @@ fn cmd_serve(args: &[String]) {
 
 // --- Watch support ---
 
+#[derive(Clone, Copy, PartialEq)]
+enum WatchMode {
+	Observe,
+	Start,
+	Stop,
+	Restart,
+}
+
 struct WatchOpts {
 	duration: Option<u64>,
 	interval: u64,
 	enabled: bool,
+	no_watch: bool,
+	mode: WatchMode,
 }
 
 fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpts, Vec<String>) {
@@ -1425,6 +1493,8 @@ fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpt
 		duration: None,
 		interval: 1,
 		enabled: false,
+		no_watch: false,
+		mode: WatchMode::Observe,
 	};
 	let mut rest = Vec::new();
 	let mut i = 0;
@@ -1441,6 +1511,9 @@ fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpt
 				if opts.duration.is_none() {
 					opts.duration = default_duration;
 				}
+			}
+			"--no-watch" | "-W" => {
+				opts.no_watch = true;
 			}
 			"--watch-interval" => {
 				if i + 1 < args.len() {
@@ -1575,6 +1648,14 @@ fn gather_status_data(args: &[String]) -> StatusData {
 		.map(|name| name.len())
 		.max()
 		.unwrap_or(0);
+
+	let has_failures = sorted_filter.iter().any(|name| {
+		status_map.get(name).map_or(false, |s| {
+			let agg = aggregate_state(s);
+			matches!(agg, AggregateState::Degraded | AggregateState::Err)
+		})
+	});
+	let detailed = detailed || has_failures;
 
 	let is_single_service = sorted_filter.len() == 1 && !filtered_args.is_empty() && !show_all;
 	let show_extras = show_all || (filtered_args.is_empty() && current_project.is_none());
@@ -1865,16 +1946,28 @@ fn process_state_style(proc: &ProcessStatus) -> Style {
 	}
 }
 
+fn is_port_pending(proc: &ProcessStatus) -> bool {
+	if !proc.state.is_running() || proc.ports_expected.is_empty() {
+		return false;
+	}
+	proc.ports_expected.iter().any(|p| !proc.ports.contains(p))
+}
+
 fn process_line_spans<'a>(proc: &ProcessStatus, name_width: usize) -> RLine<'a> {
 	let green = Style::default().fg(Color::Green);
 	let dim = Style::default().add_modifier(Modifier::DIM);
 	let yellow = Style::default().fg(Color::Yellow);
 	let red = Style::default().fg(Color::Red);
+	let cyan = Style::default().fg(Color::Cyan);
 	let state_style = process_state_style(proc);
 
 	let dur_str = format_state_duration(proc.state_since);
 
 	let (symbol, label, extra) = match &proc.state {
+		ProcessState::Running { pid, .. } if is_port_pending(proc) => {
+			let extra = format!("{:<8} {:<8}", dur_str, pid);
+			(Span::styled("◌", cyan), Span::styled("starting", cyan), extra)
+		}
 		ProcessState::Running { pid, .. } => {
 			let ports = if proc.ports.is_empty() {
 				String::new()
@@ -1952,7 +2045,9 @@ fn process_mini_icon_span(proc: &ProcessStatus) -> Span<'static> {
 	let dim = Style::default().add_modifier(Modifier::DIM);
 	let yellow = Style::default().fg(Color::Yellow);
 	let red = Style::default().fg(Color::Red);
+	let cyan = Style::default().fg(Color::Cyan);
 	match &proc.state {
+		ProcessState::Running { .. } if is_port_pending(proc) => Span::styled("◌", cyan),
 		ProcessState::Running { .. } => Span::styled("•", green),
 		ProcessState::Stopped => Span::styled("◦", dim),
 		ProcessState::Crashed { .. } => Span::styled("⚠", yellow),
@@ -2000,7 +2095,12 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 				if let Some(proc) = status.processes.first() {
 					let pstyle = process_state_style(proc);
 					let dur_str = format_state_duration(proc.state_since);
+					let cyan = Style::default().fg(Color::Cyan);
 					let (symbol, label, extra) = match &proc.state {
+						ProcessState::Running { pid, .. } if is_port_pending(proc) => {
+							let extra = format!("{:<8} {:<8}", dur_str, pid);
+							(Span::styled("◌", cyan), Span::styled("starting", cyan), extra)
+						}
 						ProcessState::Running { pid, .. } => {
 							let ports = if proc.ports.is_empty() { String::new() } else {
 								proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
@@ -2189,11 +2289,140 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 	lines
 }
 
-fn build_status_lines<'a>(args: &[String]) -> Vec<RLine<'a>> {
-	status_data_to_lines(&gather_status_data(args))
+fn build_status_lines<'a>(args: &[String]) -> (Vec<RLine<'a>>, StatusData) {
+	let data = gather_status_data(args);
+	let lines = status_data_to_lines(&data);
+	(lines, data)
 }
 
-fn watch_status(args: &[String], opts: &WatchOpts) {
+fn watch_status_satisfied(data: &StatusData, mode: WatchMode) -> bool {
+	match mode {
+		WatchMode::Stop => {
+			data.sorted_filter.iter().all(|name| {
+				data.status_map.get(name).map_or(true, |s| {
+					s.processes.iter().all(|p| matches!(p.state, ProcessState::Stopped))
+				})
+			})
+		}
+		WatchMode::Start | WatchMode::Restart => {
+			data.sorted_filter.iter().all(|name| {
+				data.status_map.get(name).map_or(false, |s| {
+					s.processes.iter().all(|p| {
+						match &p.state {
+							ProcessState::Running { .. } => !is_port_pending(p),
+							ProcessState::Stopped if !p.autostart => true,
+							_ => false,
+						}
+					})
+				})
+			})
+		}
+		WatchMode::Observe => false,
+	}
+}
+
+fn watch_status_ok(data: &StatusData, mode: WatchMode) -> bool {
+	match mode {
+		WatchMode::Stop => {
+			data.sorted_filter.iter().all(|name| {
+				data.status_map.get(name).map_or(true, |s| {
+					s.processes.iter().all(|p| matches!(p.state, ProcessState::Stopped))
+				})
+			})
+		}
+		WatchMode::Start | WatchMode::Restart => {
+			data.sorted_filter.iter().all(|name| {
+				data.status_map.get(name).map_or(false, |s| {
+					s.processes.iter().all(|p| {
+						match &p.state {
+							ProcessState::Running { .. } => true,
+							ProcessState::Stopped if !p.autostart => true,
+							_ => false,
+						}
+					})
+				})
+			})
+		}
+		WatchMode::Observe => true,
+	}
+}
+
+fn failed_processes(data: &StatusData) -> Vec<(String, String)> {
+	let mut result = Vec::new();
+	for name in &data.sorted_filter {
+		if let Some(status) = data.status_map.get(name) {
+			for proc in &status.processes {
+				if matches!(proc.state, ProcessState::Crashed { .. } | ProcessState::Failed { .. }) {
+					result.push((name.clone(), proc.name.clone()));
+				}
+			}
+		}
+	}
+	result
+}
+
+fn tail_log_lines_spans<'a>(service: &str, process: &str, n: usize) -> Vec<RLine<'a>> {
+	let proc_filter = Some(process.to_string());
+	let files = find_log_files(service, &proc_filter);
+	if files.is_empty() {
+		return vec![];
+	}
+	let latest = files.last().unwrap();
+	let content = std::fs::read_to_string(latest).unwrap_or_default();
+	let file_lines: Vec<&str> = content.lines().collect();
+	let start = if file_lines.len() > n { file_lines.len() - n } else { 0 };
+
+	let dim = Style::default().add_modifier(Modifier::DIM);
+	let mut lines = Vec::new();
+
+	let header = format!("── {}.{} ", service, process);
+	let pad = if header.len() < 50 { "─".repeat(50 - header.len()) } else { String::new() };
+	lines.push(RLine::from(Span::styled(format!("{}{}", header, pad), dim)));
+
+	for line in &file_lines[start..] {
+		lines.push(RLine::from(Span::styled(line.to_string(), dim)));
+	}
+	lines
+}
+
+type PrevStates = std::collections::HashMap<(String, String), ProcessState>;
+
+fn detect_transitions(data: &StatusData, prev: &PrevStates) -> std::collections::HashMap<(String, String), &'static str> {
+	let mut transitions = std::collections::HashMap::new();
+	for name in &data.sorted_filter {
+		if let Some(status) = data.status_map.get(name) {
+			for proc in &status.processes {
+				let key = (name.clone(), proc.name.clone());
+				if let Some(prev_state) = prev.get(&key) {
+					match (&proc.state, prev_state) {
+						(ProcessState::Crashed { .. } | ProcessState::Failed { .. }, ProcessState::Running { .. }) => {
+							transitions.insert(key, " (just crashed)");
+						}
+						(ProcessState::Running { .. }, ProcessState::Stopped | ProcessState::Crashed { .. } | ProcessState::Failed { .. }) => {
+							transitions.insert(key, " (just started)");
+						}
+						_ => {}
+					}
+				}
+			}
+		}
+	}
+	transitions
+}
+
+fn snapshot_states(data: &StatusData) -> PrevStates {
+	let mut map = PrevStates::new();
+	for name in &data.sorted_filter {
+		if let Some(status) = data.status_map.get(name) {
+			for proc in &status.processes {
+				map.insert((name.clone(), proc.name.clone()), proc.state.clone());
+			}
+		}
+	}
+	map
+}
+
+fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
 	use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 	use crossterm::terminal;
 	use ratatui::backend::CrosstermBackend;
@@ -2201,8 +2430,10 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 	use std::time::Duration;
 
 	let start = Instant::now();
+	let mut prev_states: PrevStates = PrevStates::new();
+	let mut satisfied_since: Option<Instant> = None;
 
-	let initial_lines = build_status_lines(args);
+	let (initial_lines, _) = build_status_lines(args);
 	let height = (initial_lines.len() as u16).max(1);
 
 	println!();
@@ -2213,8 +2444,24 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 		TerminalOptions { viewport: Viewport::Inline(height) },
 	).unwrap();
 
+	let mut last_data: Option<StatusData> = None;
+
 	loop {
-		let lines = build_status_lines(args);
+		let (mut lines, data) = build_status_lines(args);
+
+		let transitions = detect_transitions(&data, &prev_states);
+		if !transitions.is_empty() {
+			annotate_transitions(&mut lines, &transitions);
+		}
+
+		let failed = failed_processes(&data);
+		if !failed.is_empty() {
+			lines.push(RLine::from(""));
+			for (svc, proc) in &failed {
+				lines.extend(tail_log_lines_spans(svc, proc, 10));
+			}
+		}
+
 		let line_count = lines.len() as u16;
 		if line_count != term.size().unwrap().height {
 			term.resize(ratatui::layout::Rect::new(
@@ -2228,13 +2475,43 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 			frame.render_widget(Paragraph::new(text), frame.area());
 		}).unwrap();
 
+		if opts.mode != WatchMode::Observe {
+			let satisfied = watch_status_satisfied(&data, opts.mode);
+			if satisfied {
+				if satisfied_since.is_none() {
+					satisfied_since = Some(Instant::now());
+				}
+				if opts.mode == WatchMode::Stop {
+					break;
+				}
+				if opts.mode == WatchMode::Restart {
+					if let Some(since) = satisfied_since {
+						if since.elapsed().as_secs() >= 2 {
+							break;
+						}
+					}
+				}
+			} else {
+				satisfied_since = None;
+			}
+		}
+
 		if let Some(duration) = opts.duration {
 			if start.elapsed().as_secs() >= duration {
 				break;
 			}
 		}
 
-		if event::poll(Duration::from_secs(opts.interval)).unwrap() {
+		prev_states = snapshot_states(&data);
+		last_data = Some(data);
+
+		let poll_interval = if start.elapsed().as_secs() < 2 {
+			Duration::from_millis(250)
+		} else {
+			Duration::from_secs(opts.interval)
+		};
+
+		if event::poll(poll_interval).unwrap() {
 			if let Ok(Event::Key(key)) = event::read() {
 				match key.code {
 					KeyCode::Char('q') => break,
@@ -2246,6 +2523,26 @@ fn watch_status(args: &[String], opts: &WatchOpts) {
 	}
 
 	terminal::disable_raw_mode().unwrap();
+
+	last_data.map_or(true, |data| watch_status_ok(&data, opts.mode))
+}
+
+fn annotate_transitions(lines: &mut Vec<RLine<'_>>, transitions: &std::collections::HashMap<(String, String), &'static str>) {
+	for line in lines.iter_mut() {
+		let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+		for ((_, proc_name), annotation) in transitions {
+			let dot_name = format!(".{}", proc_name);
+			if line_text.contains(&dot_name) {
+				let style = if annotation.contains("crashed") {
+					Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+				} else {
+					Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+				};
+				line.spans.push(Span::styled(*annotation, style));
+				break;
+			}
+		}
+	}
 }
 
 // --- Formatting helpers ---
@@ -2441,6 +2738,7 @@ mod tests {
 			autostart: true,
 			service_type: ServiceType::Service,
 			ports: vec![],
+			ports_expected: vec![],
 			state_since: None,
 		}
 	}

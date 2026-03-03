@@ -68,15 +68,16 @@ impl Supervisor {
 						.duration_since(std::time::UNIX_EPOCH)
 						.unwrap()
 						.as_secs();
-					ProcessStatus {
-					name: pname.clone(),
-					state: mp.state.clone(),
-					pid,
-					autostart: mp.def.autostart,
-					service_type: mp.def.service_type.clone(),
-					ports: vec![],
-					state_since: Some(now_unix.saturating_sub(elapsed)),
-				}
+				ProcessStatus {
+				name: pname.clone(),
+				state: mp.state.clone(),
+				pid,
+				autostart: mp.def.autostart,
+				service_type: mp.def.service_type.clone(),
+				ports: vec![],
+				ports_expected: mp.def.ports.clone(),
+				state_since: Some(now_unix.saturating_sub(elapsed)),
+			}
 				})
 				.collect();
 			result.push(ServiceStatus {

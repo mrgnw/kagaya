@@ -93,6 +93,8 @@ pub enum Cmd {
         echo: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
+        #[arg(long, short = 'W', help = "Skip post-command status watch")]
+        no_watch: bool,
         #[arg(long, hide = true)]
         watch_interval: Option<u64>,
     },
@@ -108,6 +110,8 @@ pub enum Cmd {
         echo: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
+        #[arg(long, short = 'W', help = "Skip post-command status watch")]
+        no_watch: bool,
         #[arg(long, hide = true)]
         watch_interval: Option<u64>,
     },
@@ -123,6 +127,8 @@ pub enum Cmd {
         echo: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
+        #[arg(long, short = 'W', help = "Skip post-command status watch")]
+        no_watch: bool,
         #[arg(long, hide = true)]
         watch_interval: Option<u64>,
     },
@@ -145,6 +151,10 @@ pub enum Cmd {
 
     /// Manage the daemon
     Daemon { args: Vec<String> },
+
+    /// Reload projects.toml without restarting services
+    #[command(alias = "rc")]
+    ReloadConfig,
 
     /// HTTP server for web UI
     Serve { args: Vec<String> },

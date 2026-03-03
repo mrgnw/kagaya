@@ -93,5 +93,7 @@ pub struct ProcessStatus {
     #[serde(default)]
     pub ports: Vec<u16>,
     #[serde(default)]
+    pub ports_expected: Vec<u16>,
+    #[serde(default)]
     pub state_since: Option<u64>,
 }

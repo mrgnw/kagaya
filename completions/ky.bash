@@ -14,7 +14,7 @@ _ky_completion() {
 	fi
 
 	local commands="status st start stop reload kill echo connect restart quit run init add serve ui self help version"
-	local flags="--all -a --daemon -d --stop --echo --restart --status -h --help -V --version"
+	local flags="--all -a --no-watch -W --daemon -d --stop --echo --restart --status -h --help -V --version"
 
 	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects"
 	local projects=""

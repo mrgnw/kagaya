@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-03-03
+
+### Added
+
+- **Smart adaptive watch mode**: Post-command status watching now intelligently adapts to what happened
+  - Auto-escalates from condensed to detailed view when any process fails, so you immediately see which process and why
+  - Failed/crashed processes show their last 10 log lines inline below the status table
+  - State transition annotations: processes that just crashed or just started are highlighted with bold colored annotations
+  - Faster initial polling: 250ms intervals for the first 2 seconds (catches immediate failures), then 1s intervals
+  - Command-specific exit conditions:
+    - `ky stop` exits immediately once all processes confirm stopped
+    - `ky start` runs full 4s window to catch late crashes
+    - `ky restart` watches for 6s, exits early once all processes are running and stable
+  - Non-zero exit code (1) if processes are crashed/failed at end of watch window (scriptable)
+  
+- **Port readiness detection**: Processes with configured ports now show accurate port status
+  - New "starting" state (cyan `◌`) for processes that are running but ports aren't listening yet
+  - Transitions to "on" (green `●`) once port scanner confirms the port is open
+  - Watch mode exit conditions wait for port readiness, not just process start
+  - Fixes false positives where process spawned but service wasn't actually ready
+  
+- **`--no-watch` / `-W` flag**: Skip the automatic post-command status watch
+  - Works on `ky start`, `ky stop`, `ky restart`
+  - Useful for scripting or when you don't need visual confirmation
+  
+### Changed
+
+- **Condensed status now auto-expands on failure**: The detailed view is no longer just a manual `--detailed` flag — it automatically activates when needed
+- **Process status API**: Added `ports_expected` field to `ProcessStatus` (backward-compatible via `#[serde(default)]`)
+
 ## [0.6.5] - 2026-02-16
 
 ### Added

@@ -28,6 +28,8 @@ _ky() {
 	flags=(
 		'--all:target all projects'
 		'-a:target all projects'
+		'--no-watch:skip post-command status watch'
+		'-W:skip post-command status watch'
 		'--daemon:run in background'
 		'-d:run in background'
 		'--stop:stop daemon'

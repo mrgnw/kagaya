@@ -39,6 +39,8 @@ complete -c ky -n "__fish_use_subcommand" -a "(__ky_projects)"
 complete -c ky -n "__fish_seen_subcommand_from status st start stop reload kill echo connect restart quit run" -a "(__ky_projects)"
 complete -c ky -n "__fish_seen_subcommand_from status st start stop reload kill echo connect restart quit run" -l all -d "target all projects"
 complete -c ky -n "__fish_seen_subcommand_from status st start stop reload kill echo connect restart quit run" -s a -d "target all projects"
+complete -c ky -n "__fish_seen_subcommand_from start stop restart reload" -l no-watch -d "skip post-command status watch"
+complete -c ky -n "__fish_seen_subcommand_from start stop restart reload" -s W -d "skip post-command status watch"
 
 complete -c ky -n "__fish_seen_subcommand_from serve ui" -l daemon -d "run in background"
 complete -c ky -n "__fish_seen_subcommand_from serve ui" -s d -d "run in background"
