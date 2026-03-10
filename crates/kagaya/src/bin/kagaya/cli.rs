@@ -65,13 +65,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Show status
-    #[command(alias = "st")]
+    /// Show service status (default command)
+    #[command(visible_alias = "st")]
     Status {
-        /// Service names or --all
+        /// Service names
         names: Vec<String>,
+        /// Show all services
         #[arg(long, short)]
         all: bool,
+        /// Show per-process detail
         #[arg(long, short)]
         detailed: bool,
         #[arg(long, short, hide = true)]
@@ -80,20 +82,26 @@ pub enum Cmd {
         watch_interval: Option<u64>,
     },
 
-    /// Start service(s)
+    /// Start service(s); briefly shows live status after
     Start {
+        /// Service names
         names: Vec<String>,
+        /// Start all services
         #[arg(long, short)]
         all: bool,
+        /// Start only autostart-enabled services
         #[arg(long)]
         autostart: bool,
+        /// Show per-process detail
         #[arg(long, short)]
         detailed: bool,
+        /// Stream live output after starting
         #[arg(long, short = 'e')]
         echo: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
-        #[arg(long, short = 'W', help = "Skip post-command status watch")]
+        /// Skip post-command status watch
+        #[arg(long, short = 'W')]
         no_watch: bool,
         #[arg(long, hide = true)]
         watch_interval: Option<u64>,
@@ -101,16 +109,21 @@ pub enum Cmd {
 
     /// Stop service(s)
     Stop {
+        /// Service names
         names: Vec<String>,
+        /// Stop all services
         #[arg(long, short)]
         all: bool,
+        /// Show per-process detail
         #[arg(long, short)]
         detailed: bool,
+        /// Stream live output after stopping
         #[arg(long, short = 'e')]
         echo: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
-        #[arg(long, short = 'W', help = "Skip post-command status watch")]
+        /// Skip post-command status watch
+        #[arg(long, short = 'W')]
         no_watch: bool,
         #[arg(long, hide = true)]
         watch_interval: Option<u64>,
@@ -118,48 +131,53 @@ pub enum Cmd {
 
     /// Restart service(s) or a single process
     Restart {
+        /// Service or service.process targets
         target: Vec<String>,
+        /// Restart all services
         #[arg(long, short)]
         all: bool,
+        /// Show per-process detail
         #[arg(long, short)]
         detailed: bool,
+        /// Stream live output after restarting
         #[arg(long, short = 'e')]
         echo: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
-        #[arg(long, short = 'W', help = "Skip post-command status watch")]
+        /// Skip post-command status watch
+        #[arg(long, short = 'W')]
         no_watch: bool,
         #[arg(long, hide = true)]
         watch_interval: Option<u64>,
     },
 
-    /// Show last 100 lines of log file
+    /// Show log file paths
     Logs { args: Vec<String> },
 
     /// Deprecated: use echo instead
     #[command(hide = true)]
     Tail { args: Vec<String> },
 
-    /// Live output stream from daemon
+    /// Tail + stream live output from a service
     Echo { args: Vec<String> },
 
-    /// Show services.toml or process command
+    /// Show service config or a single process command
     Show { args: Vec<String> },
 
     /// Manage cron jobs (via koku)
     Cron { args: Vec<String> },
 
-    /// Manage the daemon
+    /// Manage the daemon process
     Daemon { args: Vec<String> },
 
     /// Reload projects.toml without restarting services
-    #[command(alias = "rc")]
+    #[command(visible_alias = "rc")]
     ReloadConfig,
 
     /// HTTP server for web UI
     Serve { args: Vec<String> },
 
-    /// Register a project
+    /// Register a project or standalone command
     Add {
         args: Vec<String>,
         /// Register a standalone command instead of a project directory
@@ -168,36 +186,39 @@ pub enum Cmd {
     },
 
     /// Unregister a project
-    #[command(alias = "rm")]
+    #[command(visible_alias = "rm")]
     Remove { args: Vec<String> },
 
     /// Create config files
     Init,
 
-    /// Migrate ubermind Procfiles to kagaya TOML
+    /// Migrate Procfiles to kagaya TOML
     Migrate {
         #[arg(long, short)]
         force: bool,
     },
 
-    /// Start services on login
+    /// Manage boot autostart (on/off/status)
     Autostart { args: Vec<String> },
 
-    /// macOS launchd agents
-    #[command(alias = "launch", alias = "lctl")]
+    /// macOS launchd agents (run `ky launchd help` for details)
+    #[command(visible_alias = "lctl")]
     Launchd { args: Vec<String> },
 
-    /// Self-management commands
+    /// Self-management (update)
     #[command(name = "self")]
     SelfCmd { args: Vec<String> },
 
     /// Show status for all services
+    #[command(hide = true)]
     All,
 
     /// Show help
+    #[command(hide = true)]
     Help,
 
     /// Show version
+    #[command(hide = true)]
     Version,
 
     /// Catch-all for service-first syntax (e.g. ky myapp start)

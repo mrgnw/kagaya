@@ -37,7 +37,11 @@ fn main() {
 			}
 
 			if cli.help {
-				print_usage();
+				if let Some(ref cmd) = cli.command {
+					print_subcommand_help(cmd);
+				} else {
+					print_usage();
+				}
 				return;
 			}
 			if cli.version {
@@ -264,6 +268,40 @@ fn print_usage() {
 	eprintln!("    ky                         status (current project or all)");
 	eprintln!("    ky all                     status --all");
 	eprintln!("    ky --watch                 status --watch (live refresh)");
+}
+
+fn print_subcommand_help(cmd: &Cmd) {
+	use clap::CommandFactory;
+	let name = match cmd {
+		Cmd::Status { .. } => "status",
+		Cmd::Start { .. } => "start",
+		Cmd::Stop { .. } => "stop",
+		Cmd::Restart { .. } => "restart",
+		Cmd::Logs { .. } => "logs",
+		Cmd::Echo { .. } => "echo",
+		Cmd::Show { .. } => "show",
+		Cmd::Cron { .. } => "cron",
+		Cmd::Daemon { .. } => "daemon",
+		Cmd::ReloadConfig => "reload-config",
+		Cmd::Serve { .. } => "serve",
+		Cmd::Add { .. } => "add",
+		Cmd::Remove { .. } => "remove",
+		Cmd::Init => "init",
+		Cmd::Migrate { .. } => "migrate",
+		Cmd::Autostart { .. } => "autostart",
+		Cmd::Launchd { .. } => "launchd",
+		Cmd::SelfCmd { .. } => "self",
+		_ => {
+			print_usage();
+			return;
+		}
+	};
+	let mut app = Cli::command();
+	if let Some(sub) = app.find_subcommand_mut(name) {
+		sub.print_help().ok();
+	} else {
+		print_usage();
+	}
 }
 
 // --- Config management (no daemon needed) ---
