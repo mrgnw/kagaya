@@ -12,7 +12,7 @@ mod self_update;
 mod utils;
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use cli::{Cli, Cmd, OutputFormat, output_format, set_output_format};
@@ -447,22 +447,104 @@ fn cmd_remove(args: &[String]) {
 		}
 	};
 
-	let mut table: toml::Table = match toml::from_str(&content) {
-		Ok(t) => t,
-		Err(e) => {
-			eprintln!("failed to parse projects.toml: {}", e);
+	let new_content = match remove_project_entry(&content, &name) {
+		Some(c) => c,
+		None => {
+			eprintln!("{}: not found in projects.toml", name);
 			std::process::exit(1);
 		}
 	};
 
-	if table.remove(&name).is_none() {
-		eprintln!("{}: not found in projects.toml", name);
-		std::process::exit(1);
+	std::fs::write(&projects_file, new_content).unwrap();
+
+	// Clean up _commands/ dir for standalone commands
+	let commands_dir = config_dir.join("_commands").join(&name);
+	if commands_dir.exists() {
+		let _ = std::fs::remove_dir_all(&commands_dir);
 	}
 
-	let new_content = toml::to_string_pretty(&table).unwrap();
-	std::fs::write(&projects_file, new_content).unwrap();
 	eprintln!("{}: removed", name);
+}
+
+/// Remove a project entry from projects.toml content, preserving formatting.
+/// Returns None if the entry was not found.
+/// Handles both simple entries (`name = "..."`) and table entries (`[name]\n...`).
+fn remove_project_entry(content: &str, name: &str) -> Option<String> {
+	let lines: Vec<&str> = content.lines().collect();
+	let mut remove_start = None;
+	let mut remove_end = None;
+
+	// Look for a table header: [name]
+	let table_header = format!("[{}]", name);
+	for (i, line) in lines.iter().enumerate() {
+		let trimmed = line.trim();
+		if trimmed == table_header {
+			remove_start = Some(i);
+			// Find the end: next table header or EOF
+			remove_end = Some(lines.len());
+			for j in (i + 1)..lines.len() {
+				let t = lines[j].trim();
+				if t.starts_with('[') && !t.starts_with("[[") {
+					remove_end = Some(j);
+					break;
+				}
+			}
+			break;
+		}
+	}
+
+	// If no table header found, look for a simple key: name = "..."
+	if remove_start.is_none() {
+		let key_prefix = format!("{} ", name);
+		let key_prefix_eq = format!("{}=", name);
+		for (i, line) in lines.iter().enumerate() {
+			let trimmed = line.trim();
+			if (trimmed.starts_with(&key_prefix) || trimmed.starts_with(&key_prefix_eq))
+				&& trimmed.contains('=')
+			{
+				// Verify this is actually a key assignment for our name by parsing the key
+				if let Some(eq_pos) = trimmed.find('=') {
+					let key = trimmed[..eq_pos].trim();
+					if key == name {
+						remove_start = Some(i);
+						remove_end = Some(i + 1);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	let start = remove_start?;
+	let end = remove_end.unwrap();
+
+	// Strip trailing blank lines from the removed block
+	let mut actual_end = end;
+	while actual_end > start + 1 && lines.get(actual_end - 1).map_or(false, |l| l.trim().is_empty()) {
+		actual_end -= 1;
+	}
+
+	let mut result_lines: Vec<&str> = Vec::new();
+	result_lines.extend_from_slice(&lines[..start]);
+	// Skip blank lines immediately before the removed block too
+	while result_lines.last().map_or(false, |l| l.trim().is_empty()) {
+		result_lines.pop();
+	}
+	if !result_lines.is_empty() && end < lines.len() {
+		result_lines.push(""); // single blank separator
+	}
+	result_lines.extend_from_slice(&lines[end..]);
+
+	// Trim trailing blank lines from result
+	while result_lines.last().map_or(false, |l| l.trim().is_empty()) {
+		result_lines.pop();
+	}
+
+	let mut result = result_lines.join("\n");
+	if !result.is_empty() {
+		result.push('\n');
+	}
+	Some(result)
 }
 
 // --- Daemon communication ---
@@ -505,7 +587,7 @@ fn send_request(request: &Request) -> Response {
 
 fn cmd_status(args: &[String]) {
 	let (watch, rest) = parse_watch_opts(args, None);
-	if watch.enabled && !output_format().is_plain() {
+	if watch.enabled && !output_format().is_plain() && io::stdout().is_terminal() {
 		watch_status(&rest, &watch);
 	} else {
 		let data = gather_status_data(&rest);
@@ -616,19 +698,19 @@ fn relevant_state_since(status: &ServiceStatus, agg: AggregateState) -> Option<u
 fn print_process_line(proc: &ProcessStatus, name_width: usize) {
 	let pcolor = process_state_color(proc);
 	let (symbol, label, extra) = match &proc.state {
-		ProcessState::Running { pid, .. } if is_port_pending(proc) => {
+		ProcessState::Running { .. } if is_port_pending(proc) => {
 			let duration = format_state_duration(proc.state_since);
-			let extra = format!("{:<8} {:<8}", color_duration(&duration, pcolor), pid);
+			let extra = format!("{:<8}", color_duration(&duration, pcolor));
 			("◌".cyan().to_string(), "starting".cyan().to_string(), extra)
 		}
-		ProcessState::Running { pid, .. } => {
+		ProcessState::Running { .. } => {
 			let duration = format_state_duration(proc.state_since);
 			let ports = if proc.ports.is_empty() {
 				String::new()
 			} else {
-				proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+				proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
 			};
-			let extra = format!("{:<8} {:<8} {}", color_duration(&duration, pcolor), pid, ports);
+			let extra = format!("{:<8} {}", color_duration(&duration, pcolor), ports);
 			("•".green().to_string(), "on".green().to_string(), extra)
 		}
 		ProcessState::Stopped if !proc.autostart => {
@@ -747,7 +829,7 @@ fn cmd_start(args: &[String]) {
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
 
-			if !watch.enabled && !watch.no_watch {
+			if !watch.enabled && !watch.no_watch && io::stdout().is_terminal() {
 				watch.enabled = true;
 				watch.duration = Some(4);
 			}
@@ -809,7 +891,7 @@ fn cmd_stop(args: &[String]) {
 			}
 			std::thread::sleep(std::time::Duration::from_millis(500));
 
-			if !watch.enabled && !watch.no_watch {
+			if !watch.enabled && !watch.no_watch && io::stdout().is_terminal() {
 				watch.enabled = true;
 				watch.duration = Some(4);
 			}
@@ -840,7 +922,7 @@ fn cmd_restart(args: &[String]) {
 	let detailed = rest.iter().any(|a| is_detailed_flag(a));
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a)).collect();
 
-	if !watch.enabled && !plain && !watch.no_watch {
+	if !watch.enabled && !plain && !watch.no_watch && io::stdout().is_terminal() {
 		watch.enabled = true;
 		watch.duration = Some(6);
 	}
@@ -1206,8 +1288,11 @@ fn cmd_show(args: &[String]) {
 	let service = config::load_service(service_entry, &global_config.defaults);
 
 	if service.processes.is_empty() {
-		let services_path = service_entry.dir.join("services.toml");
-		eprintln!("no services defined ({})", services_path.display());
+		if service_entry.inline_command.is_some() {
+			eprintln!("no services defined ({})", protocol::config_dir().join("projects.toml").display());
+		} else {
+			eprintln!("no services defined ({})", service_entry.dir.join("services.toml").display());
+		}
 		std::process::exit(1);
 	}
 
@@ -1224,8 +1309,13 @@ fn cmd_show(args: &[String]) {
 			std::process::exit(1);
 		}
 	} else {
-		let services_path = service_entry.dir.join("services.toml");
-		println!("{}", services_path.display().to_string().dimmed());
+		if service_entry.inline_command.is_some() {
+			let projects_path = protocol::config_dir().join("projects.toml");
+			println!("{}", projects_path.display().to_string().dimmed());
+		} else {
+			let services_path = service_entry.dir.join("services.toml");
+			println!("{}", services_path.display().to_string().dimmed());
+		}
 		println!();
 		for proc in &service.processes {
 			let type_tag = match proc.service_type {
@@ -1718,23 +1808,12 @@ fn render_condensed_status(args: &[String]) -> usize {
 			String::new()
 		};
 
-		let pids_ports: String = if let Some(status) = status {
-			let parts: Vec<String> = status.processes.iter()
+		let ports_str: String = if let Some(status) = status {
+			let all_ports: Vec<String> = status.processes.iter()
 				.filter(|p| p.state.is_running())
-				.map(|p| {
-					let pid = match &p.state {
-						ProcessState::Running { pid, .. } => pid.to_string(),
-						_ => String::new(),
-					};
-					if p.ports.is_empty() {
-						pid
-					} else {
-						let ports = p.ports.iter().map(|pt| format!(":{}", pt)).collect::<Vec<_>>().join(",");
-						format!("{}{}", pid, ports)
-					}
-				})
+				.flat_map(|p| p.ports.iter().map(|pt| pt.to_string()))
 				.collect();
-			parts.join(", ")
+			all_ports.join(", ")
 		} else {
 			String::new()
 		};
@@ -1742,14 +1821,14 @@ fn render_condensed_status(args: &[String]) -> usize {
 		let mut line = format!("{} {:<nw$}  {:<3}", sym, name, label, nw = name_w);
 		if !dur_colored.is_empty() {
 			line.push_str(&format!("  {:>7}", dur_colored));
-		} else if !mini_icons.is_empty() || !pids_ports.is_empty() {
+		} else if !mini_icons.is_empty() || !ports_str.is_empty() {
 			line.push_str(&format!("  {:>7}", ""));
 		}
 		if !mini_icons.is_empty() {
 			line.push_str(&format!(" {}", mini_icons));
 		}
-		if !pids_ports.is_empty() {
-			line.push_str(&format!("  {}", pids_ports));
+		if !ports_str.is_empty() {
+			line.push_str(&format!("  {}", ports_str));
 		}
 		println!("{}", line.trim_end());
 		lines += 1;
@@ -1964,17 +2043,17 @@ fn process_line_spans<'a>(proc: &ProcessStatus, name_width: usize) -> RLine<'a> 
 	let dur_str = format_state_duration(proc.state_since);
 
 	let (symbol, label, extra) = match &proc.state {
-		ProcessState::Running { pid, .. } if is_port_pending(proc) => {
-			let extra = format!("{:<8} {:<8}", dur_str, pid);
+		ProcessState::Running { .. } if is_port_pending(proc) => {
+			let extra = format!("{:<8}", dur_str);
 			(Span::styled("◌", cyan), Span::styled("starting", cyan), extra)
 		}
-		ProcessState::Running { pid, .. } => {
+		ProcessState::Running { .. } => {
 			let ports = if proc.ports.is_empty() {
 				String::new()
 			} else {
-				proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+				proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
 			};
-			let extra = format!("{:<8} {:<8} {}", dur_str, pid, ports);
+			let extra = format!("{:<8} {}", dur_str, ports);
 			(Span::styled("•", green), Span::styled("on", green), extra)
 		}
 		ProcessState::Stopped if !proc.autostart => {
@@ -2097,15 +2176,15 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 					let dur_str = format_state_duration(proc.state_since);
 					let cyan = Style::default().fg(Color::Cyan);
 					let (symbol, label, extra) = match &proc.state {
-						ProcessState::Running { pid, .. } if is_port_pending(proc) => {
-							let extra = format!("{:<8} {:<8}", dur_str, pid);
+						ProcessState::Running { .. } if is_port_pending(proc) => {
+							let extra = format!("{:<8}", dur_str);
 							(Span::styled("◌", cyan), Span::styled("starting", cyan), extra)
 						}
-						ProcessState::Running { pid, .. } => {
+						ProcessState::Running { .. } => {
 							let ports = if proc.ports.is_empty() { String::new() } else {
-								proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+								proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
 							};
-							let extra = format!("{:<8} {:<8} {}", dur_str, pid, ports);
+							let extra = format!("{:<8} {}", dur_str, ports);
 							(Span::styled("●", green), Span::styled("on", green), extra)
 						}
 						ProcessState::Stopped if !proc.autostart => {
@@ -2155,22 +2234,12 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 
 			let has_multi = status.map(|s| s.processes.len() > 1).unwrap_or(false);
 
-			let pids_ports: String = if let Some(status) = status {
-				let parts: Vec<String> = status.processes.iter()
+			let ports_str: String = if let Some(status) = status {
+				let all_ports: Vec<String> = status.processes.iter()
 					.filter(|p| p.state.is_running())
-					.map(|p| {
-						let pid = match &p.state {
-							ProcessState::Running { pid, .. } => pid.to_string(),
-							_ => String::new(),
-						};
-						if p.ports.is_empty() { pid }
-						else {
-							let ports = p.ports.iter().map(|pt| format!(":{}", pt)).collect::<Vec<_>>().join(",");
-							format!("{}{}", pid, ports)
-						}
-					})
+					.flat_map(|p| p.ports.iter().map(|pt| pt.to_string()))
 					.collect();
-				parts.join(", ")
+				all_ports.join(", ")
 			} else {
 				String::new()
 			};
@@ -2181,7 +2250,7 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 			if !dur_str.is_empty() {
 				spans.push(Span::raw("  "));
 				spans.push(Span::styled(format!("{:>7}", dur_str), agg_style));
-			} else if has_multi || !pids_ports.is_empty() {
+			} else if has_multi || !ports_str.is_empty() {
 				spans.push(Span::raw(format!("  {:>7}", "")));
 			}
 
@@ -2194,9 +2263,9 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 				}
 			}
 
-			if !pids_ports.is_empty() {
+			if !ports_str.is_empty() {
 				spans.push(Span::raw("  "));
-				spans.push(Span::raw(pids_ports));
+				spans.push(Span::raw(ports_str));
 			}
 
 			lines.push(RLine::from(spans));
@@ -2428,6 +2497,10 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
 	use ratatui::backend::CrosstermBackend;
 	use ratatui::{Terminal, TerminalOptions, Viewport};
 	use std::time::Duration;
+
+	if !io::stdout().is_terminal() {
+		return true;
+	}
 
 	let start = Instant::now();
 	let mut prev_states: PrevStates = PrevStates::new();
@@ -2840,7 +2913,7 @@ mod tests {
 		let line = process_line_spans(&proc, 5);
 		let text = span_text(&line);
 
-		assert!(text.contains(":3000,:3001"));
+		assert!(text.contains("3000, 3001"));
 	}
 
 	#[test]
@@ -3166,17 +3239,22 @@ mod tests {
 		result
 	}
 
+	/// Mirror of print_process_line for test assertions (must stay in sync).
 	fn capture_print_process_line(proc: &ProcessStatus, width: usize) -> String {
 		let pcolor = process_state_color(proc);
 		let dur_str = format_state_duration(proc.state_since);
 		let (symbol, label, extra) = match &proc.state {
-			ProcessState::Running { pid, .. } => {
+			ProcessState::Running { .. } if is_port_pending(proc) => {
+				let extra = format!("{:<8}", color_duration(&dur_str, pcolor));
+				("◌".cyan().to_string(), "starting".cyan().to_string(), extra)
+			}
+			ProcessState::Running { .. } => {
 				let ports = if proc.ports.is_empty() {
 					String::new()
 				} else {
-					proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+					proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
 				};
-				let extra = format!("{:<8} {:<8} {}", color_duration(&dur_str, pcolor), pid, ports);
+				let extra = format!("{:<8} {}", color_duration(&dur_str, pcolor), ports);
 				("•".green().to_string(), "on".green().to_string(), extra)
 			}
 			ProcessState::Stopped if !proc.autostart => {
@@ -3286,5 +3364,105 @@ mod tests {
 			test_proc("worker", ProcessState::Failed { exit_code: 1 }),
 		]);
 		assert_eq!(aggregate_state(&svc), AggregateState::Degraded);
+	}
+
+	// ── remove_project_entry tests ───────────────────────────────────────────
+
+	#[test]
+	fn remove_simple_entry() {
+		let content = "foo = \"/dev/foo\"\nbar = \"/dev/bar\"\nbaz = \"/dev/baz\"\n";
+		let result = remove_project_entry(content, "bar").unwrap();
+		assert_eq!(result, "foo = \"/dev/foo\"\n\nbaz = \"/dev/baz\"\n");
+	}
+
+	#[test]
+	fn remove_table_entry() {
+		let content = "foo = \"/dev/foo\"\n\n[tunnel]\nrun = \"ssh -N server\"\nrestart = true\n\n[other]\nrun = \"sleep 999\"\n";
+		let result = remove_project_entry(content, "tunnel").unwrap();
+		assert_eq!(result, "foo = \"/dev/foo\"\n\n[other]\nrun = \"sleep 999\"\n");
+	}
+
+	#[test]
+	fn remove_table_entry_at_end() {
+		let content = "foo = \"/dev/foo\"\n\n[tunnel]\nrun = \"ssh -N server\"\n";
+		let result = remove_project_entry(content, "tunnel").unwrap();
+		assert_eq!(result, "foo = \"/dev/foo\"\n");
+	}
+
+	#[test]
+	fn remove_only_simple_entry() {
+		let content = "foo = \"/dev/foo\"\n";
+		let result = remove_project_entry(content, "foo").unwrap();
+		assert_eq!(result, "");
+	}
+
+	#[test]
+	fn remove_only_table_entry() {
+		let content = "[tunnel]\nrun = \"ssh server\"\n";
+		let result = remove_project_entry(content, "tunnel").unwrap();
+		assert_eq!(result, "");
+	}
+
+	#[test]
+	fn remove_nonexistent_returns_none() {
+		let content = "foo = \"/dev/foo\"\n";
+		assert!(remove_project_entry(content, "bar").is_none());
+	}
+
+	#[test]
+	fn remove_preserves_other_entries() {
+		let content = "a = \"/dev/a\"\nb = \"/dev/b\"\nc = \"/dev/c\"\n\n[daemon]\nrun = \"sleep 999\"\n";
+		let result = remove_project_entry(content, "b").unwrap();
+		assert!(result.contains("a = \"/dev/a\""));
+		assert!(!result.contains("b = "));
+		assert!(result.contains("c = \"/dev/c\""));
+		assert!(result.contains("[daemon]"));
+		assert!(result.contains("run = \"sleep 999\""));
+	}
+
+	#[test]
+	fn remove_table_preserves_simple_entries() {
+		let content = "a = \"/dev/a\"\nb = \"/dev/b\"\n\n[daemon]\nrun = \"sleep 999\"\n";
+		let result = remove_project_entry(content, "daemon").unwrap();
+		assert!(result.contains("a = \"/dev/a\""));
+		assert!(result.contains("b = \"/dev/b\""));
+		assert!(!result.contains("[daemon]"));
+		assert!(!result.contains("sleep 999"));
+	}
+
+	// ── insert_before_first_table tests ──────────────────────────────────────
+
+	#[test]
+	fn insert_before_table_header() {
+		let content = "[tunnel]\nrun = \"ssh server\"\n";
+		let result = insert_before_first_table(content, "foo = \"/dev/foo\"");
+		assert!(result.starts_with("foo = \"/dev/foo\""));
+		assert!(result.contains("[tunnel]"));
+	}
+
+	#[test]
+	fn insert_with_existing_simple_entries() {
+		let content = "bar = \"/dev/bar\"\n\n[tunnel]\nrun = \"ssh\"\n";
+		let result = insert_before_first_table(content, "foo = \"/dev/foo\"");
+		// foo should come after bar but before [tunnel]
+		let foo_pos = result.find("foo =").unwrap();
+		let bar_pos = result.find("bar =").unwrap();
+		let tunnel_pos = result.find("[tunnel]").unwrap();
+		assert!(bar_pos < foo_pos);
+		assert!(foo_pos < tunnel_pos);
+	}
+
+	#[test]
+	fn insert_into_empty_file() {
+		let result = insert_before_first_table("", "foo = \"/dev/foo\"");
+		assert_eq!(result, "foo = \"/dev/foo\"");
+	}
+
+	#[test]
+	fn insert_no_tables() {
+		let content = "bar = \"/dev/bar\"\n";
+		let result = insert_before_first_table(content, "foo = \"/dev/foo\"");
+		assert!(result.contains("bar = \"/dev/bar\""));
+		assert!(result.contains("foo = \"/dev/foo\""));
 	}
 }
