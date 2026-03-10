@@ -207,67 +207,80 @@ fn dispatch_external(args: &[String]) {
 	}
 }
 
+fn hline(cmd: &str, args: &str, desc: &str, cmd_width: usize) {
+	let pad = cmd_width.saturating_sub(cmd.len());
+	if args.is_empty() {
+		eprintln!("  {}{:pad$}  {}", cmd.bold(), "", desc.dimmed());
+	} else {
+		eprintln!("  {}{:pad$}  {}  {}", cmd.bold(), "", args, desc.dimmed());
+	}
+}
+
 fn print_usage() {
 	eprintln!("{} {} — process daemon manager", "ky".bold(), env!("CARGO_PKG_VERSION"));
 	eprintln!();
 	eprintln!("usage: {} [command] [service] [options]", "ky".bold());
 	eprintln!();
 
+	let w = 16; // column width for command names
 	eprintln!("{}", "services".cyan().bold());
-	eprintln!("  {} [name|--all]          Show status (default command)", "status".bold());
-	eprintln!("  {} [name|--all] [-e]      Start service(s)", "start".bold());
-	eprintln!("  {} [name|--all] [-e]       Stop service(s)", "stop".bold());
-	eprintln!("  {} [name|--all] [-e]    Restart service(s) or a single process", "restart".bold());
+	hline("status|st", "[name|--all]", "Show status (default command)", w);
+	hline("start", "[name|--all]", "Start service(s)", w);
+	hline("stop", "[name|--all]", "Stop service(s)", w);
+	hline("restart", "[name|--all]", "Restart service(s) or a single process", w);
+	eprintln!();
+	eprintln!("  start/stop/restart auto-watch status briefly; {} to skip", "-W".bold());
+	eprintln!("  {} streams live output after action; {} shows per-process detail", "-e".bold(), "-d".bold());
 	eprintln!();
 
 	eprintln!("{}", "logs".cyan().bold());
-	eprintln!("  {} <name> [process]        Show log file paths", "logs".bold());
-	eprintln!("  {} <name> [process] [-n N]  Tail + stream live output", "echo".bold());
+	hline("logs", "<name> [process]", "Show log file paths", w);
+	hline("echo", "<name> [process]", "Tail + stream live output", w);
 	eprintln!();
 
 	eprintln!("{}", "config".cyan().bold());
-	eprintln!("  {} [name] [process]        Show services.toml or process command", "show".bold());
-	eprintln!("  {} [name] [dir]             Register a project", "add".bold());
-	eprintln!("  {} <name> --run <command>   Register a standalone command", "add".bold());
-	eprintln!("  {} <name>                Unregister a project", "remove".bold());
-	eprintln!("  {}                         Create config files", "init".bold());
-	eprintln!("  {} [--force]             Migrate ubermind Procfiles to kagaya TOML", "migrate".bold());
+	hline("show", "[name] [process]", "Show config or process command", w);
+	hline("add", "[name] [dir]", "Register a project", w);
+	hline("add", "<name> --run <cmd>", "Register a standalone command", w);
+	hline("remove|rm", "<name>", "Unregister a project", w);
+	hline("init", "", "Create config files", w);
 	eprintln!();
 
 	eprintln!("{}", "cron (via koku)".cyan().bold());
-	eprintln!("  {} [status|--json]       Show cron job status", "cron".bold());
-	eprintln!("  {} run <name>             Trigger a one-off run", "cron".bold());
-	eprintln!("  {} pause <name>           Pause a cron job", "cron".bold());
-	eprintln!("  {} resume <name>          Resume a cron job", "cron".bold());
-	eprintln!("  {} reload                 Reload koku config", "cron".bold());
+	hline("cron", "[status]", "Show cron job status", w);
+	hline("cron", "run|pause|resume", "Manage individual jobs", w);
+	hline("cron", "reload", "Reload koku config", w);
 	eprintln!();
 
 	eprintln!("{}", "system".cyan().bold());
-	eprintln!("  {} [on|off|status]   Start services on login", "autostart".bold());
-	eprintln!("  {} [start|stop|restart|status]   Manage the daemon", "daemon".bold());
-	eprintln!("  {}              Reload projects.toml without restarting services", "reload-config".bold());
-	eprintln!("  {} [-d|--stop|--status]   HTTP server for web UI", "serve".bold());
-	eprintln!("  {} [command]            macOS launchd agents", "launchd".bold());
-	eprintln!("  {}                  Update to latest version", "self update".bold());
-	eprintln!();
-
-	eprintln!("{}", "output".cyan().bold());
-	eprintln!("  {}                       Output as JSON", "--json".bold());
-	eprintln!("  {}                        Output as TSV", "--tsv".bold());
+	hline("autostart", "[on|off|status]", "Start services on login", w);
+	hline("daemon", "[start|stop|status]", "Manage the daemon", w);
+	hline("reload-config|rc", "", "Reload projects.toml", w);
+	hline("serve", "[-d|--stop]", "HTTP server for web UI", w);
+	hline("launchd|lctl", "[command]", "macOS launchd agents", w);
+	hline("self update", "", "Update to latest version", w);
 	eprintln!();
 
 	eprintln!("{}", "targeting".cyan().bold());
-	eprintln!("  Use {} dot syntax to target a specific process:", "name.process".bold());
-	eprintln!("    ky status matrix.automation");
+	eprintln!("  {} dot syntax targets a process:  ky status app.web", "name.process".bold());
+	eprintln!("  Service-first syntax:              ky myapp start");
 	eprintln!("  Context-aware: run from a project dir to auto-target it");
-	eprintln!("    ky restart api             restart 'api' in current project");
-	eprintln!("    ky restart appligator api  target a specific project");
 	eprintln!();
 
 	eprintln!("{}", "shortcuts".cyan().bold());
-	eprintln!("    ky                         status (current project or all)");
-	eprintln!("    ky all                     status --all");
-	eprintln!("    ky --watch                 status --watch (live refresh)");
+	eprintln!("  ky                  status (current project or all)");
+	eprintln!("  ky all              status --all");
+	eprintln!("  ky -w               live watch mode");
+	eprintln!("  ky <service>        status for a single service");
+	eprintln!();
+
+	eprintln!("{}", "files".cyan().bold());
+	eprintln!("  {}   registered projects", "~/.config/kagaya/projects.toml".dimmed());
+	eprintln!("  {}     global defaults", "~/.config/kagaya/config.toml".dimmed());
+	eprintln!("  {}          per-project services", "<project>/services.toml".dimmed());
+	eprintln!();
+
+	eprintln!("Run {} for detailed options", "ky <command> --help".bold());
 }
 
 fn print_subcommand_help(cmd: &Cmd) {
