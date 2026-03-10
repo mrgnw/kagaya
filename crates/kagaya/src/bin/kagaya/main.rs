@@ -53,12 +53,10 @@ fn main() {
 				None => {
 					if cli.watch {
 						cmd_status(&["--watch".to_string()]);
+					} else if connect_daemon().is_some() {
+						render_condensed_status(&[]);
 					} else {
 						print_usage();
-						if connect_daemon().is_some() {
-							eprintln!();
-							render_condensed_status(&[]);
-						}
 						check_alias_hint();
 					}
 				}
