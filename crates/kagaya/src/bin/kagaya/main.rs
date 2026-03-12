@@ -14,7 +14,7 @@ mod utils;
 
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use cli::{Cli, Cmd, OutputFormat, output_format, set_output_format};
 use config::ServiceEntry;
@@ -379,6 +379,42 @@ fn insert_before_first_table(content: &str, new_line: &str) -> String {
 	}
 }
 
+/// If services.toml is missing, detect project type and offer to create it.
+fn maybe_create_services_toml(dir: &Path) {
+	let services_toml = dir.join("services.toml");
+	if services_toml.exists() {
+		return;
+	}
+	let suggestions = detect::detect_services(dir);
+	if !suggestions.is_empty() && io::stdin().is_terminal() {
+		let detected = detect::describe_detected(dir);
+		let toml_content = detect::format_services_toml(&suggestions);
+		eprintln!("detected: {}", detected.join(", "));
+		eprintln!();
+		eprintln!("{}:", services_toml.display());
+		for line in toml_content.lines() {
+			eprintln!("  {}", line);
+		}
+		eprintln!();
+		eprint!("create services.toml? [Y/n] ");
+		let mut input = String::new();
+		let create = if io::stdin().read_line(&mut input).is_ok() {
+			let input = input.trim().to_lowercase();
+			input.is_empty() || input == "y" || input == "yes"
+		} else {
+			false
+		};
+		if create {
+			std::fs::write(&services_toml, &toml_content).unwrap();
+			eprintln!("wrote {}", services_toml.display());
+		}
+	} else if suggestions.is_empty() {
+		eprintln!("note: no services.toml found in {}", dir.display());
+		eprintln!("create one with service definitions, e.g.:");
+		eprintln!("  web = \"npm run dev\"");
+	}
+}
+
 fn cmd_add(args: &[String], run: Option<&str>) {
 	let config_dir = protocol::config_dir();
 	let _ = std::fs::create_dir_all(&config_dir);
@@ -442,53 +478,23 @@ fn cmd_add(args: &[String], run: Option<&str>) {
 	let existing_content = std::fs::read_to_string(&projects_file).unwrap_or_default();
 	if let Ok(table) = toml::from_str::<toml::Value>(&existing_content) {
 		if let Some(map) = table.as_table() {
-			if map.contains_key(&name) {
+			let already = if map.contains_key(&name) {
+				true
+			} else {
+				// Also check inside table sections for duplicate keys
+				map.iter().any(|(_section, val)| {
+					val.as_table().is_some_and(|sub| sub.contains_key(&name))
+				})
+			};
+			if already {
 				eprintln!("{}: already registered", name);
+				maybe_create_services_toml(&dir);
 				return;
-			}
-			// Also check inside table sections for duplicate keys
-			for (_section, val) in map {
-				if let Some(sub) = val.as_table() {
-					if sub.contains_key(&name) {
-						eprintln!("{}: already registered (inside [{}])", name, _section);
-						return;
-					}
-				}
 			}
 		}
 	}
 
-	let services_toml = dir.join("services.toml");
-	if !services_toml.exists() {
-		let suggestions = detect::detect_services(&dir);
-		if !suggestions.is_empty() && io::stdin().is_terminal() {
-			let detected = detect::describe_detected(&dir);
-			let toml_content = detect::format_services_toml(&suggestions);
-			eprintln!("detected: {}", detected.join(", "));
-			eprintln!();
-			eprintln!("{}:", services_toml.display());
-			for line in toml_content.lines() {
-				eprintln!("  {}", line);
-			}
-			eprintln!();
-			eprint!("create services.toml? [Y/n] ");
-			let mut input = String::new();
-			let create = if io::stdin().read_line(&mut input).is_ok() {
-				let input = input.trim().to_lowercase();
-				input.is_empty() || input == "y" || input == "yes"
-			} else {
-				false
-			};
-			if create {
-				std::fs::write(&services_toml, &toml_content).unwrap();
-				eprintln!("wrote {}", services_toml.display());
-			}
-		} else if suggestions.is_empty() {
-			eprintln!("note: no services.toml found in {}", dir.display());
-			eprintln!("create one with service definitions, e.g.:");
-			eprintln!("  web = \"npm run dev\"");
-		}
-	}
+	maybe_create_services_toml(&dir);
 
 	let new_line = format!("{} = {:?}\n", name, dir.display().to_string());
 	// Insert before the first table header so the entry stays top-level
