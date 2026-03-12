@@ -379,11 +379,12 @@ fn insert_before_first_table(content: &str, new_line: &str) -> String {
 	}
 }
 
-/// If services.toml is missing, detect project type and offer to create it.
-fn maybe_create_services_toml(dir: &Path) {
+/// Ensure services.toml exists — offer to create it if missing.
+/// Returns true if services.toml exists (pre-existing or just created).
+fn ensure_services_toml(dir: &Path) -> bool {
 	let services_toml = dir.join("services.toml");
 	if services_toml.exists() {
-		return;
+		return true;
 	}
 	let suggestions = detect::detect_services(dir);
 	if !suggestions.is_empty() && io::stdin().is_terminal() {
@@ -398,21 +399,23 @@ fn maybe_create_services_toml(dir: &Path) {
 		eprintln!();
 		eprint!("create services.toml? [Y/n] ");
 		let mut input = String::new();
-		let create = if io::stdin().read_line(&mut input).is_ok() {
+		let confirmed = if io::stdin().read_line(&mut input).is_ok() {
 			let input = input.trim().to_lowercase();
 			input.is_empty() || input == "y" || input == "yes"
 		} else {
 			false
 		};
-		if create {
+		if confirmed {
 			std::fs::write(&services_toml, &toml_content).unwrap();
 			eprintln!("wrote {}", services_toml.display());
+			return true;
 		}
 	} else if suggestions.is_empty() {
 		eprintln!("note: no services.toml found in {}", dir.display());
 		eprintln!("create one with service definitions, e.g.:");
 		eprintln!("  web = \"npm run dev\"");
 	}
+	false
 }
 
 fn cmd_add(args: &[String], run: Option<&str>) {
@@ -488,13 +491,15 @@ fn cmd_add(args: &[String], run: Option<&str>) {
 			};
 			if already {
 				eprintln!("{}: already registered", name);
-				maybe_create_services_toml(&dir);
+				ensure_services_toml(&dir);
 				return;
 			}
 		}
 	}
 
-	maybe_create_services_toml(&dir);
+	if !ensure_services_toml(&dir) {
+		return;
+	}
 
 	let new_line = format!("{} = {:?}\n", name, dir.display().to_string());
 	// Insert before the first table header so the entry stays top-level
