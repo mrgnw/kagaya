@@ -2,6 +2,7 @@ mod autostart;
 mod cli;
 mod config;
 mod daemon;
+mod detect;
 mod format;
 mod koku_client;
 mod launchd;
@@ -459,9 +460,34 @@ fn cmd_add(args: &[String], run: Option<&str>) {
 
 	let services_toml = dir.join("services.toml");
 	if !services_toml.exists() {
-		eprintln!("note: no services.toml found in {}", dir.display());
-		eprintln!("create one with service definitions, e.g.:");
-		eprintln!("  web = \"npm run dev\"");
+		let suggestions = detect::detect_services(&dir);
+		if !suggestions.is_empty() && io::stdin().is_terminal() {
+			let detected = detect::describe_detected(&dir);
+			let toml_content = detect::format_services_toml(&suggestions);
+			eprintln!("detected: {}", detected.join(", "));
+			eprintln!();
+			eprintln!("{}:", services_toml.display());
+			for line in toml_content.lines() {
+				eprintln!("  {}", line);
+			}
+			eprintln!();
+			eprint!("create services.toml? [Y/n] ");
+			let mut input = String::new();
+			let create = if io::stdin().read_line(&mut input).is_ok() {
+				let input = input.trim().to_lowercase();
+				input.is_empty() || input == "y" || input == "yes"
+			} else {
+				false
+			};
+			if create {
+				std::fs::write(&services_toml, &toml_content).unwrap();
+				eprintln!("wrote {}", services_toml.display());
+			}
+		} else if suggestions.is_empty() {
+			eprintln!("note: no services.toml found in {}", dir.display());
+			eprintln!("create one with service definitions, e.g.:");
+			eprintln!("  web = \"npm run dev\"");
+		}
 	}
 
 	let new_line = format!("{} = {:?}\n", name, dir.display().to_string());
