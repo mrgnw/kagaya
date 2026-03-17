@@ -129,6 +129,23 @@ pub fn load_global_config() -> GlobalConfig {
 
 // ── services.toml format ─────────────────────────────────────────────────────
 
+/// Accepts either a single string or a list of strings in TOML.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StringOrVec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringOrVec {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            StringOrVec::One(s) => vec![s],
+            StringOrVec::Many(v) => v,
+        }
+    }
+}
+
 /// A single service definition — either a bare command string or a full table.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -147,6 +164,9 @@ enum ServiceDef {
         pre_start: Option<String>,
         #[serde(default)]
         ports: Vec<u16>,
+        depends_on: Option<StringOrVec>,
+        ready: Option<String>,
+        ready_timeout: Option<u64>,
     },
 }
 
@@ -164,6 +184,9 @@ impl ServiceDef {
                 autostart: true,
                 pre_start: None,
                 ports: Vec::new(),
+                depends_on: Vec::new(),
+                ready: None,
+                ready_timeout: 10,
             },
             ServiceDef::Full {
                 run,
@@ -175,6 +198,9 @@ impl ServiceDef {
                 autostart,
                 pre_start,
                 ports,
+                depends_on,
+                ready,
+                ready_timeout,
             } => {
                 let is_task = service_type == ServiceType::Task;
                 let mut merged_env = defaults.env.clone();
@@ -190,6 +216,9 @@ impl ServiceDef {
                     autostart: autostart.unwrap_or(!is_task),
                     pre_start,
                     ports,
+                    depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
+                    ready,
+                    ready_timeout: ready_timeout.unwrap_or(10),
                 }
             }
         }
@@ -382,6 +411,9 @@ pub fn load_service(entry: &ServiceEntry, defaults: &DefaultsConfig) -> Service 
             autostart: !is_task,
             pre_start: None,
             ports: Vec::new(),
+            depends_on: Vec::new(),
+            ready: None,
+            ready_timeout: 10,
         };
         return Service {
             name: entry.name.clone(),

@@ -39,6 +39,11 @@ pub struct ProcessDef {
     pub pre_start: Option<String>,
     #[serde(default)]
     pub ports: Vec<u16>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    pub ready: Option<String>,
+    #[serde(default = "default_ready_timeout")]
+    pub ready_timeout: u64,
 }
 
 fn default_true() -> bool {
@@ -49,6 +54,9 @@ fn default_max_retries() -> u32 {
 }
 fn default_restart_delay() -> u64 {
     1
+}
+fn default_ready_timeout() -> u64 {
+    10
 }
 
 /// Runtime state of a supervised process.
