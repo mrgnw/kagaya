@@ -792,6 +792,32 @@ fn relevant_state_since(status: &ServiceStatus, agg: AggregateState) -> Option<u
 	}
 }
 
+fn format_port_ranges(ports: &[u16]) -> String {
+	if ports.is_empty() {
+		return String::new();
+	}
+	let mut parts: Vec<String> = Vec::new();
+	let mut i = 0;
+	while i < ports.len() {
+		let start = ports[i];
+		let mut end = start;
+		while i + 1 < ports.len() && ports[i + 1] == end + 1 {
+			i += 1;
+			end = ports[i];
+		}
+		if end - start >= 2 {
+			parts.push(format!("{}..{}", start, end));
+		} else {
+			parts.push(start.to_string());
+			if end != start {
+				parts.push(end.to_string());
+			}
+		}
+		i += 1;
+	}
+	parts.join(", ")
+}
+
 fn print_process_line(proc: &ProcessStatus, name_width: usize) {
 	let pcolor = process_state_color(proc);
 	let (symbol, label, extra) = match &proc.state {
@@ -802,11 +828,7 @@ fn print_process_line(proc: &ProcessStatus, name_width: usize) {
 		}
 		ProcessState::Running { .. } => {
 			let duration = format_state_duration(proc.state_since);
-			let ports = if proc.ports.is_empty() {
-				String::new()
-			} else {
-				proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-			};
+			let ports = format_port_ranges(&proc.ports);
 			let extra = format!("{:<8} {}", color_duration(&duration, pcolor), ports);
 			("•".green().to_string(), "on".green().to_string(), extra)
 		}
@@ -1860,15 +1882,8 @@ fn gather_status_data(args: &[String]) -> StatusData {
 		.max()
 		.unwrap_or(0);
 
-	let has_failures = sorted_filter.iter().any(|name| {
-		status_map.get(name).map_or(false, |s| {
-			let agg = aggregate_state(s);
-			matches!(agg, AggregateState::Degraded | AggregateState::Err)
-		})
-	});
-	let detailed = detailed || has_failures;
-
 	let is_single_service = sorted_filter.len() == 1 && !filtered_args.is_empty() && !show_all;
+	let detailed = detailed || is_single_service;
 	let show_extras = show_all || (filtered_args.is_empty() && current_project.is_none());
 	let cron_jobs = if show_extras { koku_client::fetch_status() } else { None };
 
@@ -1930,11 +1945,11 @@ fn render_condensed_status(args: &[String]) -> usize {
 		};
 
 		let ports_str: String = if let Some(status) = status {
-			let all_ports: Vec<String> = status.processes.iter()
+			let all_ports: Vec<u16> = status.processes.iter()
 				.filter(|p| p.state.is_running())
-				.flat_map(|p| p.ports.iter().map(|pt| pt.to_string()))
+				.flat_map(|p| p.ports.iter().copied())
 				.collect();
-			all_ports.join(", ")
+			format_port_ranges(&all_ports)
 		} else {
 			String::new()
 		};
@@ -2041,7 +2056,7 @@ fn render_detailed_status(args: &[String]) -> usize {
 							let ports = if proc.ports.is_empty() {
 								String::new()
 							} else {
-								proc.ports.iter().map(|p| format!(":{}", p)).collect::<Vec<_>>().join(",")
+								format!(":{}", format_port_ranges(&proc.ports).replace(", ", ",:"))
 							};
 							let extra = format!("{:<8} {:<8} {}", color_duration(&duration, pcolor), pid, ports);
 							("●".green().to_string(), "on".green().to_string(), extra)
@@ -2169,11 +2184,7 @@ fn process_line_spans<'a>(proc: &ProcessStatus, name_width: usize) -> RLine<'a> 
 			(Span::styled("◌", cyan), Span::styled("starting", cyan), extra)
 		}
 		ProcessState::Running { .. } => {
-			let ports = if proc.ports.is_empty() {
-				String::new()
-			} else {
-				proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-			};
+			let ports = format_port_ranges(&proc.ports);
 			let extra = format!("{:<8} {}", dur_str, ports);
 			(Span::styled("•", green), Span::styled("on", green), extra)
 		}
@@ -2302,9 +2313,7 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 							(Span::styled("◌", cyan), Span::styled("starting", cyan), extra)
 						}
 						ProcessState::Running { .. } => {
-							let ports = if proc.ports.is_empty() { String::new() } else {
-								proc.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-							};
+							let ports = format_port_ranges(&proc.ports);
 							let extra = format!("{:<8} {}", dur_str, ports);
 							(Span::styled("●", green), Span::styled("on", green), extra)
 						}
@@ -2356,11 +2365,11 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
 			let has_multi = status.map(|s| s.processes.len() > 1).unwrap_or(false);
 
 			let ports_str: String = if let Some(status) = status {
-				let all_ports: Vec<String> = status.processes.iter()
+				let all_ports: Vec<u16> = status.processes.iter()
 					.filter(|p| p.state.is_running())
-					.flat_map(|p| p.ports.iter().map(|pt| pt.to_string()))
+					.flat_map(|p| p.ports.iter().copied())
 					.collect();
-				all_ports.join(", ")
+				format_port_ranges(&all_ports)
 			} else {
 				String::new()
 			};
