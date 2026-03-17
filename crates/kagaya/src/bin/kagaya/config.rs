@@ -832,4 +832,64 @@ run = "ssh -N server"
         let tunnel: ProjectDef = raw["tunnel"].clone().try_into().unwrap();
         assert!(matches!(tunnel, ProjectDef::Command { ref run, .. } if run == "ssh -N server"));
     }
+
+    // ── depends_on / ready / ready_timeout parsing ──────────────────────
+
+    #[test]
+    fn parse_depends_on_string() {
+        let toml_str = r#"
+run = "python api.py"
+depends_on = "db"
+"#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let def: ServiceDef = val.try_into().unwrap();
+        let proc = def.into_process_def("api".into(), &test_defaults());
+        assert_eq!(proc.depends_on, vec!["db".to_string()]);
+    }
+
+    #[test]
+    fn parse_depends_on_list() {
+        let toml_str = r#"
+run = "python worker.py"
+depends_on = ["db", "cache"]
+"#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let def: ServiceDef = val.try_into().unwrap();
+        let proc = def.into_process_def("worker".into(), &test_defaults());
+        assert_eq!(proc.depends_on, vec!["db".to_string(), "cache".to_string()]);
+    }
+
+    #[test]
+    fn parse_ready_command() {
+        let toml_str = r#"
+run = "docker compose up postgres"
+ready = "pg_isready -h localhost"
+ready_timeout = 30
+"#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let def: ServiceDef = val.try_into().unwrap();
+        let proc = def.into_process_def("db".into(), &test_defaults());
+        assert_eq!(proc.ready.unwrap(), "pg_isready -h localhost");
+        assert_eq!(proc.ready_timeout, 30);
+    }
+
+    #[test]
+    fn parse_no_depends_on_defaults_empty() {
+        let toml_str = r#"run = "echo hi""#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let def: ServiceDef = val.try_into().unwrap();
+        let proc = def.into_process_def("web".into(), &test_defaults());
+        assert!(proc.depends_on.is_empty());
+        assert!(proc.ready.is_none());
+        assert_eq!(proc.ready_timeout, 10);
+    }
+
+    #[test]
+    fn simple_service_no_depends_on() {
+        let def = ServiceDef::Simple("npm run dev".into());
+        let proc = def.into_process_def("web".into(), &test_defaults());
+        assert!(proc.depends_on.is_empty());
+        assert!(proc.ready.is_none());
+        assert_eq!(proc.ready_timeout, 10);
+    }
 }

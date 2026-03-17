@@ -585,7 +585,7 @@ impl Supervisor {
 /// Topological sort of processes respecting depends_on.
 /// `to_start` lists which processes we actually want to start;
 /// dependencies of those are pulled in automatically.
-fn toposort_processes(
+pub fn toposort_processes(
 	defs: &[ProcessDef],
 	to_start: &[&str],
 ) -> Result<Vec<String>, String> {

@@ -27,6 +27,11 @@
 //!     restart_delay_secs: 0,
 //!     env: HashMap::new(),
 //!     autostart: true,
+//!     pre_start: None,
+//!     ports: vec![],
+//!     depends_on: vec![],
+//!     ready: None,
+//!     ready_timeout: 10,
 //! }];
 //!
 //! sup.start_service("myapp", "/tmp".as_ref(), &procs, true, &[])
@@ -42,4 +47,4 @@ pub mod supervisor;
 
 pub use types::*;
 pub use output::OutputCapture;
-pub use supervisor::{Supervisor, SupervisorConfig, ManagedService, ManagedProcess, kill_process_tree, kill_port_holders};
+pub use supervisor::{Supervisor, SupervisorConfig, ManagedService, ManagedProcess, kill_process_tree, kill_port_holders, toposort_processes};

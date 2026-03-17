@@ -354,3 +354,135 @@ async fn supervisor_passes_env_vars() {
 	let _ = std::fs::remove_dir_all(&log_dir);
 	let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Topological sort ---
+
+#[test]
+fn toposort_no_deps() {
+	let procs = vec![
+		simple_proc("a", "echo a"),
+		simple_proc("b", "echo b"),
+		simple_proc("c", "echo c"),
+	];
+	let order = kagaya::toposort_processes(&procs, &["a", "b", "c"]).unwrap();
+	assert_eq!(order.len(), 3);
+	assert!(order.contains(&"a".to_string()));
+	assert!(order.contains(&"b".to_string()));
+	assert!(order.contains(&"c".to_string()));
+}
+
+#[test]
+fn toposort_linear_chain() {
+	let mut b = simple_proc("b", "echo b");
+	b.depends_on = vec!["a".to_string()];
+	let mut c = simple_proc("c", "echo c");
+	c.depends_on = vec!["b".to_string()];
+	let procs = vec![simple_proc("a", "echo a"), b, c];
+	let order = kagaya::toposort_processes(&procs, &["c"]).unwrap();
+	assert_eq!(order.len(), 3);
+	let pos_a = order.iter().position(|x| x == "a").unwrap();
+	let pos_b = order.iter().position(|x| x == "b").unwrap();
+	let pos_c = order.iter().position(|x| x == "c").unwrap();
+	assert!(pos_a < pos_b);
+	assert!(pos_b < pos_c);
+}
+
+#[test]
+fn toposort_pulls_transitive_deps() {
+	let mut b = simple_proc("b", "echo b");
+	b.depends_on = vec!["a".to_string()];
+	let mut c = simple_proc("c", "echo c");
+	c.depends_on = vec!["b".to_string()];
+	let procs = vec![simple_proc("a", "echo a"), b, c];
+	let order = kagaya::toposort_processes(&procs, &["c"]).unwrap();
+	assert_eq!(order.len(), 3);
+	assert!(order.contains(&"a".to_string()));
+	assert!(order.contains(&"b".to_string()));
+}
+
+#[test]
+fn toposort_detects_cycle() {
+	let mut a = simple_proc("a", "echo a");
+	a.depends_on = vec!["b".to_string()];
+	let mut b = simple_proc("b", "echo b");
+	b.depends_on = vec!["a".to_string()];
+	let procs = vec![a, b];
+	let result = kagaya::toposort_processes(&procs, &["a", "b"]);
+	assert!(result.is_err());
+	assert!(result.unwrap_err().contains("circular dependency"));
+}
+
+#[test]
+fn toposort_diamond_dependency() {
+	let mut b = simple_proc("b", "echo b");
+	b.depends_on = vec!["a".to_string()];
+	let mut c = simple_proc("c", "echo c");
+	c.depends_on = vec!["a".to_string()];
+	let mut d = simple_proc("d", "echo d");
+	d.depends_on = vec!["b".to_string(), "c".to_string()];
+	let procs = vec![simple_proc("a", "echo a"), b, c, d];
+	let order = kagaya::toposort_processes(&procs, &["d"]).unwrap();
+	assert_eq!(order.len(), 4);
+	let pos_a = order.iter().position(|x| x == "a").unwrap();
+	let pos_b = order.iter().position(|x| x == "b").unwrap();
+	let pos_c = order.iter().position(|x| x == "c").unwrap();
+	let pos_d = order.iter().position(|x| x == "d").unwrap();
+	assert!(pos_a < pos_b);
+	assert!(pos_a < pos_c);
+	assert!(pos_b < pos_d);
+	assert!(pos_c < pos_d);
+}
+
+// --- depends_on integration ---
+
+#[tokio::test]
+async fn depends_on_starts_dependency_first() {
+	let (sup, log_dir) = test_supervisor("deps");
+	let dir = temp_dir("deps-workdir");
+
+	// "marker" is a task that creates a file; "checker" depends on it
+	let marker_file = dir.join("marker.txt");
+	let marker = ProcessDef {
+		name: "marker".to_string(),
+		command: format!("echo ready > {}", marker_file.display()),
+		service_type: ServiceType::Task,
+		restart: false,
+		max_retries: 0,
+		restart_delay_secs: 0,
+		env: HashMap::new(),
+		autostart: true,
+		pre_start: None,
+		ports: vec![],
+		depends_on: vec![],
+		ready: None,
+		ready_timeout: 10,
+	};
+	let checker = ProcessDef {
+		name: "checker".to_string(),
+		command: format!("cat {}", marker_file.display()),
+		service_type: ServiceType::Task,
+		restart: false,
+		max_retries: 0,
+		restart_delay_secs: 0,
+		env: HashMap::new(),
+		autostart: true,
+		pre_start: None,
+		ports: vec![],
+		depends_on: vec!["marker".to_string()],
+		ready: None,
+		ready_timeout: 10,
+	};
+
+	let procs = vec![marker, checker];
+	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+	tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+	// checker should have been able to read the marker file
+	let output = sup.get_output("test", Some("checker")).await.unwrap();
+	let snapshot = output.snapshot().await;
+	let text = String::from_utf8_lossy(&snapshot);
+	assert!(text.contains("ready"), "checker output was: {}", text);
+
+	let _ = std::fs::remove_dir_all(&log_dir);
+	let _ = std::fs::remove_dir_all(&dir);
+}
