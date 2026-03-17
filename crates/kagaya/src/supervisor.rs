@@ -39,6 +39,9 @@ pub struct ManagedProcess {
 	/// Ports discovered at runtime (from scanning the process's listening sockets).
 	/// Merged with def.ports for cleanup/restart gates.
 	pub runtime_ports: Arc<Mutex<Vec<u16>>>,
+	/// Signals when this process is "ready" (for depends_on ordering).
+	pub ready_tx: Option<tokio::sync::watch::Sender<bool>>,
+	pub ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Supervisor {
@@ -129,6 +132,9 @@ impl Supervisor {
 					mp.output = output.clone();
 					mp.cancel = Some(cancel_tx);
 
+				let (ready_tx, _ready_rx) = tokio::sync::watch::channel(false);
+				mp.ready_tx = Some(ready_tx.clone());
+
 				let sup = Arc::clone(self);
 				let svc = name.to_string();
 				let pname = proc_name.clone();
@@ -136,7 +142,7 @@ impl Supervisor {
 				let d = dir.to_path_buf();
 				let rp = Arc::clone(&mp.runtime_ports);
 				tokio::spawn(async move {
-					run_process_loop(sup, svc, pname, def, d, output, cancel_rx, rp).await;
+					run_process_loop(sup, svc, pname, def, d, output, cancel_rx, rp, Some(ready_tx)).await;
 				});
 				started.push(format!("{}/{}: starting", name, proc_name));
 				}
@@ -157,42 +163,165 @@ impl Supervisor {
 			return Err(format!("{}: no processes defined", name));
 		}
 
+		// Determine which processes to start
+		let to_start: Vec<&ProcessDef> = process_defs
+			.iter()
+			.filter(|pd| {
+				if !filter.is_empty() {
+					filter.iter().any(|p| p == &pd.name)
+				} else if all {
+					true
+				} else {
+					pd.autostart
+				}
+			})
+			.collect();
+
+		// Validate depends_on references
+		let all_names: Vec<&str> = process_defs.iter().map(|pd| pd.name.as_str()).collect();
+		for pd in process_defs {
+			for dep in &pd.depends_on {
+				if !all_names.contains(&dep.as_str()) {
+					return Err(format!(
+						"{}/{}: depends_on '{}' not found in services.toml",
+						name, pd.name, dep
+					));
+				}
+			}
+		}
+
+		// Topological sort for dependency ordering
+		let start_names: Vec<&str> = to_start.iter().map(|pd| pd.name.as_str()).collect();
+		let order = toposort_processes(process_defs, &start_names)?;
+
+		// Create managed processes and ready channels
 		let mut managed_processes = HashMap::new();
+		let mut ready_channels: HashMap<String, tokio::sync::watch::Receiver<bool>> = HashMap::new();
 
 		for proc_def in process_defs {
-			let should_start = if !filter.is_empty() {
-				filter.iter().any(|p| p == &proc_def.name)
-			} else if all {
-				true
-			} else {
-				proc_def.autostart
-			};
-
 			let output = OutputCapture::new(
 				&self.config.log_dir,
 				name,
 				&proc_def.name,
 				self.config.max_log_size,
 			);
-			let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+			let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+			let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
 
-	let rp = Arc::new(Mutex::new(Vec::new()));
-	let mp = ManagedProcess {
-		def: proc_def.clone(),
-		state: ProcessState::Stopped,
-		output: output.clone(),
-		retry_count: 0,
-		state_changed_at: Instant::now(),
-		cancel: Some(cancel_tx),
-		runtime_ports: Arc::clone(&rp),
-	};
+			let rp = Arc::new(Mutex::new(Vec::new()));
+			let mp = ManagedProcess {
+				def: proc_def.clone(),
+				state: ProcessState::Stopped,
+				output: output.clone(),
+				retry_count: 0,
+				state_changed_at: Instant::now(),
+				cancel: Some(cancel_tx),
+				runtime_ports: Arc::clone(&rp),
+				ready_tx: Some(ready_tx),
+				ready_rx: ready_rx.clone(),
+			};
+			ready_channels.insert(proc_def.name.clone(), ready_rx);
 			managed_processes.insert(proc_def.name.clone(), mp);
+		}
 
-		if should_start {
+		// Insert managed service first so status queries work during startup
+		{
+			let mut services = self.services.write().await;
+			services.insert(
+				name.to_string(),
+				ManagedService {
+					dir: dir.to_path_buf(),
+					processes: managed_processes,
+				},
+			);
+		}
+
+		// Spawn processes in dependency order
+		for proc_name in &order {
+			// Collect dependency ready receivers
+			let dep_rxs: Vec<tokio::sync::watch::Receiver<bool>> = {
+				let services = self.services.read().await;
+				let managed = services.get(name).unwrap();
+				let mp = managed.processes.get(proc_name.as_str()).unwrap();
+				mp.def
+					.depends_on
+					.iter()
+					.filter_map(|dep| ready_channels.get(dep).cloned())
+					.collect()
+			};
+
+			// Wait for dependencies to be ready
+			if !dep_rxs.is_empty() {
+				let timeout_secs = {
+					let services = self.services.read().await;
+					let managed = services.get(name).unwrap();
+					let mp = managed.processes.get(proc_name.as_str()).unwrap();
+					mp.def.ready_timeout.max(10)
+				};
+
+				let wait_result = tokio::time::timeout(
+					std::time::Duration::from_secs(timeout_secs),
+					wait_for_deps(dep_rxs),
+				)
+				.await;
+
+				match wait_result {
+					Ok(true) => {} // all deps ready
+					Ok(false) => {
+						let services = self.services.read().await;
+						if let Some(managed) = services.get(name) {
+							if let Some(mp) = managed.processes.get(proc_name.as_str()) {
+								let msg = format!(
+									"[kagaya] {}/{}: dependency failed, not starting\n",
+									name, proc_name
+								);
+								mp.output.write(msg.as_bytes()).await;
+							}
+						}
+						continue;
+					}
+					Err(_) => {
+						let services = self.services.read().await;
+						if let Some(managed) = services.get(name) {
+							if let Some(mp) = managed.processes.get(proc_name.as_str()) {
+								let dep_names = mp.def.depends_on.join(", ");
+								let msg = format!(
+									"[kagaya] {}/{}: timed out waiting for dependencies [{}]\n",
+									name, proc_name, dep_names
+								);
+								mp.output.write(msg.as_bytes()).await;
+							}
+						}
+						continue;
+					}
+				}
+			}
+
+			// Extract what we need from the managed process
+			let (proc_def, output, rp, cancel_rx, rtx) = {
+				let mut services = self.services.write().await;
+				let managed = services.get_mut(name).unwrap();
+				let mp = managed.processes.get_mut(proc_name.as_str()).unwrap();
+				let cancel_rx = mp
+					.cancel
+					.as_ref()
+					.map(|tx| tx.subscribe())
+					.unwrap_or_else(|| {
+						let (_, rx) = tokio::sync::watch::channel(false);
+						rx
+					});
+				(
+					mp.def.clone(),
+					mp.output.clone(),
+					Arc::clone(&mp.runtime_ports),
+					cancel_rx,
+					mp.ready_tx.take(),
+				)
+			};
+
 			let sup = Arc::clone(self);
 			let service_name = name.to_string();
-			let process_name = proc_def.name.clone();
-			let proc_def_clone = proc_def.clone();
+			let process_name = proc_name.clone();
 			let dir = dir.to_path_buf();
 
 			tokio::spawn(async move {
@@ -200,26 +329,15 @@ impl Supervisor {
 					sup,
 					service_name,
 					process_name,
-					proc_def_clone,
+					proc_def,
 					dir,
 					output,
 					cancel_rx,
 					rp,
+					rtx,
 				)
 				.await;
 			});
-		}
-		}
-
-		{
-			let mut services = self.services.write().await;
-			services.insert(
-				name.to_string(),
-			ManagedService {
-				dir: dir.to_path_buf(),
-					processes: managed_processes,
-				},
-			);
 		}
 
 		Ok(format!("{}: starting", name))
@@ -367,6 +485,10 @@ impl Supervisor {
 		mp.output = output.clone();
 		mp.cancel = Some(cancel_tx);
 
+		let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+		mp.ready_tx = Some(ready_tx.clone());
+		mp.ready_rx = ready_rx;
+
 		let sup = Arc::clone(self);
 		let service_name = service.to_string();
 		let process_name = process.to_string();
@@ -375,7 +497,7 @@ impl Supervisor {
 		let rp = Arc::clone(&mp.runtime_ports);
 
 		tokio::spawn(async move {
-			run_process_loop(sup, service_name, process_name, proc_def, dir, output, cancel_rx, rp)
+			run_process_loop(sup, service_name, process_name, proc_def, dir, output, cancel_rx, rp, Some(ready_tx))
 				.await;
 		});
 
@@ -460,6 +582,107 @@ impl Supervisor {
 	}
 }
 
+/// Topological sort of processes respecting depends_on.
+/// `to_start` lists which processes we actually want to start;
+/// dependencies of those are pulled in automatically.
+fn toposort_processes(
+	defs: &[ProcessDef],
+	to_start: &[&str],
+) -> Result<Vec<String>, String> {
+	use std::collections::{HashSet, VecDeque};
+
+	let by_name: HashMap<&str, &ProcessDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+	// Collect all processes we need (requested + their transitive deps)
+	let mut needed: HashSet<&str> = HashSet::new();
+	let mut queue: VecDeque<&str> = to_start.iter().copied().collect();
+	while let Some(name) = queue.pop_front() {
+		if needed.insert(name) {
+			if let Some(def) = by_name.get(name) {
+				for dep in &def.depends_on {
+					queue.push_back(dep.as_str());
+				}
+			}
+		}
+	}
+
+	// Kahn's algorithm for topological sort
+	let mut in_degree: HashMap<&str, usize> = HashMap::new();
+	for &name in &needed {
+		in_degree.entry(name).or_insert(0);
+		if let Some(def) = by_name.get(name) {
+			for dep in &def.depends_on {
+				if needed.contains(dep.as_str()) {
+					*in_degree.entry(name).or_insert(0) += 1;
+				}
+			}
+		}
+	}
+
+	// Build reverse adjacency: dep -> vec of dependents
+	let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+	for &name in &needed {
+		if let Some(def) = by_name.get(name) {
+			for dep in &def.depends_on {
+				if needed.contains(dep.as_str()) {
+					dependents.entry(dep.as_str()).or_default().push(name);
+				}
+			}
+		}
+	}
+
+	let mut queue: VecDeque<&str> = in_degree
+		.iter()
+		.filter(|(_, &deg)| deg == 0)
+		.map(|(&name, _)| name)
+		.collect();
+
+	let mut order: Vec<String> = Vec::new();
+	while let Some(name) = queue.pop_front() {
+		order.push(name.to_string());
+		if let Some(deps) = dependents.get(name) {
+			for &dependent in deps {
+				if let Some(deg) = in_degree.get_mut(dependent) {
+					*deg -= 1;
+					if *deg == 0 {
+						queue.push_back(dependent);
+					}
+				}
+			}
+		}
+	}
+
+	if order.len() < needed.len() {
+		let in_cycle: Vec<&str> = needed
+			.iter()
+			.filter(|&&n| !order.iter().any(|o| o == n))
+			.copied()
+			.collect();
+		return Err(format!(
+			"circular dependency detected among: {}",
+			in_cycle.join(", ")
+		));
+	}
+
+	Ok(order)
+}
+
+/// Wait for all dependency ready signals. Returns true if all became ready,
+/// false if any channel was dropped (dependency failed).
+async fn wait_for_deps(deps: Vec<tokio::sync::watch::Receiver<bool>>) -> bool {
+	for mut rx in deps {
+		loop {
+			if *rx.borrow() {
+				break;
+			}
+			if rx.changed().await.is_err() {
+				return false; // sender dropped = dep failed
+			}
+		}
+	}
+	true
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_process_loop(
 	supervisor: Arc<Supervisor>,
@@ -470,6 +693,7 @@ async fn run_process_loop(
 	output: OutputCapture,
 	mut cancel: tokio::sync::watch::Receiver<bool>,
 	runtime_ports: Arc<Mutex<Vec<u16>>>,
+	ready_tx: Option<tokio::sync::watch::Sender<bool>>,
 ) {
 	let mut retry_count: u32 = 0;
 
@@ -645,6 +869,75 @@ async fn run_process_loop(
 			});
 		}
 
+		// Readiness signaling for depends_on ordering
+		if let Some(ref rtx) = ready_tx {
+			if def.ready.is_some() || !def.ports.is_empty() {
+				// Custom ready command or port-based readiness
+				let rtx = rtx.clone();
+				let ready_cmd = def.ready.clone();
+				let ready_ports = def.ports.clone();
+				let ready_dir = dir.clone();
+				let timeout = def.ready_timeout;
+				let svc_name = service.clone();
+				let proc_name = process.clone();
+				let out = output.clone();
+				tokio::spawn(async move {
+					let deadline = tokio::time::Instant::now()
+						+ std::time::Duration::from_secs(timeout);
+
+					loop {
+						if tokio::time::Instant::now() >= deadline {
+							let msg = format!(
+								"[kagaya] {}/{}: ready check timed out after {}s\n",
+								svc_name, proc_name, timeout
+							);
+							out.write(msg.as_bytes()).await;
+							break;
+						}
+
+						let is_ready = if let Some(ref cmd) = ready_cmd {
+							// Poll the ready command
+							tokio::process::Command::new("sh")
+								.args(["-c", cmd])
+								.current_dir(&ready_dir)
+								.stdin(std::process::Stdio::null())
+								.stdout(std::process::Stdio::null())
+								.stderr(std::process::Stdio::null())
+								.status()
+								.await
+								.map(|s| s.success())
+								.unwrap_or(false)
+						} else {
+							// Port-based readiness
+							ready_ports.iter().all(|&port| {
+								std::net::TcpStream::connect_timeout(
+									&std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+									std::time::Duration::from_millis(100),
+								)
+								.is_ok()
+							})
+						};
+
+						if is_ready {
+							let _ = rtx.send(true);
+							let msg = format!(
+								"[kagaya] {}/{}: ready\n",
+								svc_name, proc_name
+							);
+							out.write(msg.as_bytes()).await;
+							break;
+						}
+
+						tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+					}
+				});
+			} else if def.service_type != ServiceType::Task {
+				// No ready check and not a task: ready immediately
+				let _ = rtx.send(true);
+			}
+			// Tasks: ready_tx is signaled on successful exit (below)
+		}
+
 		let sup_clone = Arc::clone(&supervisor);
 		let svc = service.clone();
 		let proc_name = process.clone();
@@ -685,6 +978,10 @@ async fn run_process_loop(
 				let msg = format!("[kagaya] {}/{} exited cleanly\n", service, process);
 				output.write(msg.as_bytes()).await;
 				update_state(&supervisor, &service, &process, ProcessState::Stopped).await;
+				// Signal readiness for tasks (completed successfully)
+				if let Some(ref rtx) = ready_tx {
+					let _ = rtx.send(true);
+				}
 				return;
 			}
 			Ok(exit) => {

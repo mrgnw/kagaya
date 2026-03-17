@@ -35,6 +35,9 @@ fn simple_proc(name: &str, command: &str) -> ProcessDef {
 		autostart: true,
 		pre_start: None,
 		ports: vec![],
+		depends_on: vec![],
+		ready: None,
+		ready_timeout: 10,
 	}
 }
 
@@ -247,6 +250,9 @@ async fn task_does_not_restart_on_failure() {
 		autostart: true,
 		pre_start: None,
 		ports: vec![],
+		depends_on: vec![],
+		ready: None,
+		ready_timeout: 10,
 	}];
 
 	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
@@ -332,6 +338,9 @@ async fn supervisor_passes_env_vars() {
 		autostart: true,
 		pre_start: None,
 		ports: vec![],
+		depends_on: vec![],
+		ready: None,
+		ready_timeout: 10,
 	}];
 
 	let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
