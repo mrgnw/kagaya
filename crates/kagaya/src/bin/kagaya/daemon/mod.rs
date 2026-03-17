@@ -114,21 +114,93 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 			Response::Status { services, http_port: supervisor.http_port }
 		}
 		Request::Start { names, all, processes, chains, wait } => {
-			let mut messages = Vec::new();
-			for name in &names {
-				match supervisor.start_service_filtered(name, all, &processes, &chains).await {
-					Ok(msg) => messages.push(msg),
-					Err(e) => return Response::Error { message: e },
+			// Build cross-project dependency map from chains
+			let mut project_deps: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+			for chain in &chains {
+				for i in 1..chain.len() {
+					// chain[i] depends on chain[i-1] (if both are project names)
+					if names.contains(&chain[i]) && names.contains(&chain[i - 1]) {
+						project_deps.entry(chain[i].clone()).or_default().push(chain[i - 1].clone());
+					}
 				}
 			}
-			if wait {
-				// Wait for all started processes to be ready
+
+			if project_deps.is_empty() {
+				// No cross-project deps — start all in parallel as before
+				let mut messages = Vec::new();
 				for name in &names {
-					supervisor.wait_for_ready(name).await;
+					// Filter chains to only intra-project ones
+					let intra_chains: Vec<Vec<String>> = chains.iter()
+						.filter(|c| !c.iter().any(|n| names.contains(n) && n != name))
+						.cloned()
+						.collect();
+					match supervisor.start_service_filtered(name, all, &processes, &intra_chains).await {
+						Ok(msg) => messages.push(msg),
+						Err(e) => return Response::Error { message: e },
+					}
 				}
-			}
-			Response::Ok {
-				message: Some(messages.join("\n")),
+				if wait {
+					for name in &names {
+						supervisor.wait_for_ready(name).await;
+					}
+				}
+				Response::Ok {
+					message: Some(messages.join("\n")),
+				}
+			} else {
+				// Start projects respecting cross-project dependency order
+				let mut started: std::collections::HashSet<String> = std::collections::HashSet::new();
+				let mut messages = Vec::new();
+				let mut remaining: Vec<String> = names.clone();
+
+				while !remaining.is_empty() {
+					// Find projects whose deps are all started and ready
+					let ready_to_start: Vec<String> = remaining.iter()
+						.filter(|name| {
+							project_deps.get(*name)
+								.map(|deps| deps.iter().all(|d| started.contains(d)))
+								.unwrap_or(true)
+						})
+						.cloned()
+						.collect();
+
+					if ready_to_start.is_empty() {
+						// Shouldn't happen if deps are valid, but prevent infinite loop
+						for name in &remaining {
+							messages.push(format!("{}: skipped (unresolvable dependency)", name));
+						}
+						break;
+					}
+
+					for name in &ready_to_start {
+						match supervisor.start_service_filtered(name, all, &processes, &[]).await {
+							Ok(msg) => messages.push(msg),
+							Err(e) => messages.push(format!("{}: error: {}", name, e)),
+						}
+					}
+
+					// Wait for this wave to be ready before starting dependents
+					let has_dependents = remaining.iter().any(|n| !ready_to_start.contains(n));
+					if has_dependents {
+						for name in &ready_to_start {
+							supervisor.wait_for_ready(name).await;
+						}
+					}
+
+					for name in &ready_to_start {
+						started.insert(name.clone());
+					}
+					remaining.retain(|n| !ready_to_start.contains(n));
+				}
+
+				if wait {
+					for name in &names {
+						supervisor.wait_for_ready(name).await;
+					}
+				}
+				Response::Ok {
+					message: Some(messages.join("\n")),
+				}
 			}
 		}
 		Request::Stop { names, processes } => {

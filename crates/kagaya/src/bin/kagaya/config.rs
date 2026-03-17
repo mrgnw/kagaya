@@ -236,6 +236,7 @@ enum ProjectDef {
         dir: String,
         #[serde(default)]
         autostart: bool,
+        depends_on: Option<StringOrVec>,
     },
     Command {
         run: String,
@@ -248,6 +249,7 @@ enum ProjectDef {
         env: HashMap<String, String>,
         #[serde(default)]
         autostart: bool,
+        depends_on: Option<StringOrVec>,
     },
 }
 
@@ -260,6 +262,8 @@ pub struct ServiceEntry {
     pub inline_command: Option<InlineCommand>,
     /// Whether this project should be started on boot (via `ky autostart`)
     pub autostart: bool,
+    /// Other projects this project depends on (for autostart ordering)
+    pub depends_on: Vec<String>,
 }
 
 pub struct InlineCommand {
@@ -317,12 +321,14 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                         dir,
                         inline_command: None,
                         autostart: false,
+                        depends_on: vec![],
                     },
                 );
             }
             ProjectDef::DirTable {
                 dir: dir_str,
                 autostart,
+                depends_on,
             } => {
                 let dir = expand_tilde(&dir_str);
                 if !dir.exists() {
@@ -340,6 +346,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                         dir,
                         inline_command: None,
                         autostart,
+                        depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
                     },
                 );
             }
@@ -351,6 +358,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                 restart_delay,
                 env,
                 autostart,
+                depends_on,
             } => {
                 // Standalone commands get a synthetic dir under ~/.config/kagaya/_commands/
                 let dir = config_dir().join("_commands").join(&name);
@@ -369,6 +377,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                             env,
                         }),
                         autostart,
+                        depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
                     },
                 );
             }
@@ -388,6 +397,44 @@ pub fn autostart_project_names() -> Vec<String> {
         .filter(|(_, entry)| entry.autostart)
         .map(|(name, _)| name)
         .collect()
+}
+
+/// Returns autostart project names topologically sorted by depends_on,
+/// and the dependency chains to pass to the start request.
+pub fn autostart_sorted() -> (Vec<String>, Vec<Vec<String>>) {
+    let projects = load_projects();
+    let autostart: Vec<&ServiceEntry> = projects.values().filter(|e| e.autostart).collect();
+
+    if autostart.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let autostart_names: std::collections::HashSet<&str> =
+        autostart.iter().map(|e| e.name.as_str()).collect();
+
+    // Build chains from depends_on relationships
+    let mut chains: Vec<Vec<String>> = Vec::new();
+    for entry in &autostart {
+        for dep in &entry.depends_on {
+            if autostart_names.contains(dep.as_str()) {
+                // Find or create a chain that ends with dep, extend it
+                let mut found = false;
+                for chain in &mut chains {
+                    if chain.last().map(|s| s.as_str()) == Some(dep.as_str()) {
+                        chain.push(entry.name.clone());
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    chains.push(vec![dep.clone(), entry.name.clone()]);
+                }
+            }
+        }
+    }
+
+    let names: Vec<String> = autostart.iter().map(|e| e.name.clone()).collect();
+    (names, chains)
 }
 
 // ── Loading a service (processes) from a ServiceEntry ────────────────────────
@@ -513,7 +560,7 @@ autostart = true"#;
         let val: toml::Value = toml::from_str(toml_str).unwrap();
         let def: ProjectDef = val.try_into().unwrap();
         match def {
-            ProjectDef::DirTable { dir, autostart } => {
+            ProjectDef::DirTable { dir, autostart, .. } => {
                 assert_eq!(dir, "/dev/myapp");
                 assert!(autostart);
             }
@@ -554,6 +601,7 @@ env = { FOO = "bar" }
                 restart_delay,
                 env,
                 autostart,
+                ..
             } => {
                 assert_eq!(run, "my-daemon");
                 assert_eq!(service_type, ServiceType::Task);
@@ -687,6 +735,7 @@ env = { LOCAL = "2" }
                 env: HashMap::new(),
             }),
             autostart: false,
+            depends_on: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert_eq!(svc.processes.len(), 1);
@@ -710,6 +759,7 @@ env = { LOCAL = "2" }
                 env: HashMap::new(),
             }),
             autostart: false,
+            depends_on: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert_eq!(svc.processes.len(), 1);
@@ -732,6 +782,7 @@ env = { LOCAL = "2" }
                 env: [("MY_VAR".into(), "hello".into())].into(),
             }),
             autostart: false,
+            depends_on: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         let proc = &svc.processes[0];
@@ -763,6 +814,7 @@ type = "task"
             dir: dir.clone(),
             inline_command: None,
             autostart: false,
+            depends_on: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert_eq!(svc.processes.len(), 2);
@@ -783,6 +835,7 @@ type = "task"
             dir: PathBuf::from("/tmp/kagaya-test-nonexistent-dir"),
             inline_command: None,
             autostart: false,
+            depends_on: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert!(svc.processes.is_empty());
@@ -826,11 +879,49 @@ run = "ssh -N server"
 
         let frontend: ProjectDef = raw["frontend"].clone().try_into().unwrap();
         assert!(
-            matches!(frontend, ProjectDef::DirTable { ref dir, autostart: true } if dir == "/dev/frontend")
+            matches!(frontend, ProjectDef::DirTable { ref dir, autostart: true, .. } if dir == "/dev/frontend")
         );
 
         let tunnel: ProjectDef = raw["tunnel"].clone().try_into().unwrap();
         assert!(matches!(tunnel, ProjectDef::Command { ref run, .. } if run == "ssh -N server"));
+    }
+
+    #[test]
+    fn parse_project_dir_table_with_depends_on() {
+        let toml_str = r#"dir = "/dev/openchamber"
+autostart = true
+depends_on = "opencode""#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let def: ProjectDef = val.try_into().unwrap();
+        match def {
+            ProjectDef::DirTable {
+                dir,
+                autostart,
+                depends_on,
+            } => {
+                assert_eq!(dir, "/dev/openchamber");
+                assert!(autostart);
+                assert_eq!(depends_on.unwrap().into_vec(), vec!["opencode".to_string()]);
+            }
+            _ => panic!("expected DirTable variant"),
+        }
+    }
+
+    #[test]
+    fn parse_project_command_with_depends_on() {
+        let toml_str = r#"run = "my-tool"
+depends_on = ["svc-a", "svc-b"]"#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        let def: ProjectDef = val.try_into().unwrap();
+        match def {
+            ProjectDef::Command { depends_on, .. } => {
+                assert_eq!(
+                    depends_on.unwrap().into_vec(),
+                    vec!["svc-a".to_string(), "svc-b".to_string()]
+                );
+            }
+            _ => panic!("expected Command variant"),
+        }
     }
 
     // ── depends_on / ready / ready_timeout parsing ──────────────────────

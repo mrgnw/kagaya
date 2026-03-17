@@ -899,7 +899,7 @@ fn cmd_start(args: &[String]) {
 	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--autostart" && a != "--wait").collect();
 
 	if autostart_only {
-		let names = config::autostart_project_names();
+		let (names, chains) = config::autostart_sorted();
 		if names.is_empty() {
 			if plain {
 				format::json_error("no projects with autostart = true");
@@ -912,7 +912,7 @@ fn cmd_start(args: &[String]) {
 			names: names.clone(),
 			all: true,
 			processes: vec![],
-			chains: vec![],
+			chains,
 			wait: false,
 		});
 		handle_action_response(&response);
