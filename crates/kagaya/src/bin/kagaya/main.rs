@@ -231,6 +231,8 @@ fn print_usage() {
 	eprintln!();
 	eprintln!("  start/stop/restart auto-watch status briefly; {} to skip", "-W".bold());
 	eprintln!("  {} streams live output after action; {} shows per-process detail", "-e".bold(), "-d".bold());
+	eprintln!("  {} blocks until processes are ready", "--wait".bold());
+	eprintln!("  {} for chains: start db, wait for ready, then api", "db..api".bold());
 	eprintln!();
 
 	eprintln!("{}", "logs".cyan().bold());
@@ -272,6 +274,14 @@ fn print_usage() {
 	eprintln!("  ky all              status --all");
 	eprintln!("  ky -w               live watch mode");
 	eprintln!("  ky <service>        status for a single service");
+	eprintln!();
+
+	eprintln!("{}", "dependencies".cyan().bold());
+	eprintln!("  In services.toml, use {} to order startup:", "depends_on".bold());
+	eprintln!("    [api]");
+	eprintln!("    run = \"python server.py\"");
+	eprintln!("    depends_on = \"db\"");
+	eprintln!("  {} polls a command until exit 0; {} sets timeout (default 10s)", "ready".bold(), "ready_timeout".bold());
 	eprintln!();
 
 	eprintln!("{}", "files".cyan().bold());
