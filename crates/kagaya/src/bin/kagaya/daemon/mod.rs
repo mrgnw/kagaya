@@ -113,12 +113,18 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 			let services = supervisor.status().await;
 			Response::Status { services, http_port: supervisor.http_port }
 		}
-		Request::Start { names, all, processes } => {
+		Request::Start { names, all, processes, chains, wait } => {
 			let mut messages = Vec::new();
 			for name in &names {
-				match supervisor.start_service_filtered(name, all, &processes).await {
+				match supervisor.start_service_filtered(name, all, &processes, &chains).await {
 					Ok(msg) => messages.push(msg),
 					Err(e) => return Response::Error { message: e },
+				}
+			}
+			if wait {
+				// Wait for all started processes to be ready
+				for name in &names {
+					supervisor.wait_for_ready(name).await;
 				}
 			}
 			Response::Ok {

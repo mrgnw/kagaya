@@ -10,6 +10,13 @@ pub enum Request {
         all: bool,
         #[serde(default)]
         processes: Vec<String>,
+        /// Ad-hoc dependency chains from `..` CLI syntax.
+        /// Each chain is a list of process names to start sequentially.
+        #[serde(default)]
+        chains: Vec<Vec<String>>,
+        /// Block until all started processes are ready.
+        #[serde(default)]
+        wait: bool,
     },
     Stop {
         names: Vec<String>,

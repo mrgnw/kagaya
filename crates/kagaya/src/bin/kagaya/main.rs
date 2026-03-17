@@ -72,11 +72,12 @@ fn main() {
 			}
 			cmd_status(&args);
 		}
-		Some(Cmd::Start { names, all, autostart, detailed, echo, watch, no_watch, watch_interval }) => {
+		Some(Cmd::Start { names, all, autostart, detailed, echo, wait, watch, no_watch, watch_interval }) => {
 			let mut args = names.clone();
 			if all { args.push("--all".to_string()); }
 			if detailed { args.push("--detailed".to_string()); }
 			if autostart { args.push("--autostart".to_string()); }
+			if wait { args.push("--wait".to_string()); }
 			if watch || cli.watch { args.push("--watch".to_string()); }
 			if no_watch { args.push("--no-watch".to_string()); }
 			if let Some(iv) = watch_interval {
@@ -862,7 +863,8 @@ fn cmd_start(args: &[String]) {
 	let autostart_only = rest.iter().any(|a| a == "--autostart");
 	let start_all = rest.iter().any(|a| is_all_flag(a));
 	let detailed = rest.iter().any(|a| is_detailed_flag(a));
-	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--autostart").collect();
+	let wait_for_ready = rest.iter().any(|a| a == "--wait");
+	let rest: Vec<String> = rest.into_iter().filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--autostart" && a != "--wait").collect();
 
 	if autostart_only {
 		let names = config::autostart_project_names();
@@ -878,17 +880,38 @@ fn cmd_start(args: &[String]) {
 			names: names.clone(),
 			all: true,
 			processes: vec![],
+			chains: vec![],
+			wait: false,
 		});
 		handle_action_response(&response);
 		return;
 	}
 
-	let args_for_resolve: Vec<String> = if start_all && rest.is_empty() {
+	// Parse `..` chain syntax: "db..api..worker" becomes a chain [db, api, worker]
+	let (chain_args, plain_args): (Vec<String>, Vec<String>) =
+		rest.iter().cloned().partition(|a| a.contains(".."));
+
+	let mut chains: Vec<Vec<String>> = Vec::new();
+	let mut chain_names: Vec<String> = Vec::new();
+	for arg in &chain_args {
+		let chain: Vec<String> = arg.split("..").map(|s| s.to_string()).collect();
+		for name in &chain {
+			if !chain_names.contains(name) {
+				chain_names.push(name.clone());
+			}
+		}
+		chains.push(chain);
+	}
+
+	let combined_args: Vec<String> = if start_all && plain_args.is_empty() && chain_names.is_empty() {
 		vec!["--all".to_string()]
 	} else {
-		rest.clone()
+		let mut args = plain_args.clone();
+		args.extend(chain_names);
+		args
 	};
-	let (resolved, target_processes) = resolve_service_targets(&args_for_resolve, &entries);
+
+	let (resolved, target_processes) = resolve_service_targets(&combined_args, &entries);
 
 	if resolved.is_empty() {
 		eprintln!("no services to start");
@@ -899,6 +922,8 @@ fn cmd_start(args: &[String]) {
 		names: resolved.clone(),
 		all: start_all || !target_processes.is_empty(),
 		processes: target_processes,
+		chains,
+		wait: wait_for_ready,
 	});
 
 	if plain {

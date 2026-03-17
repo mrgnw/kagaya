@@ -84,7 +84,7 @@ pub enum Cmd {
 
     /// Start service(s); briefly shows live status after
     Start {
-        /// Service names
+        /// Service names (use .. for chains: db..api starts db then api)
         names: Vec<String>,
         /// Start all services
         #[arg(long, short)]
@@ -98,6 +98,9 @@ pub enum Cmd {
         /// Stream live output after starting
         #[arg(long, short = 'e')]
         echo: bool,
+        /// Block until all started processes are ready
+        #[arg(long)]
+        wait: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
         /// Skip post-command status watch

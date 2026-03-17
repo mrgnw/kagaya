@@ -105,13 +105,14 @@ impl Supervisor {
 		name: &str,
 		all: bool,
 		processes: &[String],
+		chains: &[Vec<String>],
 	) -> Result<String, String> {
 		let entries = config::load_service_entries();
 		let entry = entries
 			.get(name)
 			.ok_or_else(|| format!("unknown service: {}", name))?;
 
-		let service = config::load_service(entry, &self.config.defaults);
+		let mut service = config::load_service(entry, &self.config.defaults);
 		if service.processes.is_empty() {
 			return Err(format!(
 				"{}: no processes defined (missing services.toml?)",
@@ -119,9 +120,51 @@ impl Supervisor {
 			));
 		}
 
+		// Apply ad-hoc chains as depends_on overlays
+		if !chains.is_empty() {
+			for chain in chains {
+				for i in 1..chain.len() {
+					let dep = &chain[i - 1];
+					let dependent = &chain[i];
+					if let Some(proc) = service.processes.iter_mut().find(|p| p.name == *dependent) {
+						if !proc.depends_on.contains(dep) {
+							proc.depends_on.push(dep.clone());
+						}
+					}
+				}
+			}
+		}
+
 		self.inner
 			.start_service(name, &entry.dir, &service.processes, all, processes)
 			.await
+	}
+
+	/// Wait until all running processes in a service are "ready".
+	pub async fn wait_for_ready(self: &Arc<Self>, name: &str) {
+		let timeout = std::time::Duration::from_secs(30);
+		let deadline = tokio::time::Instant::now() + timeout;
+
+		loop {
+			if tokio::time::Instant::now() >= deadline {
+				break;
+			}
+			let services = self.inner.services.read().await;
+			if let Some(managed) = services.get(name) {
+				let all_ready = managed.processes.values().all(|mp| {
+					*mp.ready_rx.borrow()
+						|| !mp.def.autostart
+						|| matches!(mp.state, ProcessState::Stopped)
+				});
+				if all_ready {
+					break;
+				}
+			} else {
+				break;
+			}
+			drop(services);
+			tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+		}
 	}
 
 	pub async fn stop_service(self: &Arc<Self>, name: &str) -> Result<String, String> {
