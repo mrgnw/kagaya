@@ -93,6 +93,7 @@ run = "npm run dev"
 [migrate]
 run = "python manage.py migrate"
 type = "task"          # runs once, no auto-restart
+depends_on = "db"      # start after db is ready
 ```
 
 ### 3. Register your project
@@ -195,6 +196,41 @@ ky serve [-p PORT]     # start web UI server (default port: 13369)
 ky autostart on        # install boot agent (start services on login)
 ky autostart off       # remove boot agent
 ky autostart status    # show autostart status
+```
+
+### Dependencies & sequencing
+
+Use `depends_on` in `services.toml` to start services in order:
+
+```toml
+[db]
+run = "docker compose up postgres"
+ready = "pg_isready -h localhost"
+
+[api]
+run = "python server.py"
+depends_on = "db"
+```
+
+Starting `api` automatically starts `db` first and waits for it to be ready. Dependencies are transitive — if `worker` depends on `api` which depends on `db`, starting `worker` starts all three in order.
+
+**Readiness** is detected automatically:
+- `ready = "command"` — polls until exit 0 (every 500ms)
+- `ports = [8080]` — waits for TCP connection
+- `type = "task"` — ready on successful exit
+- No check configured — ready immediately
+
+**Ad-hoc chains** from the CLI with `..`:
+
+```sh
+ky start db..api worker    # db→api sequential, worker starts immediately
+ky start db..api..worker   # all three in sequence
+```
+
+**`--wait`** blocks until processes are ready (useful for scripting):
+
+```sh
+ky start db --wait && echo "db is up"
 ```
 
 ### Autostart
@@ -333,6 +369,21 @@ env = { RAILS_ENV = "development" }
 [migrate]
 run = "python manage.py migrate"
 type = "task"
+
+# dependencies — start services in order
+[db]
+run = "docker compose up postgres"
+ready = "pg_isready -h localhost"    # polled until exit 0
+ready_timeout = 30                   # seconds (default: 10)
+
+[api]
+run = "python server.py"
+depends_on = "db"                    # waits for db to be ready first
+ports = [8080]                       # ready when port accepts connections
+
+[worker]
+run = "python worker.py"
+depends_on = ["db", "api"]           # multiple dependencies
 ```
 
 ### config.toml (optional)

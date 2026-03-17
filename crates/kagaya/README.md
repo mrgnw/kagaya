@@ -11,6 +11,8 @@ Pairs with [muzan](https://crates.io/crates/muzan) for daemon lifecycle (socket 
 - **Supervisor** — Manages named services, each with one or more processes. Start, stop, reload, restart, kill.
 - **Process lifecycle** — Spawns via `sh -c`, captures stdout/stderr, tracks PID and uptime, handles exit codes.
 - **Restart policy** — Configurable per-process: max retries, delay between restarts. Tasks (run-once) never restart.
+- **Dependencies** — `depends_on` for startup ordering with automatic transitive resolution and cycle detection.
+- **Readiness** — Custom ready commands, port-based detection, or task completion. Ready signals gate dependent process startup.
 - **Output capture** — 64KB ring buffer for snapshots + broadcast channel for live streaming + log file with rotation.
 - **Log management** — Date-based log files, automatic rotation by size, expiry by age and count.
 - **Process groups** — Spawns in process groups for clean tree killing (SIGTERM then SIGKILL).
@@ -37,6 +39,11 @@ async fn main() {
         restart_delay_secs: 1,
         env: HashMap::new(),
         autostart: true,
+        pre_start: None,
+        ports: vec![8000],
+        depends_on: vec![],
+        ready: None,
+        ready_timeout: 10,
     }];
 
     sup.start_service("myapp", "/path/to/app".as_ref(), &procs, true, &[])

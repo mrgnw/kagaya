@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-03-17
+
+### Added
+
+- **Service dependencies**: New `depends_on` field in `services.toml` for startup ordering
+  - `depends_on = "db"` or `depends_on = ["db", "cache"]` — start dependencies first
+  - Transitive resolution: if `worker` depends on `api` which depends on `db`, starting `worker` starts all three
+  - Circular dependency detection with descriptive error messages
+  - Dependencies are auto-started even if not explicitly requested
+
+- **Readiness detection**: Processes can declare how to check if they're ready
+  - `ready = "pg_isready -h localhost"` — polls a command every 500ms until exit 0
+  - `ports = [8080]` — waits for TCP connection on configured ports
+  - `type = "task"` — ready on successful exit (exit code 0)
+  - `ready_timeout = 30` — configurable timeout in seconds (default: 10)
+  - Dependent services wait for readiness before starting
+
+- **Ad-hoc chains** (`..` syntax): Sequence processes from the CLI without config changes
+  - `ky start db..api worker` — start db, wait for ready, then api; worker starts immediately
+  - `ky start db..api..worker` — all three in sequence
+  - Chains are overlaid on top of config-level `depends_on`
+
+- **`--wait` flag**: Block `ky start` until all started processes are ready
+  - `ky start db --wait && echo "db is up"` — composable with shell
+  - Useful for CI/CD scripts and automation
+
 ## [0.11.0] - 2026-03-03
 
 ### Added
