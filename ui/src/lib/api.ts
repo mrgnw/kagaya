@@ -6,7 +6,11 @@ function isTauri(): boolean {
 
 function apiBase(): string {
   if (typeof window === "undefined") return `http://localhost:${API_PORT}`;
-  return `http://${window.location.hostname}:${API_PORT}`;
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") {
+    return `http://${host}:${API_PORT}`;
+  }
+  return `${window.location.protocol}//${window.location.host}`;
 }
 
 async function tauriInvoke<T>(
@@ -189,7 +193,12 @@ export async function killProcess(
 export function echoWebSocketUrl(name: string): string {
   if (typeof window === "undefined")
     return `ws://localhost:${API_PORT}/ws/echo/${name}`;
-  return `ws://${window.location.hostname}:${API_PORT}/ws/echo/${name}`;
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") {
+    return `ws://${host}:${API_PORT}/ws/echo/${name}`;
+  }
+  const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${wsProto}//${window.location.host}/ws/echo/${name}`;
 }
 
 export interface RemoteControlProject {
