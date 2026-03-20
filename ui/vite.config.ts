@@ -13,5 +13,6 @@ export default defineConfig({
 		hmr: host
 			? { protocol: 'ws', host, port: 1421 }
 			: undefined,
+		allowedHosts: ['.xcc.es', '.skate-in.ts.net'],
 	},
 });
