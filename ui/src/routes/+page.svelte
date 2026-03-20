@@ -221,6 +221,12 @@
                         <span class="stat-label">autostart</span>
                     </a>
                 {/if}
+                <a href="/remote-control" class="stat autostart-stat" title="remote control">
+                    <svg class="autostart-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                        <path d="M8 12v2" /><path d="M4.5 9.5a5 5 0 0 1 7 0" /><path d="M2 7a8 8 0 0 1 12 0" /><circle cx="8" cy="12" r="0.5" fill="currentColor" />
+                    </svg>
+                    <span class="stat-label">remote</span>
+                </a>
             </div>
         </header>
 

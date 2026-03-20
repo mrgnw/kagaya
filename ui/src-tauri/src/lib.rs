@@ -1,4 +1,5 @@
 mod commands;
+mod remote_control;
 pub mod server;
 mod services;
 mod tmux;

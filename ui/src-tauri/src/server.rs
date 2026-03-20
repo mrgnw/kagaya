@@ -13,6 +13,7 @@ use std::process::Command;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
+use crate::remote_control;
 use crate::services;
 use crate::tmux;
 
@@ -42,6 +43,11 @@ pub async fn start(port: u16, static_dir: Option<PathBuf>) {
         .route("/ws/echo/{name}", get(ws_echo))
         .route("/api/serve/status", get(api_serve_status))
         .route("/api/serve/logs", get(api_serve_logs))
+        .route("/api/remote-control", get(api_rc_list))
+        .route(
+            "/api/remote-control/{name}",
+            post(api_rc_enable).delete(api_rc_disable).patch(api_rc_update_mode),
+        )
         .layer(CorsLayer::permissive());
 
     let app = if let Some(dir) = static_dir {
@@ -270,4 +276,79 @@ async fn api_serve_logs() -> impl IntoResponse {
             "no log file recorded".to_string()
         ),
     }
+}
+
+async fn api_rc_list() -> impl IntoResponse {
+	match remote_control::list().await {
+		Ok(projects) => (StatusCode::OK, Json(serde_json::to_value(projects).unwrap())),
+		Err(e) => (
+			StatusCode::INTERNAL_SERVER_ERROR,
+			Json(serde_json::json!({ "error": e })),
+		),
+	}
+}
+
+#[derive(serde::Deserialize)]
+struct RcEnableBody {
+	dir: String,
+	mode: String,
+}
+
+async fn api_rc_enable(Path(name): Path<String>, Json(body): Json<RcEnableBody>) -> impl IntoResponse {
+	eprintln!("[API] rc enable: {}", name);
+	match remote_control::enable(name.clone(), body.dir, body.mode).await {
+		Ok(msg) => {
+			eprintln!("[API] rc enable {} -> success: {}", name, msg);
+			(StatusCode::OK, Json(serde_json::json!({ "message": msg })))
+		}
+		Err(e) => {
+			eprintln!("[API] rc enable {} -> error: {}", name, e);
+			(
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Json(serde_json::json!({ "error": e })),
+			)
+		}
+	}
+}
+
+async fn api_rc_disable(Path(name): Path<String>) -> impl IntoResponse {
+	eprintln!("[API] rc disable: {}", name);
+	match remote_control::disable(name.clone()).await {
+		Ok(msg) => {
+			eprintln!("[API] rc disable {} -> success: {}", name, msg);
+			(StatusCode::OK, Json(serde_json::json!({ "message": msg })))
+		}
+		Err(e) => {
+			eprintln!("[API] rc disable {} -> error: {}", name, e);
+			(
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Json(serde_json::json!({ "error": e })),
+			)
+		}
+	}
+}
+
+#[derive(serde::Deserialize)]
+struct RcUpdateModeBody {
+	mode: String,
+}
+
+async fn api_rc_update_mode(
+	Path(name): Path<String>,
+	Json(body): Json<RcUpdateModeBody>,
+) -> impl IntoResponse {
+	eprintln!("[API] rc update_mode: {} -> {}", name, body.mode);
+	match remote_control::update_mode(name.clone(), body.mode).await {
+		Ok(msg) => {
+			eprintln!("[API] rc update_mode {} -> success: {}", name, msg);
+			(StatusCode::OK, Json(serde_json::json!({ "message": msg })))
+		}
+		Err(e) => {
+			eprintln!("[API] rc update_mode {} -> error: {}", name, e);
+			(
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Json(serde_json::json!({ "error": e })),
+			)
+		}
+	}
 }
