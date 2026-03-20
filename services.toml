@@ -1,0 +1,3 @@
+[ui]
+run = "pnpm --dir ui dev"
+ports = [13369]

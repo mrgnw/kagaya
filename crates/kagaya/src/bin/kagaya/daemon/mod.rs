@@ -10,9 +10,12 @@ pub async fn run(args: &[String]) {
 
 	let _foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
 	let enable_http = args.iter().any(|a| a == "--http");
+	let port_override = args.windows(2)
+		.find(|w| w[0] == "--port" || w[0] == "-p")
+		.and_then(|w| w[1].parse::<u16>().ok());
 
 	let global_config = config::load_global_config();
-	let port = global_config.daemon.port;
+	let port = port_override.unwrap_or(global_config.daemon.port);
 	let http_port = if enable_http { Some(port) } else { None };
 	let supervisor = supervisor::Supervisor::new(global_config.clone(), http_port);
 
@@ -273,7 +276,7 @@ async fn handle_request(supervisor: &Arc<supervisor::Supervisor>, request: Reque
 
 async fn run_http_server(supervisor: Arc<supervisor::Supervisor>, port: u16) {
 	let app = api::router(supervisor);
-	let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+	let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
 	let listener = match tokio::net::TcpListener::bind(addr).await {
 		Ok(l) => l,
 		Err(e) => {
