@@ -155,22 +155,27 @@ pub enum Cmd {
     },
 
     /// Show log file paths
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Logs { args: Vec<String> },
 
     /// Deprecated: use echo instead
-    #[command(hide = true)]
+    #[command(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
     Tail { args: Vec<String> },
 
     /// Tail + stream live output from a service
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Echo { args: Vec<String> },
 
     /// Show service config or a single process command
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Show { args: Vec<String> },
 
     /// Manage cron jobs (via koku)
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Cron { args: Vec<String> },
 
     /// Manage the daemon process
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Daemon { args: Vec<String> },
 
     /// Reload projects.toml without restarting services
@@ -178,7 +183,10 @@ pub enum Cmd {
     ReloadConfig,
 
     /// HTTP server for web UI
-    Serve { args: Vec<String> },
+    Serve {
+        #[command(subcommand)]
+        action: Option<ServeAction>,
+    },
 
     /// Register a project or standalone command
     Add {
@@ -189,7 +197,11 @@ pub enum Cmd {
     },
 
     /// Unregister a project
-    #[command(visible_alias = "rm")]
+    #[command(
+        visible_alias = "rm",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
     Remove { args: Vec<String> },
 
     /// Create config files
@@ -202,14 +214,19 @@ pub enum Cmd {
     },
 
     /// Manage boot autostart (on/off/status)
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Autostart { args: Vec<String> },
 
     /// macOS launchd agents (run `ky launchd help` for details)
-    #[command(visible_alias = "lctl")]
+    #[command(
+        visible_alias = "lctl",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
     Launchd { args: Vec<String> },
 
     /// Self-management (update)
-    #[command(name = "self")]
+    #[command(name = "self", trailing_var_arg = true, allow_hyphen_values = true)]
     SelfCmd { args: Vec<String> },
 
     /// Show status for all services
@@ -227,4 +244,15 @@ pub enum Cmd {
     /// Catch-all for service-first syntax (e.g. ky myapp start)
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+pub enum ServeAction {
+    /// Stop the running server
+    Stop,
+    /// Show server status
+    Status,
+    /// Run as background daemon
+    #[command(visible_alias = "-d")]
+    Daemon,
 }

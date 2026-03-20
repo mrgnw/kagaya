@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use cli::{Cli, Cmd, OutputFormat, output_format, set_output_format};
+use cli::{Cli, Cmd, OutputFormat, ServeAction, output_format, set_output_format};
 use config::ServiceEntry;
 use protocol::{Request, Response};
 use kagaya::*;
@@ -120,7 +120,7 @@ fn main() {
 				Some(Cmd::Cron { args }) => cmd_cron(&args),
 			Some(Cmd::Daemon { args }) => cmd_daemon(&args),
 			Some(Cmd::ReloadConfig) => cmd_reload_config(),
-			Some(Cmd::Serve { args }) => cmd_serve(&args),
+			Some(Cmd::Serve { action }) => cmd_serve(action),
 				Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
 				Some(Cmd::Remove { args }) => cmd_remove(&args),
 				Some(Cmd::Init) => cmd_init(),
@@ -1687,19 +1687,39 @@ fn cmd_daemon(args: &[String]) {
 	}
 }
 
-fn cmd_serve(args: &[String]) {
-	let has_stop = args.iter().any(|a| a == "--stop");
-	let has_status = args.iter().any(|a| a == "--status");
-	let has_daemon = args.iter().any(|a| a == "-d" || a == "--daemon");
+fn cmd_serve(action: Option<ServeAction>) {
+	match action {
+		Some(ServeAction::Stop) => cmd_daemon(&["stop".into()]),
+		Some(ServeAction::Status) => cmd_serve_status(),
+		Some(ServeAction::Daemon) => cmd_daemon(&["start".into(), "--http".into()]),
+		None => cmd_daemon(&["run".into(), "--foreground".into(), "--http".into()]),
+	}
+}
 
-	if has_stop {
-		cmd_daemon(&["stop".to_string()].to_vec());
-	} else if has_status {
-		cmd_daemon(&["status".to_string()].to_vec());
-	} else if has_daemon {
-		cmd_daemon(&vec!["start".to_string(), "--http".to_string()]);
+fn cmd_serve_status() {
+	let paths = daemon_paths();
+	let json = output_format() == OutputFormat::Json;
+
+	if !muzan::client::is_running(&paths) {
+		if json {
+			format::json_value(&serde_json::json!({ "running": false, "http": false }));
+		} else {
+			eprintln!("serve off (daemon not running)");
+		}
+		return;
+	}
+
+	let (_, http_port) = fetch_status();
+	if json {
+		format::json_value(&serde_json::json!({
+			"running": true,
+			"http": http_port.is_some(),
+			"port": http_port,
+		}));
+	} else if let Some(port) = http_port {
+		eprintln!("serve on  http://127.0.0.1:{}", port);
 	} else {
-		cmd_daemon(&vec!["run".to_string(), "--foreground".to_string(), "--http".to_string()]);
+		eprintln!("serve off (daemon running without HTTP)");
 	}
 }
 
