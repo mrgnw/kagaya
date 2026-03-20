@@ -9,9 +9,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::RustEmbed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tower_http::cors::CorsLayer;
 
 #[derive(RustEmbed)]
@@ -49,6 +50,11 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
 		.route("/api/autostart", get(autostart_status))
 		.route("/api/autostart/on", post(autostart_on))
 		.route("/api/autostart/off", post(autostart_off))
+		.route("/api/remote-control", get(rc_list))
+		.route(
+			"/api/remote-control/{name}",
+			post(rc_enable).delete(rc_disable).patch(rc_update_mode),
+		)
 		.fallback(static_handler)
 		.layer(CorsLayer::permissive())
 		.with_state(state)
@@ -409,6 +415,114 @@ async fn autostart_off() -> Result<Json<ActionResponse>, (StatusCode, Json<Error
 	autostart::disable()
 		.map(|msg| Json(ActionResponse { message: msg }))
 		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+// ── Remote Control (claude-rc proxy) ─────────────────────────────────────────
+
+mod rc {
+	use super::*;
+	use std::path::PathBuf;
+
+	#[derive(Serialize)]
+	pub enum Request {
+		List,
+		Enable { name: String, dir: String, mode: String },
+		Disable { name: String },
+		UpdateMode { name: String, mode: String },
+	}
+
+	#[derive(Deserialize)]
+	pub enum Response {
+		Ok { message: String },
+		ProjectList(Vec<ProjectStatus>),
+		Error { message: String },
+	}
+
+	#[derive(Deserialize, Serialize, Clone)]
+	pub struct ProjectStatus {
+		pub name: String,
+		pub dir: String,
+		pub mode: String,
+		pub running: bool,
+		pub pid: Option<u32>,
+	}
+
+	fn socket_path() -> PathBuf {
+		let home = std::env::var("HOME").expect("HOME not set");
+		PathBuf::from(home).join(".local/state/claude-rc/daemon.sock")
+	}
+
+	pub async fn send(req: &Request) -> Result<Response, String> {
+		let stream = tokio::net::UnixStream::connect(socket_path())
+			.await
+			.map_err(|e| format!("claude-rc daemon not reachable: {e}"))?;
+		let (reader, mut writer) = stream.into_split();
+		let mut json = serde_json::to_string(req).map_err(|e| format!("serialize: {e}"))?;
+		json.push('\n');
+		writer.write_all(json.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
+		let mut buf = BufReader::new(reader);
+		let mut line = String::new();
+		buf.read_line(&mut line).await.map_err(|e| format!("read: {e}"))?;
+		if line.is_empty() {
+			return Err("daemon closed connection".to_string());
+		}
+		serde_json::from_str(&line).map_err(|e| format!("parse: {e}"))
+	}
+}
+
+async fn rc_list() -> Result<Json<Vec<rc::ProjectStatus>>, (StatusCode, Json<ErrorResponse>)> {
+	match rc::send(&rc::Request::List).await {
+		Ok(rc::Response::ProjectList(projects)) => Ok(Json(projects)),
+		Ok(rc::Response::Error { message }) => Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message }))),
+		Ok(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "unexpected response".into() }))),
+		Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: e }))),
+	}
+}
+
+#[derive(Deserialize)]
+struct RcEnableBody {
+	dir: String,
+	mode: String,
+}
+
+async fn rc_enable(
+	Path(name): Path<String>,
+	Json(body): Json<RcEnableBody>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	match rc::send(&rc::Request::Enable { name, dir: body.dir, mode: body.mode }).await {
+		Ok(rc::Response::Ok { message }) => Ok(Json(ActionResponse { message })),
+		Ok(rc::Response::Error { message }) => Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message }))),
+		Ok(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "unexpected response".into() }))),
+		Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: e }))),
+	}
+}
+
+async fn rc_disable(
+	Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	match rc::send(&rc::Request::Disable { name }).await {
+		Ok(rc::Response::Ok { message }) => Ok(Json(ActionResponse { message })),
+		Ok(rc::Response::Error { message }) => Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message }))),
+		Ok(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "unexpected response".into() }))),
+		Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: e }))),
+	}
+}
+
+#[derive(Deserialize)]
+struct RcUpdateModeBody {
+	mode: String,
+}
+
+async fn rc_update_mode(
+	Path(name): Path<String>,
+	Json(body): Json<RcUpdateModeBody>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+	match rc::send(&rc::Request::UpdateMode { name, mode: body.mode }).await {
+		Ok(rc::Response::Ok { message }) => Ok(Json(ActionResponse { message })),
+		Ok(rc::Response::Error { message }) => Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message }))),
+		Ok(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "unexpected response".into() }))),
+		Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: e }))),
+	}
 }
 
 // ── Static files ─────────────────────────────────────────────────────────────
