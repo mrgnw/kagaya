@@ -14,5 +14,9 @@ export default defineConfig({
 			? { protocol: 'ws', host, port: 1421 }
 			: undefined,
 		allowedHosts: ['.xcc.es', '.skate-in.ts.net'],
+		proxy: {
+			'/api': 'http://localhost:13369',
+			'/ws': { target: 'ws://localhost:13369', ws: true },
+		},
 	},
 });
