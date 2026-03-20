@@ -4,10 +4,16 @@ use crate::daemon::supervisor::Supervisor;
 use kagaya::{ProcessState, ServiceType};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::http::StatusCode;
+#[cfg(not(feature = "dev"))]
+use axum::http::{header, Uri};
+#[cfg(not(feature = "dev"))]
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "dev")]
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(not(feature = "dev"))]
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +21,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tower_http::cors::CorsLayer;
 
+#[cfg(not(feature = "dev"))]
 #[derive(RustEmbed)]
 #[folder = "../../ui/build/"]
 struct UiAssets;
@@ -27,7 +34,7 @@ pub struct AppState {
 pub fn router(supervisor: Arc<Supervisor>) -> Router {
 	let state = AppState { supervisor };
 
-	Router::new()
+	let router = Router::new()
 		.route("/api/services", get(list_services))
 		.route("/api/services/{name}", get(service_detail))
 		.route("/api/services/{name}/start", post(start_service))
@@ -54,8 +61,12 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
 		.route(
 			"/api/remote-control/{name}",
 			post(rc_enable).delete(rc_disable).patch(rc_update_mode),
-		)
-		.fallback(static_handler)
+		);
+
+	#[cfg(not(feature = "dev"))]
+	let router = router.fallback(static_handler);
+
+	router
 		.layer(CorsLayer::permissive())
 		.with_state(state)
 }
@@ -527,6 +538,7 @@ async fn rc_update_mode(
 
 // ── Static files ─────────────────────────────────────────────────────────────
 
+#[cfg(not(feature = "dev"))]
 async fn static_handler(uri: Uri) -> impl IntoResponse {
 	let path = uri.path().trim_start_matches('/');
 
@@ -546,6 +558,7 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 		.unwrap()
 }
 
+#[cfg(not(feature = "dev"))]
 fn serve_asset(path: &str, content: rust_embed::EmbeddedFile) -> Response {
 	let mime = mime_guess::from_path(path).first_or_octet_stream();
 

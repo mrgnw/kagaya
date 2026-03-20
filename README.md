@@ -32,6 +32,22 @@ cargo install kagaya       # from source
 cargo binstall kagaya      # prebuilt binary
 ```
 
+### Dev mode
+
+For UI development with HMR, install with the `dev` feature:
+
+```sh
+cargo install --path crates/kagaya --features dev
+```
+
+This changes `ky serve` behavior: the daemon runs the API on port 13370 and spawns the Vite dev server on 13369. Edit `.svelte` files and the browser hot-reloads.
+
+```sh
+ky serve                         # API on 13370, Vite HMR on 13369
+```
+
+Without the `dev` feature (default), the embedded UI is served as a single binary on 13369.
+
 ### Shell completion
 
 Tab completion for commands, project names, and flags:

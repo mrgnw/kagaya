@@ -41,5 +41,8 @@ libproc = "0.14"
 [dependencies.listeners]
 version = "0.4"
 
+[features]
+dev = []
+
 [dev-dependencies]
 tempfile = "3"

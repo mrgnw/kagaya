@@ -15,7 +15,12 @@ pub async fn run(args: &[String]) {
 		.and_then(|w| w[1].parse::<u16>().ok());
 
 	let global_config = config::load_global_config();
+
+	#[cfg(feature = "dev")]
+	let port = port_override.unwrap_or(13370);
+	#[cfg(not(feature = "dev"))]
 	let port = port_override.unwrap_or(global_config.daemon.port);
+
 	let http_port = if enable_http { Some(port) } else { None };
 	let supervisor = supervisor::Supervisor::new(global_config.clone(), http_port);
 
@@ -72,6 +77,21 @@ pub async fn run(args: &[String]) {
 	} else {
 		None
 	};
+
+	#[cfg(feature = "dev")]
+	{
+		let ui_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+			.join("../../ui");
+		tracing::info!("spawning vite dev server in {}", ui_dir.display());
+		tokio::spawn(async move {
+			let mut child = tokio::process::Command::new("pnpm")
+				.args(["dev"])
+				.current_dir(&ui_dir)
+				.spawn()
+				.expect("failed to start vite dev server");
+			child.wait().await.ok();
+		});
+	}
 
 	tracing::info!("daemon started (pid {})", std::process::id());
 	if enable_http {
