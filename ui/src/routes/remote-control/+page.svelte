@@ -6,8 +6,10 @@
 		enableRemoteControl,
 		disableRemoteControl,
 		updateRemoteControlMode,
+		getDevDirs,
 		type ServiceInfo,
 		type RemoteControlProject,
+		type DirEntry,
 	} from "$lib/api";
 	import StatusIcon from "$lib/components/StatusIcon.svelte";
 
@@ -26,6 +28,38 @@
 	let bulkLoading = $state(false);
 	let headerCheckbox = $state<HTMLInputElement | null>(null);
 	let actionLoading = $state<Set<string>>(new Set());
+	let showBrowser = $state(false);
+	let devTree = $state<DirEntry[]>([]);
+	let expandedPaths = $state<Set<string>>(new Set());
+	let addingPath = $state<string | null>(null);
+
+	let knownDirs = $derived(new Set(services.map((s) => s.dir)));
+
+	async function loadDevTree() {
+		devTree = await getDevDirs();
+	}
+
+	function toggleExpand(path: string) {
+		const next = new Set(expandedPaths);
+		if (next.has(path)) next.delete(path);
+		else next.add(path);
+		expandedPaths = next;
+	}
+
+	function nameFromPath(path: string): string {
+		const parts = path.split("/");
+		return parts[parts.length - 1];
+	}
+
+	async function addProject(path: string) {
+		addingPath = path;
+		try {
+			await enableRemoteControl(nameFromPath(path), path, "same-dir");
+			setTimeout(refresh, 300);
+		} finally {
+			addingPath = null;
+		}
+	}
 
 	let merged = $derived.by(() => {
 		const rcMap = new Map(rcProjects.map((r) => [r.name, r]));
@@ -304,6 +338,56 @@
 		{#if merged.length === 0 && !error}
 			<div class="empty">
 				<p>No projects found</p>
+			</div>
+		{/if}
+
+		<div class="browser-toggle">
+			<button
+				class="browse-btn"
+				onclick={() => { showBrowser = !showBrowser; if (showBrowser && devTree.length === 0) loadDevTree(); }}
+			>
+				{showBrowser ? "Hide" : "Browse ~/dev"}
+			</button>
+		</div>
+
+		{#if showBrowser}
+			<div class="browser">
+				{#snippet tree(entries: DirEntry[], depth: number)}
+					{#each entries as entry (entry.path)}
+						{@const hasChildren = entry.children.length > 0}
+						{@const expanded = expandedPaths.has(entry.path)}
+						{@const alreadyAdded = knownDirs.has(entry.path) || merged.some((m) => m.dir === entry.path)}
+						<div class="tree-row" style="padding-left: {depth * 1.2}em">
+							{#if hasChildren}
+								<button class="tree-toggle" onclick={() => toggleExpand(entry.path)}>
+									<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+										{#if expanded}
+											<path d="M4 6l4 4 4-4" />
+										{:else}
+											<path d="M6 4l4 4-4 4" />
+										{/if}
+									</svg>
+								</button>
+							{:else}
+								<span class="tree-spacer"></span>
+							{/if}
+							<span class="tree-name">{entry.name}</span>
+							{#if alreadyAdded}
+								<span class="tree-tag">added</span>
+							{:else}
+								<button
+									class="tree-add"
+									disabled={addingPath === entry.path}
+									onclick={() => addProject(entry.path)}
+								>+</button>
+							{/if}
+						</div>
+						{#if expanded && hasChildren}
+							{@render tree(entry.children, depth + 1)}
+						{/if}
+					{/each}
+				{/snippet}
+				{@render tree(devTree, 0)}
 			</div>
 		{/if}
 	</div>
@@ -645,6 +729,122 @@
 	.empty p {
 		margin: 0;
 		color: #555;
+	}
+
+	.browser-toggle {
+		padding: 1em 0.6em 0.5em;
+		display: flex;
+	}
+
+	.browse-btn {
+		border: 1px solid #1e1e32;
+		background: #1a1a2e;
+		color: #666;
+		cursor: pointer;
+		padding: 0.3em 0.8em;
+		border-radius: 0.3em;
+		font-size: 0.85em;
+		font-family: inherit;
+		font-weight: 500;
+		transition: all 0.15s;
+	}
+
+	.browse-btn:hover {
+		background: #252540;
+		color: #bbb;
+	}
+
+	.browser {
+		border: 1px solid #1e1e32;
+		border-radius: 0.4em;
+		padding: 0.4em 0;
+		margin: 0 0.6em;
+		max-height: 20em;
+		overflow-y: auto;
+	}
+
+	.tree-row {
+		display: flex;
+		align-items: center;
+		gap: 0.3em;
+		padding-top: 0.15em;
+		padding-bottom: 0.15em;
+		padding-right: 0.6em;
+		font-size: 0.85em;
+	}
+
+	.tree-row:hover {
+		background: #13132a;
+	}
+
+	.tree-toggle {
+		display: inline-flex;
+		align-items: center;
+		background: none;
+		border: none;
+		color: #555;
+		cursor: pointer;
+		padding: 0;
+		width: 1.2em;
+		height: 1.2em;
+		flex-shrink: 0;
+	}
+
+	.tree-toggle svg {
+		width: 1em;
+		height: 1em;
+	}
+
+	.tree-toggle:hover {
+		color: #999;
+	}
+
+	.tree-spacer {
+		width: 1.2em;
+		flex-shrink: 0;
+	}
+
+	.tree-name {
+		color: #999;
+		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.tree-tag {
+		color: #444;
+		font-size: 0.8em;
+		flex-shrink: 0;
+	}
+
+	.tree-add {
+		background: none;
+		border: 1px solid #1e1e32;
+		color: #555;
+		cursor: pointer;
+		width: 1.6em;
+		height: 1.6em;
+		border-radius: 0.3em;
+		font-size: 0.85em;
+		font-weight: 600;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		transition: all 0.15s;
+	}
+
+	.tree-add:hover {
+		color: #55cc55;
+		border-color: #224422;
+		background: #1a2e1a;
+	}
+
+	.tree-add:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
 	}
 
 	@media (min-width: 1200px) {

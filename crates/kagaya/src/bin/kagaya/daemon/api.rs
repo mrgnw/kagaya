@@ -57,6 +57,7 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
 		.route("/api/autostart", get(autostart_status))
 		.route("/api/autostart/on", post(autostart_on))
 		.route("/api/autostart/off", post(autostart_off))
+		.route("/api/dev-dirs", get(dev_dirs))
 		.route("/api/remote-control", get(rc_list))
 		.route(
 			"/api/remote-control/{name}",
@@ -426,6 +427,55 @@ async fn autostart_off() -> Result<Json<ActionResponse>, (StatusCode, Json<Error
 	autostart::disable()
 		.map(|msg| Json(ActionResponse { message: msg }))
 		.map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+// ── Dev directory browser ────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct DirEntry {
+	name: String,
+	path: String,
+	children: Vec<DirEntry>,
+}
+
+const IGNORE_DIRS: &[&str] = &[
+	".", "node_modules", "target", "__pycache__", "dist", "build",
+	"\u{03a9} archive", ".git", ".venv", "venv", "_build",
+];
+
+fn scan_dir(dir: &std::path::Path, depth: u32) -> Vec<DirEntry> {
+	if depth == 0 {
+		return Vec::new();
+	}
+	let mut entries = Vec::new();
+	let Ok(rd) = std::fs::read_dir(dir) else {
+		return entries;
+	};
+	let mut items: Vec<_> = rd
+		.filter_map(|e| e.ok())
+		.filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+		.filter(|e| {
+			let name = e.file_name();
+			let name = name.to_string_lossy();
+			!IGNORE_DIRS.iter().any(|ig| name.starts_with(ig))
+		})
+		.collect();
+	items.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+	for item in items {
+		let path = item.path();
+		entries.push(DirEntry {
+			name: item.file_name().to_string_lossy().into_owned(),
+			path: path.to_string_lossy().into_owned(),
+			children: scan_dir(&path, depth - 1),
+		});
+	}
+	entries
+}
+
+async fn dev_dirs() -> Json<Vec<DirEntry>> {
+	let home = std::env::var("HOME").unwrap_or_default();
+	let dev = std::path::PathBuf::from(home).join("dev");
+	Json(scan_dir(&dev, 3))
 }
 
 // ── Remote Control (claude-rc proxy) ─────────────────────────────────────────

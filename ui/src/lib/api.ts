@@ -220,6 +220,16 @@ export async function updateRemoteControlMode(name: string, mode: string): Promi
   return res.message;
 }
 
+export interface DirEntry {
+  name: string;
+  path: string;
+  children: DirEntry[];
+}
+
+export async function getDevDirs(): Promise<DirEntry[]> {
+  return httpGet("/api/dev-dirs");
+}
+
 export async function getAutostartStatus(): Promise<AutostartStatus> {
   return httpGet("/api/autostart");
 }
