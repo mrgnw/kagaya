@@ -48,7 +48,10 @@ pub enum Request {
         offset: u64,
     },
     Ping,
-    Shutdown,
+    Shutdown {
+        #[serde(default)]
+        preserve_state: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

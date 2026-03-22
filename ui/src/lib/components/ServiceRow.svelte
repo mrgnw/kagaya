@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
+	import { SvelteSet } from "svelte/reactivity";
 	import type { ServiceInfo } from "$lib/api";
 	import {
 		startService,
@@ -12,13 +13,16 @@
 	} from "$lib/api";
 	import StatusIcon from "./StatusIcon.svelte";
 
+	type AggregateState = "on" | "degraded" | "err" | "off";
+	type ServiceWithState = ServiceInfo & { state: AggregateState };
+
 	let {
 		service,
 		onUpdate,
 		selected = false,
 		onSelect,
 	}: {
-		service: ServiceInfo;
+		service: ServiceWithState;
 		onUpdate: () => void;
 		selected?: boolean;
 		onSelect?: (name: string, checked: boolean) => void;
@@ -29,7 +33,7 @@
 	let processes = $state<ProcessInfo[]>([]);
 	let detailLoading = $state(false);
 	let detailLoaded = $state(false);
-	let procLoading = $state<Set<string>>(new Set());
+	let procLoading = new SvelteSet<string>();
 
 	async function handleAction(e: Event, action: "start" | "stop" | "reload") {
 		e.preventDefault();
@@ -75,9 +79,7 @@
 		procName: string,
 		action: "restart" | "kill",
 	) {
-		const next = new Set(procLoading);
-		next.add(procName);
-		procLoading = next;
+		procLoading.add(procName);
 		try {
 			if (action === "restart")
 				await restartProcess(service.name, procName);
@@ -86,9 +88,7 @@
 		} catch (e) {
 			console.error(e);
 		} finally {
-			const after = new Set(procLoading);
-			after.delete(procName);
-			procLoading = after;
+			procLoading.delete(procName);
 		}
 	}
 
@@ -107,6 +107,8 @@
 		const m = status.match(/\((.+)\)/);
 		return m ? m[1] : "";
 	}
+
+	let aggregateState = $derived(service.state);
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -116,7 +118,7 @@
 		href="/service/{service.name}"
 		class="row"
 		class:selected
-		class:stopped={!service.running}
+		class:stopped={aggregateState === "off"}
 		onclick={toggleExpand}
 	>
 		<span class="left">
@@ -138,7 +140,7 @@
 				</label>
 			{:else}
 				<StatusIcon
-					status={service.running ? "running" : "stopped"}
+					status={aggregateState}
 					{loading}
 					size="0.7em"
 				/>

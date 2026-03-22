@@ -11,6 +11,10 @@
 
 	let resolved = $derived.by(() => {
 		if (loading) return { glyph: "●", color: "#555", cls: "loading" };
+		if (status === "on") return { glyph: "●", color: "#44bb44", cls: "on" };
+		if (status === "degraded") return { glyph: "▲", color: "#ccaa44", cls: "degraded" };
+		if (status === "err") return { glyph: "✖", color: "#cc4444", cls: "err" };
+		if (status === "off") return { glyph: "◻", color: "#555", cls: "off" };
 		if (status.startsWith("running")) return { glyph: "●", color: "#44bb44", cls: "running" };
 		if (status === "stopped") return { glyph: "◻", color: "#555", cls: "stopped" };
 		if (status.startsWith("crashed")) return { glyph: "⚠", color: "#ccaa44", cls: "crashed" };

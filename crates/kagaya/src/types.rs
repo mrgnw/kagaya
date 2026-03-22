@@ -68,6 +68,26 @@ pub enum ProcessState {
     Failed { exit_code: i32 },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceState {
+    On,
+    Degraded,
+    Err,
+    Off,
+}
+
+impl ServiceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Degraded => "degraded",
+            Self::Err => "err",
+            Self::Off => "off",
+        }
+    }
+}
+
 impl ProcessState {
     pub fn is_running(&self) -> bool {
         matches!(self, ProcessState::Running { .. })
@@ -85,6 +105,22 @@ pub struct ServiceStatus {
 impl ServiceStatus {
     pub fn is_running(&self) -> bool {
         self.processes.iter().any(|p| p.state.is_running())
+    }
+
+    pub fn aggregate_state(&self) -> ServiceState {
+        let any_running = self.processes.iter().any(|p| p.state.is_running());
+        let any_failed = self.processes.iter().any(|p| {
+            matches!(
+                p.state,
+                ProcessState::Failed { .. } | ProcessState::Crashed { .. }
+            )
+        });
+        match (any_running, any_failed) {
+            (true, true) => ServiceState::Degraded,
+            (false, true) => ServiceState::Err,
+            (true, false) => ServiceState::On,
+            (false, false) => ServiceState::Off,
+        }
     }
 }
 
@@ -104,4 +140,83 @@ pub struct ProcessStatus {
     pub ports_expected: Vec<u16>,
     #[serde(default)]
     pub state_since: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(name: &str, state: ProcessState) -> ProcessStatus {
+        ProcessStatus {
+            name: name.to_string(),
+            state,
+            pid: None,
+            autostart: true,
+            service_type: ServiceType::Service,
+            ports: vec![],
+            ports_expected: vec![],
+            state_since: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_state_is_on_when_any_process_running() {
+        let service = ServiceStatus {
+            name: "svc".into(),
+            dir: PathBuf::from("/tmp/svc"),
+            processes: vec![proc(
+                "web",
+                ProcessState::Running {
+                    pid: 1,
+                    uptime_secs: 3,
+                },
+            )],
+        };
+        assert_eq!(service.aggregate_state(), ServiceState::On);
+    }
+
+    #[test]
+    fn aggregate_state_is_degraded_when_running_and_failed_mix() {
+        let service = ServiceStatus {
+            name: "svc".into(),
+            dir: PathBuf::from("/tmp/svc"),
+            processes: vec![
+                proc(
+                    "web",
+                    ProcessState::Running {
+                        pid: 1,
+                        uptime_secs: 3,
+                    },
+                ),
+                proc("worker", ProcessState::Failed { exit_code: 1 }),
+            ],
+        };
+        assert_eq!(service.aggregate_state(), ServiceState::Degraded);
+    }
+
+    #[test]
+    fn aggregate_state_is_err_when_only_failed_processes_exist() {
+        let service = ServiceStatus {
+            name: "svc".into(),
+            dir: PathBuf::from("/tmp/svc"),
+            processes: vec![proc(
+                "web",
+                ProcessState::Crashed {
+                    exit_code: 1,
+                    retries: 2,
+                },
+            )],
+        };
+        assert_eq!(service.aggregate_state(), ServiceState::Err);
+    }
+
+    #[test]
+    fn aggregate_state_is_off_when_everything_stopped() {
+        let service = ServiceStatus {
+            name: "svc".into(),
+            dir: PathBuf::from("/tmp/svc"),
+            processes: vec![proc("web", ProcessState::Stopped)],
+        };
+        assert_eq!(service.aggregate_state(), ServiceState::Off);
+    }
 }

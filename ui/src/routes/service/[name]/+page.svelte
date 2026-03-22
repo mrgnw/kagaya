@@ -21,6 +21,7 @@
 
 	let name = $derived(page.params.name!);
 	let scale = $derived(Math.max(0.85, Math.min(1.6, innerWidth / 800)));
+	let serviceState = $derived(detail?.state ?? 'off');
 
 	async function refresh() {
 		try {
@@ -84,6 +85,10 @@
 				break;
 		}
 	}
+
+	function stateLabel(state: ServiceDetail['state']) {
+		return state;
+	}
 </script>
 
 <svelte:window bind:innerWidth onkeydown={handleKeydown} />
@@ -97,8 +102,11 @@
 		<a href="/" class="back" title="Back to services">
 			<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 3L5 8l5 5" /></svg>
 		</a>
-		<StatusIcon status={detail?.running ? "running" : "stopped"} size="calc(16px * var(--scale, 1))" />
+		<StatusIcon status={serviceState} size="calc(16px * var(--scale, 1))" />
 		<h1>{name}</h1>
+		{#if detail}
+			<span class="state-label {detail.state}">{stateLabel(detail.state)}</span>
+		{/if}
 		{#if detail}
 			<span class="actions">
 				{#if detail.running}
@@ -128,8 +136,8 @@
 			</div>
 		{:else if !detail.running}
 			<div class="stopped-state">
-				<StatusIcon status="stopped" size="calc(40px * var(--scale, 1))" />
-				<span class="stopped-label">stopped</span>
+				<StatusIcon status={detail.state} size="calc(40px * var(--scale, 1))" />
+				<span class="stopped-label {detail.state}">{stateLabel(detail.state)}</span>
 				<button class="start-btn" onclick={() => handleAction('start')} disabled={loading}>
 					<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5z" /></svg>
 					Start
@@ -182,6 +190,28 @@
 		font-weight: 600;
 		color: #e0e0e0;
 		margin: 0;
+	}
+
+	.state-label {
+		font-size: calc(0.72rem * var(--scale, 1));
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: #555;
+		padding: calc(4px * var(--scale, 1)) calc(8px * var(--scale, 1));
+		border-radius: 999px;
+		background: #1a1a2e;
+	}
+	.state-label.on {
+		color: #44bb44;
+	}
+	.state-label.degraded {
+		color: #ccaa44;
+	}
+	.state-label.err {
+		color: #cc4444;
+	}
+	.state-label.off {
+		color: #666;
 	}
 
 	.actions {
@@ -246,6 +276,18 @@
 		color: #555;
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
+	}
+	.stopped-label.on {
+		color: #44bb44;
+	}
+	.stopped-label.degraded {
+		color: #ccaa44;
+	}
+	.stopped-label.err {
+		color: #cc4444;
+	}
+	.stopped-label.off {
+		color: #555;
 	}
 
 	.start-btn {

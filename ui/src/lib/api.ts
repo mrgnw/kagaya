@@ -80,6 +80,7 @@ export interface ServiceInfo {
   name: string;
   dir: string;
   running: boolean;
+  state: "on" | "degraded" | "err" | "off";
   autostart: boolean;
 }
 
@@ -102,6 +103,7 @@ export interface ServiceDetail {
   name: string;
   dir: string;
   running: boolean;
+  state: "on" | "degraded" | "err" | "off";
   processes: ProcessInfo[];
 }
 

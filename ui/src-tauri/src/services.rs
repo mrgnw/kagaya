@@ -10,6 +10,7 @@ pub struct ServiceInfo {
     pub name: String,
     pub dir: String,
     pub running: bool,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,7 +27,21 @@ pub struct ServiceDetail {
     pub name: String,
     pub dir: String,
     pub running: bool,
+    pub state: String,
     pub processes: Vec<ProcessInfo>,
+}
+
+fn aggregate_state(processes: &[ProcessInfo]) -> &'static str {
+    let any_running = processes.iter().any(|p| p.status.starts_with("running"));
+    let any_failed = processes
+        .iter()
+        .any(|p| p.status.starts_with("crashed") || p.status.starts_with("failed"));
+    match (any_running, any_failed) {
+        (true, true) => "degraded",
+        (false, true) => "err",
+        (true, false) => "on",
+        (false, false) => "off",
+    }
 }
 
 fn home_dir() -> PathBuf {
@@ -76,10 +91,13 @@ impl Service {
     }
 
     pub fn info(&self) -> ServiceInfo {
+        let processes = self.parse_status();
+        let state = aggregate_state(&processes).to_string();
         ServiceInfo {
             name: self.name.clone(),
             dir: self.dir.display().to_string(),
-            running: self.is_running(),
+            running: processes.iter().any(|p| p.status.starts_with("running")),
+            state,
         }
     }
 
@@ -122,12 +140,14 @@ impl Service {
     }
 
     pub fn detail(&self) -> ServiceDetail {
-        let running = self.is_running();
-        let processes = if running { self.parse_status() } else { vec![] };
+        let processes = self.parse_status();
+        let running = processes.iter().any(|p| p.status.starts_with("running"));
+        let state = aggregate_state(&processes).to_string();
         ServiceDetail {
             name: self.name.clone(),
             dir: self.dir.display().to_string(),
             running,
+            state,
             processes,
         }
     }
