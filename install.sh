@@ -4,6 +4,8 @@ set -eu
 repo="mrgnw/kagaya"
 bin="ky"
 install_dir="${INSTALL_DIR:-${HOME}/.local/bin}"
+install_base_url_default="https://ky.xcc.es"
+base_url="${INSTALL_BASE_URL:-${install_base_url_default}}"
 
 detect_target() {
 	os=$(uname -s)
@@ -30,38 +32,33 @@ detect_target() {
 	echo "${arch_part}-${os_part}"
 }
 
-latest_tag() {
-	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
-	elif command -v wget >/dev/null 2>&1; then
-		wget -qO- "https://api.github.com/repos/${repo}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
-	else
-		echo "curl or wget required" >&2
-		exit 1
-	fi
-}
-
 download() {
 	url="$1"
 	dest="$2"
 	if command -v curl >/dev/null 2>&1; then
 		curl -fsSL -o "${dest}" "${url}"
-	else
+	elif command -v wget >/dev/null 2>&1; then
 		wget -qO "${dest}" "${url}"
+	else
+		echo "curl or wget required" >&2
+		return 1
 	fi
 }
 
 target=$(detect_target)
-tag=$(latest_tag)
-archive="${bin}-${tag}-${target}.tar.gz"
-url="https://github.com/${repo}/releases/download/${tag}/${archive}"
+archive="${bin}-${target}.tar.gz"
+hosted_url="${base_url%/}/releases/latest/${archive}"
+github_url="https://github.com/${repo}/releases/latest/download/${archive}"
 
-echo "installing ${bin} ${tag} (${target})"
+echo "installing ${bin} (${target})"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "${tmpdir}"' EXIT
 
-download "${url}" "${tmpdir}/${archive}"
+if ! download "${hosted_url}" "${tmpdir}/${archive}"; then
+	echo "hosted binary unavailable, falling back to GitHub release"
+	download "${github_url}" "${tmpdir}/${archive}"
+fi
 tar -xzf "${tmpdir}/${archive}" -C "${tmpdir}"
 
 mkdir -p "${install_dir}"
@@ -76,8 +73,10 @@ completion_dir="${HOME}/.local/share/kagaya/completions"
 mkdir -p "${completion_dir}"
 
 for shell in bash zsh fish; do
-	completion_url="https://raw.githubusercontent.com/${repo}/${tag}/completions/ky.${shell}"
-	download "${completion_url}" "${completion_dir}/ky.${shell}" 2>/dev/null || true
+	hosted_completion_url="${base_url%/}/releases/latest/completions/ky.${shell}"
+	github_completion_url="https://raw.githubusercontent.com/${repo}/latest/completions/ky.${shell}"
+	download "${hosted_completion_url}" "${completion_dir}/ky.${shell}" 2>/dev/null || \
+		download "${github_completion_url}" "${completion_dir}/ky.${shell}" 2>/dev/null || true
 done
 
 if [ -f "${completion_dir}/ky.bash" ]; then

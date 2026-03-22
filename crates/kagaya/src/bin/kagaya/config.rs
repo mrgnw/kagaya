@@ -24,6 +24,10 @@ pub struct DaemonConfig {
     pub idle_timeout: u64,
     #[allow(dead_code)]
     pub log_dir: Option<String>,
+    #[allow(dead_code)]
+    pub public_base_url: Option<String>,
+    #[allow(dead_code)]
+    pub release_dir: Option<String>,
     #[serde(default = "default_port")]
     #[cfg_attr(feature = "dev", allow(dead_code))]
     pub port: u16,
@@ -34,6 +38,8 @@ impl Default for DaemonConfig {
         Self {
             idle_timeout: default_idle_timeout(),
             log_dir: None,
+            public_base_url: None,
+            release_dir: None,
             port: default_port(),
         }
     }

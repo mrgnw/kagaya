@@ -53,9 +53,19 @@ dist +targets: build-ui
 		esac
 		archive="${bin}-{{tag}}-${target}.tar.gz"
 		tar -czf "${dist}/${archive}" -C "target/${target}/release" "${bin}"
+		cp "${dist}/${archive}" "${dist}/${bin}-${target}.tar.gz"
 		echo "  -> ${dist}/${archive}"
+		echo "  -> ${dist}/${bin}-${target}.tar.gz"
 		echo
 	done
+	mkdir -p "${dist}/latest/completions"
+	for target in {{targets}}; do
+		cp "${dist}/${bin}-${target}.tar.gz" "${dist}/latest/${bin}-${target}.tar.gz"
+	done
+	cp install.sh "${dist}/latest/install.sh"
+	cp completions/ky.bash "${dist}/latest/completions/ky.bash"
+	cp completions/ky.zsh "${dist}/latest/completions/ky.zsh"
+	cp completions/ky.fish "${dist}/latest/completions/ky.fish"
 	echo "all builds complete"
 	echo
 	ls -lh "${dist}/"

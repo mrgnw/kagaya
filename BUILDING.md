@@ -14,7 +14,7 @@ flowchart TD
 
     subgraph "Release pipeline"
         build-ui["just build-ui<br/><i>pnpm install + build</i>"]
-        dist["just dist<br/><i>cross-compile 4 targets → dist/*.tar.gz</i>"]
+        dist["just dist<br/><i>cross-compile 4 targets → dist/ + latest assets</i>"]
         release["just release<br/><i>gh release create</i>"]
     end
 
@@ -38,7 +38,7 @@ You probably don't need to run these directly — `just release` chains them aut
 | `just build-ui` | `pnpm install && pnpm build` in `ui/` |
 | `just build-release` | `cargo build --workspace --release` (native target only) |
 | `just build-all` | `build-ui` + `build-release` (native target only) |
-| `just dist` | `build-ui` + cross-compile all 4 targets, package into `dist/` |
+| `just dist` | `build-ui` + cross-compile all 4 targets, package into `dist/` and `dist/latest/` |
 
 ### Release flow
 
@@ -63,7 +63,7 @@ sequenceDiagram
         end
     end
 
-    J->>J: tar archives → dist/
+    J->>J: tar archives + latest aliases → dist/
     J->>Dev: confirm? [y/N]
     Dev->>J: y
     J->>GH: gh release create vX.Y.Z dist/*.tar.gz
@@ -79,3 +79,16 @@ sequenceDiagram
 | `x86_64-apple-darwin` | cargo |
 | `aarch64-unknown-linux-musl` | cargo-zigbuild |
 | `x86_64-unknown-linux-musl` | cargo-zigbuild |
+
+## Latest install assets
+
+`just dist` now also prepares stable latest-only assets for hosted installs:
+
+- `dist/latest/ky-aarch64-apple-darwin.tar.gz`
+- `dist/latest/ky-x86_64-apple-darwin.tar.gz`
+- `dist/latest/ky-aarch64-unknown-linux-musl.tar.gz`
+- `dist/latest/ky-x86_64-unknown-linux-musl.tar.gz`
+- `dist/latest/completions/ky.{bash,zsh,fish}`
+- `dist/latest/install.sh`
+
+This matches the installer flow: host latest assets first, then fall back to GitHub `releases/latest/download/...`.

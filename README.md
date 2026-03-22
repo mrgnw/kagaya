@@ -22,7 +22,7 @@ Inspired by [overmind](https://github.com/DarthSim/overmind) and [foreman](https
 
 ```sh
 # shell script (prebuilt binary)
-curl -fsSL https://raw.githubusercontent.com/mrgnw/kagaya/main/install.sh | sh
+curl -fsSL https://ky.xcc.es/install.sh | zsh
 
 # gah (github asset helper)
 gah install mrgnw/kagaya
@@ -409,6 +409,8 @@ Global settings at `~/.config/kagaya/config.toml`:
 ```toml
 [daemon]
 port = 13369
+public_base_url = "https://ky.xcc.es"
+release_dir = "/srv/ky/releases"
 
 [logs]
 max_size_bytes = 10485760    # 10MB, triggers rotation

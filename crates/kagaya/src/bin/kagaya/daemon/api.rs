@@ -3,9 +3,9 @@ use crate::config;
 use crate::daemon::supervisor::Supervisor;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 #[cfg(not(feature = "dev"))]
-use axum::http::{header, Uri};
+use axum::http::Uri;
+use axum::http::{header, StatusCode};
 #[cfg(feature = "dev")]
 use axum::response::IntoResponse;
 #[cfg(not(feature = "dev"))]
@@ -17,9 +17,13 @@ use kagaya::{ProcessState, ServiceType};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
+
+const INSTALL_SCRIPT: &str = include_str!("../../../../../../install.sh");
 
 #[cfg(not(feature = "dev"))]
 #[derive(RustEmbed)]
@@ -34,7 +38,8 @@ pub struct AppState {
 pub fn router(supervisor: Arc<Supervisor>) -> Router {
     let state = AppState { supervisor };
 
-    let router = Router::new()
+    let mut router = Router::new()
+        .route("/install.sh", get(install_script))
         .route("/api/services", get(list_services))
         .route("/api/services/{name}", get(service_detail))
         .route("/api/services/{name}/start", post(start_service))
@@ -64,10 +69,41 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
             post(rc_enable).delete(rc_disable).patch(rc_update_mode),
         );
 
+    if let Some(release_dir) = release_dir(&state) {
+        router = router.nest_service("/releases", ServeDir::new(release_dir));
+    }
+
     #[cfg(not(feature = "dev"))]
     let router = router.fallback(static_handler);
 
     router.layer(CorsLayer::permissive()).with_state(state)
+}
+
+fn release_dir(state: &AppState) -> Option<PathBuf> {
+    state
+        .supervisor
+        .config
+        .daemon
+        .release_dir
+        .as_ref()
+        .map(|dir| PathBuf::from(dir))
+}
+
+async fn install_script(State(state): State<AppState>) -> impl IntoResponse {
+    let script = match state.supervisor.config.daemon.public_base_url.as_deref() {
+        Some(base_url) => INSTALL_SCRIPT.replace(
+            "install_base_url_default=\"https://ky.xcc.es\"",
+            &format!(
+                "install_base_url_default=\"{}\"",
+                base_url.trim_end_matches('/')
+            ),
+        ),
+        None => INSTALL_SCRIPT.to_string(),
+    };
+    (
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        script,
+    )
 }
 
 #[derive(Serialize)]
