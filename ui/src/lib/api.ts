@@ -115,6 +115,11 @@ export interface TmuxPane {
   pid: number;
 }
 
+export async function getVersion(): Promise<string> {
+  const res = await httpGet<{ version: string }>("/api/version");
+  return res.version;
+}
+
 export async function getServices(): Promise<ServiceInfo[]> {
   if (isTauri()) return tauriInvoke("get_services");
   return httpGet("/api/services");

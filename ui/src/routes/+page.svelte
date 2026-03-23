@@ -4,6 +4,7 @@
 	import {
 		getServices,
 		getAutostartStatus,
+		getVersion,
 		startService,
 		stopService,
 		reloadService,
@@ -25,6 +26,7 @@
 	let refreshTimer: ReturnType<typeof setInterval>;
 	let selectedNames = new SvelteSet<string>();
 	let bulkLoading = $state(false);
+	let version = $state("");
 	let headerCheckbox = $state<HTMLInputElement | null>(null);
 
 	let hasSelection = $derived(selectedNames.size > 0);
@@ -138,6 +140,7 @@
 
 	onMount(() => {
 		refresh();
+		getVersion().then((v) => (version = v)).catch(() => {});
 		refreshTimer = setInterval(refresh, 5000);
 		return () => clearInterval(refreshTimer);
 	});
@@ -208,7 +211,7 @@
 		<header class="panel-header">
 			<div class="header-left">
 				<img src={logoSvg} alt="" class="logo" />
-				<span class="brand-name">kagaya</span>
+				<span class="brand-name">kagaya{#if version} <span class="version">{version}</span>{/if}</span>
 				<div class="stats" aria-label="Project status">
 					{#each stateOrder as state (state)}
 						{#if stateCounts[state] > 0}
@@ -373,6 +376,13 @@
 		font-weight: 700;
 		color: #555;
 		letter-spacing: 0.02em;
+	}
+
+	.version {
+		font-size: 0.65em;
+		font-weight: 400;
+		color: #444;
+		font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
 	}
 
 	.stats {

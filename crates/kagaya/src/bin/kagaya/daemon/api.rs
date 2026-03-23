@@ -40,6 +40,7 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
 
     let mut router = Router::new()
         .route("/install.sh", get(install_script))
+        .route("/api/version", get(api_version))
         .route("/api/services", get(list_services))
         .route("/api/services/{name}", get(service_detail))
         .route("/api/services/{name}/start", post(start_service))
@@ -87,6 +88,10 @@ fn release_dir(state: &AppState) -> Option<PathBuf> {
         .release_dir
         .as_ref()
         .map(|dir| PathBuf::from(dir))
+}
+
+async fn api_version() -> Json<serde_json::Value> {
+	Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn install_script(State(state): State<AppState>) -> impl IntoResponse {
