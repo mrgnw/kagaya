@@ -206,49 +206,38 @@
 
 	<div class="panel">
 		<header class="panel-header">
-			<div class="brand">
+			<div class="header-left">
 				<img src={logoSvg} alt="" class="logo" />
 				<span class="brand-name">kagaya</span>
+				<div class="stats" aria-label="Project status">
+					{#each stateOrder as state (state)}
+						{#if stateCounts[state] > 0}
+							<span class="stat">
+								<StatusIcon status={state} size="0.55em" />
+								<span class="stat-num">{stateCounts[state]}</span>
+								<span class="stat-label">{state}</span>
+							</span>
+						{/if}
+					{/each}
+				</div>
 			</div>
-			<div class="stats" aria-label="Project status">
-				{#each stateOrder as state (state)}
-					{#if stateCounts[state] > 0}
-						<span class="stat">
-							<StatusIcon status={state} size="0.6em" />
-							<span class="stat-num">{stateCounts[state]}</span>
-							<span class="stat-label">{state}</span>
-						</span>
-					{/if}
-				{/each}
+			<div class="header-links">
 				{#if autostartStatus?.installed}
-					<a href="/settings" class="stat autostart-stat" title="autostart settings">
-						<svg class="autostart-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+					<a href="/settings" class="header-link" title="autostart settings">
+						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
 							<path d="M8 2v4" /><path d="M5.2 4.2A5 5 0 1 0 10.8 4.2" />
 						</svg>
-						<span class="stat-label">autostart</span>
 					</a>
 				{/if}
-				<a href="/remote-control" class="stat autostart-stat" title="remote control">
-					<svg class="autostart-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+				<a href="/remote-control" class="header-link" title="remote control">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
 						<path d="M8 12v2" /><path d="M4.5 9.5a5 5 0 0 1 7 0" /><path d="M2 7a8 8 0 0 1 12 0" /><circle cx="8" cy="12" r="0.5" fill="currentColor" />
 					</svg>
-					<span class="stat-label">remote</span>
 				</a>
 			</div>
 		</header>
 
 		<div class="toolbar">
-			<label class="select-all">
-				<input
-					type="checkbox"
-					bind:this={headerCheckbox}
-					checked={allSelected}
-					onclick={headerCheckClicked}
-				/>
-				{#if hasSelection}
-					<span class="selection-count">{selectedNames.size} selected</span>
-				{/if}
-			</label>
 			<div class="toolbar-actions">
 				<button
 					class="toolbar-btn start"
@@ -301,6 +290,17 @@
 					</button>
 				{/if}
 			</div>
+			<label class="select-all">
+				<input
+					type="checkbox"
+					bind:this={headerCheckbox}
+					checked={allSelected}
+					onclick={headerCheckClicked}
+				/>
+				{#if hasSelection}
+					<span class="selection-count">{selectedNames.size} selected</span>
+				{/if}
+			</label>
 		</div>
 
 		<div class="service-list">
@@ -326,25 +326,20 @@
 </div>
 
 <style>
-	/*
-	 * Fluid scale:  at 400px vw → 14px base,  at 2400px+ vw → 32px base
-	 * Everything uses em so it all scales together.
-	 */
 	.page {
-		--base: clamp(14px, 0.4rem + 1.1vw, 32px);
+		--base: clamp(14px, 0.4rem + 0.8vw, 24px);
 		font-size: var(--base);
-
-		height: 100vh;
+		height: 100dvh;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		padding: 1.5em 1em;
+		padding: 0.5em;
 		overflow-y: auto;
 	}
 
 	.panel {
 		width: 100%;
-		max-width: 42em;
+		max-width: 40em;
 		display: flex;
 		flex-direction: column;
 	}
@@ -353,72 +348,45 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0 0.6em 1em;
-		gap: 1em;
-		flex-wrap: wrap;
+		padding: 0.4em 0.4em 0.6em;
+		gap: 0.5em;
 	}
 
-	.brand {
+	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 0.6em;
+		gap: 0.5em;
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 
 	.logo {
-		width: 1.8em;
-		height: 1.8em;
-		opacity: 0.45;
+		width: 1.4em;
+		height: 1.4em;
+		opacity: 0.4;
 		filter: brightness(0) invert(1);
+		flex-shrink: 0;
 	}
 
 	.brand-name {
-		font-size: 1.3em;
+		font-size: 1.1em;
 		font-weight: 700;
 		color: #555;
 		letter-spacing: 0.02em;
 	}
 
-	@media (min-width: 1200px) {
-		.panel-header {
-			flex-direction: column;
-			align-items: center;
-			gap: 0.6em;
-			padding-bottom: 1.4em;
-		}
-
-		.brand {
-			flex-direction: column;
-			align-items: center;
-			gap: 0.3em;
-		}
-
-		.logo {
-			width: 3.5em;
-			height: 3.5em;
-			opacity: 0.5;
-		}
-
-		.brand-name {
-			font-size: 1.5em;
-		}
-
-		.stats {
-			gap: 1.4em;
-		}
-	}
-
 	.stats {
 		display: flex;
 		align-items: center;
-		gap: 1em;
-		flex-wrap: wrap;
+		gap: 0.7em;
 	}
 
 	.stat {
 		display: flex;
 		align-items: center;
-		gap: 0.4em;
+		gap: 0.25em;
 		color: #555;
+		font-size: 0.85em;
 	}
 
 	.stat-num {
@@ -429,51 +397,98 @@
 
 	.stat-label {
 		color: #555;
-		font-size: 0.85em;
 	}
 
-	.autostart-stat {
+	.header-links {
+		display: flex;
+		align-items: center;
+		gap: 0.3em;
+		flex-shrink: 0;
+	}
+
+	.header-link {
+		display: flex;
+		align-items: center;
+		color: #444;
+		padding: 0.3em;
+		border-radius: 0.3em;
 		text-decoration: none;
 		transition: color 0.15s;
 	}
 
-	.autostart-stat:hover {
+	.header-link:hover {
 		color: #888;
 	}
 
-	.autostart-stat:hover .stat-label {
-		color: #888;
-	}
-
-	.autostart-icon {
-		width: 0.85em;
-		height: 0.85em;
-		color: #555;
+	.header-link svg {
+		width: 1em;
+		height: 1em;
 	}
 
 	.toolbar {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		padding: 0.5em 0.6em;
+		padding: 0.3em 0.4em;
 		border-bottom: 1px solid #1e1e32;
 		gap: 0.5em;
-		flex-wrap: wrap;
+	}
+
+	.toolbar-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.25em;
+	}
+
+	.toolbar-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3em;
+		border: none;
+		background: #1a1a2e;
+		color: #666;
+		cursor: pointer;
+		padding: 0.3em 0.6em;
+		border-radius: 0.35em;
+		font-size: 0.8em;
+		font-weight: 500;
+		transition: all 0.15s;
+	}
+
+	.toolbar-btn svg {
+		width: 1.2em;
+		height: 1.2em;
+		flex-shrink: 0;
+	}
+
+	.toolbar-btn:hover {
+		background: #252540;
+		color: #bbb;
+	}
+	.toolbar-btn.start:hover { color: #55cc55; }
+	.toolbar-btn.stop:hover { color: #dd6666; }
+	.toolbar-btn.reload:hover { color: #7777cc; }
+	.toolbar-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+	.toolbar-btn.hidden { display: none; }
+
+	@media (max-width: 400px) {
+		.toolbar-btn-label { display: none; }
+		.toolbar-btn { padding: 0.35em; }
 	}
 
 	.select-all {
 		display: flex;
 		align-items: center;
-		gap: 0.5em;
+		gap: 0.4em;
 		cursor: pointer;
-		font-size: 0.85em;
+		font-size: 0.8em;
 		color: #666;
 		user-select: none;
+		margin-left: auto;
 	}
 
 	.select-all input {
-		width: 1.1em;
-		height: 1.1em;
+		width: 1em;
+		height: 1em;
 		accent-color: #6366f1;
 		cursor: pointer;
 		margin: 0;
@@ -484,63 +499,6 @@
 		font-weight: 500;
 	}
 
-	.toolbar-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.35em;
-	}
-
-	.toolbar-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4em;
-		border: none;
-		background: #1a1a2e;
-		color: #666;
-		cursor: pointer;
-		padding: 0.35em 0.75em;
-		border-radius: 0.4em;
-		font-size: 0.85em;
-		font-weight: 500;
-		transition: all 0.15s;
-	}
-
-	.toolbar-btn svg {
-		width: 1.4em;
-		height: 1.4em;
-		flex-shrink: 0;
-	}
-
-	.toolbar-btn:hover {
-		background: #252540;
-		color: #bbb;
-	}
-	.toolbar-btn.start:hover {
-		color: #55cc55;
-	}
-	.toolbar-btn.stop:hover {
-		color: #dd6666;
-	}
-	.toolbar-btn.reload:hover {
-		color: #7777cc;
-	}
-	.toolbar-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-	.toolbar-btn.hidden {
-		display: none;
-	}
-
-	@media (max-width: 400px) {
-		.toolbar-btn-label {
-			display: none;
-		}
-		.toolbar-btn {
-			padding: 0.4em;
-		}
-	}
-
 	.service-list {
 		display: flex;
 		flex-direction: column;
@@ -548,26 +506,26 @@
 
 	.error-wrap {
 		width: 100%;
-		max-width: 42em;
-		margin-bottom: 1em;
+		max-width: 40em;
+		margin-bottom: 0.5em;
 	}
 
 	.error {
 		background: #2a1010;
 		border: 1px solid #442222;
-		border-radius: 0.5em;
-		padding: 0.8em 1em;
+		border-radius: 0.4em;
+		padding: 0.6em 0.8em;
 		color: #cc6666;
 	}
 
 	.error p {
-		margin: 0.3em 0 0;
+		margin: 0.2em 0 0;
 		font-size: 0.85em;
 		color: #777;
 	}
 
 	.empty {
-		padding: 3em 0;
+		padding: 2em 0;
 		text-align: center;
 	}
 
@@ -577,7 +535,7 @@
 	}
 
 	.empty-hint {
-		margin-top: 0.5em !important;
+		margin-top: 0.4em !important;
 		font-size: 0.9em !important;
 		color: #444 !important;
 	}

@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from "$app/navigation";
 	import { SvelteSet } from "svelte/reactivity";
 	import type { ServiceInfo } from "$lib/api";
 	import {
@@ -121,47 +120,6 @@
 		class:stopped={aggregateState === "off"}
 		onclick={toggleExpand}
 	>
-		<span class="left">
-			{#if onSelect}
-				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-				<label
-					class="check-wrap"
-					onclick={(e: MouseEvent) => e.stopPropagation()}
-				>
-					<input
-						type="checkbox"
-						checked={selected}
-						onchange={(e) =>
-							onSelect?.(
-								service.name,
-								(e.target as HTMLInputElement).checked,
-							)}
-					/>
-				</label>
-			{:else}
-				<StatusIcon
-					status={aggregateState}
-					{loading}
-					size="0.7em"
-				/>
-			{/if}
-			<span class="name">{service.name}</span>
-			{#if service.autostart}
-				<span class="autostart-badge" title="starts on login">
-					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-						<path d="M8 2v4" /><path d="M5.2 4.2A5 5 0 1 0 10.8 4.2" />
-					</svg>
-				</span>
-			{/if}
-			{#if service.running}
-				<span class="chevron" class:open={expanded}>
-					<svg viewBox="0 0 16 16" fill="currentColor"
-						><path d="M6 4l4 4-4 4z" /></svg
-					>
-				</span>
-			{/if}
-		</span>
-
 		<span class="actions" onclick={(e: MouseEvent) => e.preventDefault()}>
 			<button
 				class="btn"
@@ -210,36 +168,47 @@
 				>
 			</button>
 
-			<button
-				class="btn echo"
-				class:ghost={!service.running}
-				disabled={!service.running}
-				title="Terminal"
-				onclick={(e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					goto(`/service/${service.name}`);
-				}}
-			>
-				<svg
-					viewBox="0 0 16 16"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.5"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					><polyline points="4 6 2 8 4 10" /><polyline
-						points="12 6 14 8 12 10"
-					/><rect
-						x="1"
-						y="2"
-						width="14"
-						height="12"
-						rx="2"
-						fill="none"
-					/></svg
+		</span>
+
+		<span class="right">
+			{#if onSelect}
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<label
+					class="check-wrap"
+					onclick={(e: MouseEvent) => e.stopPropagation()}
 				>
-			</button>
+					<input
+						type="checkbox"
+						checked={selected}
+						onchange={(e) =>
+							onSelect?.(
+								service.name,
+								(e.target as HTMLInputElement).checked,
+							)}
+					/>
+				</label>
+			{:else}
+				<StatusIcon
+					status={aggregateState}
+					{loading}
+					size="0.6em"
+				/>
+			{/if}
+			<span class="name">{service.name}</span>
+			{#if service.autostart}
+				<span class="autostart-badge" title="starts on login">
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+						<path d="M8 2v4" /><path d="M5.2 4.2A5 5 0 1 0 10.8 4.2" />
+					</svg>
+				</span>
+			{/if}
+			{#if service.running}
+				<span class="chevron" class:open={expanded}>
+					<svg viewBox="0 0 16 16" fill="currentColor"
+						><path d="M6 4l4 4-4 4z" /></svg
+					>
+				</span>
+			{/if}
 		</span>
 	</a>
 
@@ -357,8 +326,8 @@
 	.row {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		padding: 1em 0.6em;
+		gap: 0.3em;
+		padding: 0.4em;
 		text-decoration: none;
 		transition: background 0.1s;
 	}
@@ -371,11 +340,12 @@
 		background: #1e1e4033;
 	}
 
-	.left {
+	.right {
 		display: flex;
 		align-items: center;
-		gap: 0.6em;
+		gap: 0.5em;
 		min-width: 0;
+		flex: 1;
 	}
 
 	.check-wrap {
@@ -395,7 +365,7 @@
 	}
 
 	.name {
-		font-size: 1.25em;
+		font-size: 1em;
 		font-weight: 600;
 		color: #ccc;
 		white-space: nowrap;
@@ -440,18 +410,16 @@
 		color: #666;
 	}
 
-	/* -- Actions: fixed 3-slot grid -- */
 	.actions {
 		display: grid;
-		grid-template-columns: 2.8em 2.8em 2.8em;
-		gap: 0.2em;
+		grid-template-columns: 2em 2em;
+		gap: 0.1em;
 		flex-shrink: 0;
-		margin-left: 1em;
 	}
 
 	.btn {
-		width: 2.8em;
-		height: 2.8em;
+		width: 2em;
+		height: 2em;
 		border: none;
 		background: none;
 		color: #444;
@@ -460,13 +428,13 @@
 		align-items: center;
 		justify-content: center;
 		padding: 0;
-		border-radius: 0.5em;
+		border-radius: 0.4em;
 		transition: all 0.12s;
 	}
 
 	.btn svg {
-		width: 1.8em;
-		height: 1.8em;
+		width: 1.3em;
+		height: 1.3em;
 	}
 
 	.btn:hover {
@@ -481,9 +449,6 @@
 	}
 	.btn.reload:hover {
 		color: #7777cc;
-	}
-	.btn.echo:hover {
-		color: #66aa88;
 	}
 	.btn:disabled {
 		opacity: 0.2;
