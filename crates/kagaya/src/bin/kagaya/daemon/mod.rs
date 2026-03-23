@@ -35,9 +35,6 @@ pub async fn run(args: &[String]) {
 
     let global_config = config::load_global_config();
 
-    #[cfg(feature = "dev")]
-    let port = port_override.unwrap_or(13370);
-    #[cfg(not(feature = "dev"))]
     let port = port_override.unwrap_or(global_config.daemon.port);
 
     let http_port = if enable_http { Some(port) } else { None };
@@ -110,18 +107,19 @@ pub async fn run(args: &[String]) {
         None
     };
 
-    #[cfg(feature = "dev")]
-    {
-        let ui_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui");
-        tracing::info!("spawning vite dev server in {}", ui_dir.display());
-        tokio::spawn(async move {
-            let mut child = tokio::process::Command::new("pnpm")
-                .args(["dev"])
-                .current_dir(&ui_dir)
-                .spawn()
-                .expect("failed to start vite dev server");
-            child.wait().await.ok();
-        });
+    if enable_http {
+        let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+        if ui_dir.join("package.json").exists() {
+            tracing::info!("spawning vite dev server in {}", ui_dir.display());
+            tokio::spawn(async move {
+                let mut child = tokio::process::Command::new("pnpm")
+                    .args(["dev"])
+                    .current_dir(&ui_dir)
+                    .spawn()
+                    .expect("failed to start vite dev server");
+                child.wait().await.ok();
+            });
+        }
     }
 
     tracing::info!("daemon started (pid {})", std::process::id());

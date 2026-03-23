@@ -252,7 +252,10 @@ pub enum ServeAction {
     Stop,
     /// Show server status
     Status,
-    /// Run as background daemon
+    /// Run as background daemon (default)
     #[command(visible_alias = "-d")]
     Daemon,
+    /// Run in foreground (blocks terminal)
+    #[command(visible_alias = "-f")]
+    Foreground,
 }
