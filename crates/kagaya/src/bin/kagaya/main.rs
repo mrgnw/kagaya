@@ -3170,8 +3170,15 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
     let mut prev_states: PrevStates = PrevStates::new();
     let mut satisfied_since: Option<Instant> = None;
 
-    let (initial_lines, _) = build_status_lines(args);
-    let height = (initial_lines.len() as u16).max(1);
+    let (mut initial_lines, initial_data) = build_status_lines(args);
+    let failed = failed_processes(&initial_data);
+    if !failed.is_empty() {
+        initial_lines.push(RLine::from(""));
+        for (svc, proc) in &failed {
+            initial_lines.extend(tail_log_lines_spans(svc, proc, 10));
+        }
+    }
+    let viewport_height = (initial_lines.len() as u16).max(1);
 
     println!();
     terminal::enable_raw_mode().unwrap();
@@ -3179,7 +3186,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
     let mut term = Terminal::with_options(
         backend,
         TerminalOptions {
-            viewport: Viewport::Inline(height),
+            viewport: Viewport::Inline(viewport_height),
         },
     )
     .unwrap();
@@ -3202,16 +3209,11 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
             }
         }
 
-        let line_count = lines.len() as u16;
-        if line_count != term.size().unwrap().height {
-            term.resize(ratatui::layout::Rect::new(
-                0,
-                0,
-                term.size().unwrap().width,
-                line_count.max(1),
-            ))
-            .unwrap();
+        lines.truncate(viewport_height as usize);
+        while (lines.len() as u16) < viewport_height {
+            lines.push(RLine::from(""));
         }
+
         term.draw(|frame| {
             let text = ratatui::text::Text::from(lines);
             frame.render_widget(Paragraph::new(text), frame.area());
