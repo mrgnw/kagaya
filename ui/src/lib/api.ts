@@ -82,6 +82,7 @@ export interface ServiceInfo {
   running: boolean;
   state: "on" | "degraded" | "err" | "off";
   autostart: boolean;
+  error_tail?: string[];
 }
 
 export interface AutostartStatus {

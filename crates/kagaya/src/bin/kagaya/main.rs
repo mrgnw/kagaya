@@ -1395,17 +1395,21 @@ fn find_log_files(service: &str, process: &Option<String>) -> Vec<PathBuf> {
 }
 
 fn tail_log_lines(service: &str, process: &Option<String>, n: usize) {
+    for line in tail_log_lines_string(service, process, n) {
+        println!("{}", line);
+    }
+}
+
+fn tail_log_lines_string(service: &str, process: &Option<String>, n: usize) -> Vec<String> {
     let files = find_log_files(service, process);
     if files.is_empty() {
-        return;
+        return Vec::new();
     }
     let latest = files.last().unwrap();
     let content = std::fs::read_to_string(latest).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
     let start = if lines.len() > n { lines.len() - n } else { 0 };
-    for line in &lines[start..] {
-        println!("{}", line);
-    }
+    lines[start..].iter().map(|l| l.to_string()).collect()
 }
 
 fn cmd_logs(args: &[String]) {
@@ -2276,6 +2280,14 @@ fn render_condensed_status(args: &[String]) -> usize {
         }
         println!("{}", line.trim_end());
         lines += 1;
+
+        if matches!(agg, AggregateState::Err | AggregateState::Degraded) {
+            let tail = tail_log_lines_string(name, &None, 3);
+            for tl in tail {
+                println!("  {}", tl.dimmed());
+                lines += 1;
+            }
+        }
     }
 
     if data.show_extras {

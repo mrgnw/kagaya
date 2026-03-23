@@ -36,6 +36,7 @@
 	let someSelected = $derived(hasSelection && !allSelected);
 	let runningCount = $derived(services.filter((s) => s.running).length);
 	let stoppedCount = $derived(services.filter((s) => !s.running).length);
+	let stoppedAutostartCount = $derived(services.filter((s) => !s.running && s.autostart).length);
 	let stateCounts = $derived.by(() => {
 		let counts: Record<AggregateState, number> = {
 			on: 0,
@@ -120,7 +121,7 @@
 		bulkLoading = true;
 		const targets =
 			action === "start"
-				? services.filter((s) => !s.running)
+				? services.filter((s) => !s.running && s.autostart)
 				: services.filter((s) => s.running);
 		try {
 			await Promise.allSettled(
@@ -246,16 +247,16 @@
 					class="toolbar-btn start"
 					class:hidden={hasSelection
 						? selectedStopped === 0
-						: stoppedCount === 0}
+						: stoppedAutostartCount === 0}
 					onclick={() =>
 						hasSelection ? bulkAction("start") : actionAll("start")}
 					disabled={bulkLoading}
 					title={hasSelection
 						? "Start selected (s)"
-						: "Start all (s)"}
+						: "Start autostart (s)"}
 				>
 					<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5z" /></svg>
-					<span class="toolbar-btn-label">{hasSelection ? "Start" : "Start all"}</span>
+					<span class="toolbar-btn-label">{hasSelection ? "Start" : "Start autostart"}</span>
 				</button>
 				<button
 					class="toolbar-btn stop"

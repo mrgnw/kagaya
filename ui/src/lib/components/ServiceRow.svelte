@@ -212,6 +212,14 @@
 		</span>
 	</a>
 
+	{#if service.error_tail?.length}
+		<div class="error-tail">
+			{#each service.error_tail as line}
+				<div class="error-line">{line}</div>
+			{/each}
+		</div>
+	{/if}
+
 	{#if expanded && service.running}
 		<div class="sub-processes">
 			{#if detailLoading && !detailLoaded}
@@ -461,6 +469,19 @@
 	.btn.ghost {
 		opacity: 0;
 		pointer-events: none;
+	}
+
+	.error-tail {
+		padding: 0 0.5em 0.5em 4.5em;
+		font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
+		font-size: 0.75em;
+		line-height: 1.4;
+	}
+
+	.error-line {
+		color: #aa5555;
+		white-space: pre-wrap;
+		word-break: break-all;
 	}
 
 	/* -- Sub-processes -- */

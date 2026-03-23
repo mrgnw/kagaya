@@ -118,6 +118,8 @@ struct ServiceInfo {
     running: bool,
     state: String,
     autostart: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_tail: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +140,8 @@ struct ProcessInfo {
     #[serde(rename = "type")]
     service_type: String,
     ports: Vec<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_tail: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -150,22 +154,51 @@ struct ErrorResponse {
     error: String,
 }
 
+async fn snapshot_error_tail(
+    supervisor: &Supervisor,
+    service: &str,
+    max_lines: usize,
+) -> Option<Vec<String>> {
+    let outputs = supervisor.get_all_outputs(service).await.ok()?;
+    let mut lines = Vec::new();
+    for (_proc_name, capture) in outputs {
+        let snapshot = capture.snapshot().await;
+        let text = String::from_utf8_lossy(&snapshot);
+        for line in text.lines().rev().take(max_lines) {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                lines.push(trimmed.to_string());
+            }
+        }
+    }
+    lines.reverse();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    if lines.is_empty() { None } else { Some(lines) }
+}
+
 async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> {
     let statuses = state.supervisor.status().await;
     let entries = config::load_service_entries();
-    let services = statuses
-        .iter()
-        .map(|s| {
-            let autostart = entries.get(&s.name).map(|e| e.autostart).unwrap_or(false);
-            ServiceInfo {
-                name: s.name.clone(),
-                dir: s.dir.to_string_lossy().to_string(),
-                running: s.is_running(),
-                state: s.aggregate_state().as_str().to_string(),
-                autostart,
-            }
-        })
-        .collect();
+    let mut services = Vec::new();
+    for s in &statuses {
+        let autostart = entries.get(&s.name).map(|e| e.autostart).unwrap_or(false);
+        let agg = s.aggregate_state();
+        let error_tail = if matches!(agg, kagaya::ServiceState::Err | kagaya::ServiceState::Degraded) {
+            snapshot_error_tail(&state.supervisor, &s.name, 5).await
+        } else {
+            None
+        };
+        services.push(ServiceInfo {
+            name: s.name.clone(),
+            dir: s.dir.to_string_lossy().to_string(),
+            running: s.is_running(),
+            state: agg.as_str().to_string(),
+            autostart,
+            error_tail,
+        });
+    }
     Json(services)
 }
 
@@ -214,6 +247,7 @@ async fn service_detail(
                     ServiceType::Service => "service".to_string(),
                 },
                 ports: p.ports,
+                error_tail: None,
             }
         })
         .collect();
