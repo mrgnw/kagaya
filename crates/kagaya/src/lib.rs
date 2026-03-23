@@ -40,11 +40,14 @@
 //! # }
 //! ```
 
-pub mod types;
 pub mod logs;
 pub mod output;
 pub mod supervisor;
+pub mod types;
 
-pub use types::*;
 pub use output::OutputCapture;
-pub use supervisor::{Supervisor, SupervisorConfig, ManagedService, ManagedProcess, kill_process_tree, kill_port_holders, toposort_processes};
+pub use supervisor::{
+    kill_port_holders, kill_process_tree, toposort_processes, ManagedProcess, ManagedService,
+    Supervisor, SupervisorConfig,
+};
+pub use types::*;
