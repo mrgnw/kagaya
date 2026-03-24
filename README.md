@@ -2,7 +2,7 @@
   <img src="logo.svg" width="128" height="128" alt="kagaya logo">
 </p>
 
-# kagaya (pre-alpha proof of concept massively under construction)
+# kagaya (pre-alpha, under construction)
 
 A native Rust process supervisor for managing multiple projects. Each project keeps its own `services.toml`, and kagaya orchestrates them all from anywhere with auto-restart, log management, and live monitoring.
 
