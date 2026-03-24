@@ -1,18 +1,8 @@
-> **ubermind has been replaced by [kagaya](https://github.com/mrgnw/kagaya).**
->
-> kagaya is the same tool, rewritten as two composable crates:
-> - **muzan** — daemon lifecycle (socket IPC, PID management, auto-start)
-> - **kagaya** — process supervisor + CLI (binary: `ky`)
->
-> Install: `cargo install kagaya`
-
----
-
 <p align="center">
   <img src="logo.svg" width="128" height="128" alt="kagaya logo">
 </p>
 
-# kagaya
+# kagaya (pre-alpha proof of concept massively under construction)
 
 A native Rust process supervisor for managing multiple projects. Each project keeps its own `services.toml`, and kagaya orchestrates them all from anywhere with auto-restart, log management, and live monitoring.
 
