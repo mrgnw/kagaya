@@ -195,6 +195,8 @@ fn service_status_is_running() {
             ports: vec![],
             ports_expected: vec![],
             state_since: None,
+            cpu_percent: None,
+            memory_bytes: None,
         }],
     };
     assert!(s.is_running());
@@ -211,6 +213,8 @@ fn service_status_is_running() {
             ports: vec![],
             ports_expected: vec![],
             state_since: None,
+            cpu_percent: None,
+            memory_bytes: None,
         }],
     };
     assert!(!s2.is_running());

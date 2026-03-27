@@ -3,11 +3,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{self, GlobalConfig};
 use kagaya::*;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use tokio::sync::Mutex as TokioMutex;
 
 pub struct Supervisor {
     pub inner: Arc<kagaya::Supervisor>,
     pub config: GlobalConfig,
     pub http_port: Option<u16>,
+    sys: TokioMutex<System>,
 }
 
 impl Supervisor {
@@ -21,6 +24,7 @@ impl Supervisor {
             inner,
             config,
             http_port,
+            sys: TokioMutex::new(System::new()),
         })
     }
 
@@ -36,6 +40,18 @@ impl Supervisor {
             })
             .collect();
         let pid_ports = listening_ports_for_pids(&running_pids);
+
+        let refresh_kind = ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory();
+        let mut sys = self.sys.lock().await;
+        let pids: Vec<sysinfo::Pid> = running_pids.iter().map(|&p| sysinfo::Pid::from_u32(p)).collect();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            true,
+            refresh_kind,
+        );
+
         let mut result = Vec::new();
 
         for (name, entry) in &entries {
@@ -60,6 +76,10 @@ impl Supervisor {
                         let ports_expected = mp.def.ports.clone();
                         let elapsed = now_instant.duration_since(mp.state_changed_at).as_secs();
                         let state_since = Some(now_unix.saturating_sub(elapsed));
+                        let (cpu_percent, memory_bytes) = pid
+                            .and_then(|p| sys.process(sysinfo::Pid::from_u32(p)))
+                            .map(|proc| (Some(proc.cpu_usage()), Some(proc.memory())))
+                            .unwrap_or((None, None));
                         ProcessStatus {
                             name: pname.clone(),
                             state: mp.state.clone(),
@@ -69,6 +89,8 @@ impl Supervisor {
                             ports,
                             ports_expected,
                             state_since,
+                            cpu_percent,
+                            memory_bytes,
                         }
                     })
                     .collect();
@@ -91,6 +113,8 @@ impl Supervisor {
                         ports: vec![],
                         ports_expected: p.ports.clone(),
                         state_since: None,
+                        cpu_percent: None,
+                        memory_bytes: None,
                     })
                     .collect();
                 result.push(ServiceStatus {

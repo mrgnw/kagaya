@@ -3501,6 +3501,8 @@ mod tests {
             ports: vec![],
             ports_expected: vec![],
             state_since: None,
+            cpu_percent: None,
+            memory_bytes: None,
         }
     }
 

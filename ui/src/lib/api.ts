@@ -98,6 +98,8 @@ export interface ProcessInfo {
   status: string;
   autostart: boolean;
   ports: number[];
+  cpu_percent?: number;
+  memory_bytes?: number;
 }
 
 export interface ServiceDetail {

@@ -80,6 +80,8 @@ impl Supervisor {
                         ports: vec![],
                         ports_expected: mp.def.ports.clone(),
                         state_since: Some(now_unix.saturating_sub(elapsed)),
+                        cpu_percent: None,
+                        memory_bytes: None,
                     }
                 })
                 .collect();

@@ -107,6 +107,12 @@
 		return m ? m[1] : "";
 	}
 
+	function formatMemory(bytes: number): string {
+		if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`;
+		if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)}M`;
+		return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}G`;
+	}
+
 	let aggregateState = $derived(service.state);
 </script>
 
@@ -247,6 +253,13 @@
 							{/if}
 							{#if proc.ports?.length}
 								<span class="sub-ports">{proc.ports.map(p => `:${p}`).join(', ')}</span>
+							{/if}
+							{#if proc.cpu_percent != null || proc.memory_bytes != null}
+								<span class="sub-metrics">
+									{#if proc.cpu_percent != null}{proc.cpu_percent.toFixed(0)}%{/if}
+									{#if proc.cpu_percent != null && proc.memory_bytes != null} · {/if}
+									{#if proc.memory_bytes != null}{formatMemory(proc.memory_bytes)}{/if}
+								</span>
 							{/if}
 						</span>
 						<span class="sub-actions">
@@ -555,6 +568,12 @@
 		font-size: 0.75em;
 		font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
 		color: #6688aa;
+	}
+
+	.sub-metrics {
+		font-size: 0.7em;
+		font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
+		color: #666;
 	}
 
 	.sub-actions {

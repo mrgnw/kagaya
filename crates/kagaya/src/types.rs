@@ -140,6 +140,10 @@ pub struct ProcessStatus {
     pub ports_expected: Vec<u16>,
     #[serde(default)]
     pub state_since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
 }
 
 #[cfg(test)]
@@ -156,6 +160,8 @@ mod tests {
             ports: vec![],
             ports_expected: vec![],
             state_since: None,
+            cpu_percent: None,
+            memory_bytes: None,
         }
     }
 

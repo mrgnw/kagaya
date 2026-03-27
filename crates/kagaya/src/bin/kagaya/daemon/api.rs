@@ -142,6 +142,10 @@ struct ProcessInfo {
     ports: Vec<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_tail: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -248,6 +252,8 @@ async fn service_detail(
                 },
                 ports: p.ports,
                 error_tail: None,
+                cpu_percent: p.cpu_percent,
+                memory_bytes: p.memory_bytes,
             }
         })
         .collect();
