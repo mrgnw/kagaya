@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-03-28
+
+### Added
+
+- **Process CPU/RAM metrics**: Running processes now report `cpu_percent` and `memory_bytes` via the `sysinfo` crate. Visible in the web UI's expanded process rows as compact `X% · YM` badges, and available in the JSON API.
+
+### Changed
+
+- **HTTP server on by default**: The daemon now starts the web UI HTTP server automatically. Use `--no-http` to disable. `ky serve` is now just an alias for `ky daemon start`.
+- **HTTP bind failure is non-fatal**: If the HTTP port is already in use, the daemon logs a warning and continues operating via the Unix socket instead of exiting.
+
 ## [0.12.0] - 2026-03-17
 
 ### Added
