@@ -1962,9 +1962,9 @@ fn cmd_serve(action: Option<ServeAction>) {
     match action {
         Some(ServeAction::Stop) => cmd_daemon(&["stop".into()]),
         Some(ServeAction::Status) => cmd_serve_status(),
-        Some(ServeAction::Daemon) | None => cmd_daemon(&["start".into(), "--http".into()]),
+        Some(ServeAction::Daemon) | None => cmd_daemon(&["start".into()]),
         Some(ServeAction::Foreground) => {
-            cmd_daemon(&["run".into(), "--foreground".into(), "--http".into()])
+            cmd_daemon(&["run".into(), "--foreground".into()])
         }
     }
 }

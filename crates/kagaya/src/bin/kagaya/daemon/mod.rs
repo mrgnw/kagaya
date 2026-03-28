@@ -27,7 +27,7 @@ pub async fn run(args: &[String]) {
     tracing_subscriber::fmt().init();
 
     let _foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
-    let enable_http = args.iter().any(|a| a == "--http");
+    let disable_http = args.iter().any(|a| a == "--no-http");
     let port_override = args
         .windows(2)
         .find(|w| w[0] == "--port" || w[0] == "-p")
@@ -37,7 +37,7 @@ pub async fn run(args: &[String]) {
 
     let port = port_override.unwrap_or(global_config.daemon.port);
 
-    let http_port = if enable_http { Some(port) } else { None };
+    let http_port = if disable_http { None } else { Some(port) };
     let supervisor = supervisor::Supervisor::new(global_config.clone(), http_port);
 
     let paths = muzan::DaemonPaths::new("kagaya");
@@ -98,16 +98,14 @@ pub async fn run(args: &[String]) {
         .await;
     });
 
-    let http_handle = if enable_http {
+    if http_port.is_some() {
         let sup_http = Arc::clone(&supervisor);
-        Some(tokio::spawn(async move {
+        tokio::spawn(async move {
             run_http_server(sup_http, port).await;
-        }))
-    } else {
-        None
-    };
+        });
+    }
 
-    if enable_http {
+    if http_port.is_some() {
         let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
         if ui_dir.join("package.json").exists() {
             tracing::info!("spawning vite dev server in {}", ui_dir.display());
@@ -123,16 +121,12 @@ pub async fn run(args: &[String]) {
     }
 
     tracing::info!("daemon started (pid {})", std::process::id());
-    if enable_http {
+    if http_port.is_some() {
         tracing::info!("HTTP server on port {}", port);
     }
 
     tokio::select! {
         _ = socket_handle => {},
-        _ = async {
-            if let Some(h) = http_handle { h.await.ok(); }
-            else { std::future::pending::<()>().await; }
-        } => {},
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutting down");
         }
