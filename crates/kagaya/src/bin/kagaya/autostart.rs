@@ -222,11 +222,13 @@ fn install_result() -> Result<String, String> {
         "ProgramArguments".into(),
         plist::Value::Array(vec![
             plist::Value::String(bin),
-            plist::Value::String("start".into()),
+            plist::Value::String("daemon".into()),
+            plist::Value::String("run".into()),
             plist::Value::String("--autostart".into()),
         ]),
     );
     dict.insert("RunAtLoad".into(), plist::Value::Boolean(true));
+    dict.insert("KeepAlive".into(), plist::Value::Boolean(true));
     dict.insert(
         "StandardOutPath".into(),
         plist::Value::String(stdout_log.to_string_lossy().into()),
@@ -343,7 +345,7 @@ fn install_result() -> Result<String, String> {
 
     let bin = ky_binary_path();
     let content = format!(
-		"[Unit]\nDescription=kagaya autostart\n\n[Service]\nType=oneshot\nExecStart={} start --autostart\nRemainAfterExit=no\n\n[Install]\nWantedBy=default.target\n",
+		"[Unit]\nDescription=kagaya daemon\n\n[Service]\nType=simple\nExecStart={} daemon run --autostart\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
 		bin
 	);
 

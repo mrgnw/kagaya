@@ -28,6 +28,7 @@ pub async fn run(args: &[String]) {
 
     let _foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
     let disable_http = args.iter().any(|a| a == "--no-http");
+    let autostart = args.iter().any(|a| a == "--autostart");
     let port_override = args
         .windows(2)
         .find(|w| w[0] == "--port" || w[0] == "-p")
@@ -123,6 +124,35 @@ pub async fn run(args: &[String]) {
     tracing::info!("daemon started (pid {})", std::process::id());
     if http_port.is_some() {
         tracing::info!("HTTP server on port {}", port);
+    }
+
+    if autostart {
+        let (names, chains) = config::autostart_sorted();
+        if !names.is_empty() {
+            tracing::info!("autostart: starting {} projects", names.len());
+            let request = Request::Start {
+                names,
+                all: true,
+                processes: vec![],
+                chains,
+                wait: false,
+            };
+            let response =
+                handle_request(&supervisor, request, &shutdown, &preserve_state).await;
+            match &response {
+                Response::Ok { message } => {
+                    if let Some(msg) = message {
+                        for line in msg.lines() {
+                            tracing::info!("{}", line);
+                        }
+                    }
+                }
+                Response::Error { message } => {
+                    tracing::warn!("autostart error: {}", message);
+                }
+                _ => {}
+            }
+        }
     }
 
     tokio::select! {
