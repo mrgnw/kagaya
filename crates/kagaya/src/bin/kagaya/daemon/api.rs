@@ -23,7 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-const INSTALL_SCRIPT: &str = include_str!("../../../../../../install.sh");
+const INSTALL_SCRIPT: &str = include_str!("../../../../install.sh");
 
 #[cfg(not(feature = "dev"))]
 #[derive(RustEmbed)]
