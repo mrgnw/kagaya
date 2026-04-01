@@ -1,11 +1,27 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
+
+pub static ENRICHED_PATH: LazyLock<String> = LazyLock::new(|| {
+	if let Ok(output) = std::process::Command::new("/bin/zsh")
+		.args(["-li", "-c", "echo $PATH"])
+		.output()
+	{
+		let shell_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+		if !shell_path.is_empty() {
+			return shell_path;
+		}
+	}
+	let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/Users/m"));
+	format!(
+		"{home}/.local/bin:{home}/.cargo/bin:{home}/Library/pnpm:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	)
+});
 
 use crate::output::OutputCapture;
 use crate::types::*;
@@ -733,6 +749,7 @@ async fn run_process_loop(
             let status = tokio::process::Command::new("sh")
                 .args(["-c", pre_start_cmd])
                 .current_dir(&dir)
+                .env("PATH", &*ENRICHED_PATH)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -951,6 +968,7 @@ async fn run_process_loop(
                             tokio::process::Command::new("sh")
                                 .args(["-c", cmd])
                                 .current_dir(&ready_dir)
+                                .env("PATH", &*ENRICHED_PATH)
                                 .stdin(std::process::Stdio::null())
                                 .stdout(std::process::Stdio::null())
                                 .stderr(std::process::Stdio::null())
@@ -1118,7 +1136,8 @@ async fn spawn_process(def: &ProcessDef, dir: &Path) -> Result<Child, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0);
+        .process_group(0)
+        .env("PATH", &*ENRICHED_PATH);
 
     for (key, val) in &def.env {
         cmd.env(key, val);

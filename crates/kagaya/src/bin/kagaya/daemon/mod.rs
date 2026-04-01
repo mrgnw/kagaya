@@ -106,17 +106,21 @@ pub async fn run(args: &[String]) {
         });
     }
 
+    #[cfg(debug_assertions)]
     if http_port.is_some() {
         let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
         if ui_dir.join("package.json").exists() {
             tracing::info!("spawning vite dev server in {}", ui_dir.display());
             tokio::spawn(async move {
-                let mut child = tokio::process::Command::new("pnpm")
+                match tokio::process::Command::new("pnpm")
                     .args(["dev"])
+                    .env("PATH", &*kagaya::supervisor::ENRICHED_PATH)
                     .current_dir(&ui_dir)
                     .spawn()
-                    .expect("failed to start vite dev server");
-                child.wait().await.ok();
+                {
+                    Ok(mut child) => { child.wait().await.ok(); }
+                    Err(e) => tracing::warn!("vite dev server failed to start: {e}"),
+                }
             });
         }
     }
