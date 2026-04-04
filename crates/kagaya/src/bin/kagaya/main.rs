@@ -1934,20 +1934,17 @@ fn cmd_daemon(args: &[String]) {
             kill_all_daemon_processes();
             let daemon = muzan::Daemon::new("kagaya");
             daemon.cleanup();
-            // Start
-            let mut spawn_args: Vec<String> = vec!["daemon".to_string(), "run".to_string()];
-            spawn_args.extend(args[1..].iter().cloned());
-            let spawn_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
-            let daemon = muzan::Daemon::new("kagaya");
-            match daemon.start_background_with_args(&spawn_refs) {
-                Ok(_) => {
-                    if json {
-                        format::json_ok(Some("daemon restarted".into()));
-                    } else {
-                        eprintln!("daemon restarted");
-                    }
-                }
-                Err(e) => {
+
+            // If LaunchAgent is installed, it will respawn automatically.
+            // Otherwise start manually.
+            let launchd_managed = crate::autostart::status_info().installed;
+            if !launchd_managed {
+                let mut spawn_args: Vec<String> =
+                    vec!["daemon".to_string(), "run".to_string()];
+                spawn_args.extend(args[1..].iter().cloned());
+                let spawn_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
+                let daemon = muzan::Daemon::new("kagaya");
+                if let Err(e) = daemon.start_background_with_args(&spawn_refs) {
                     if json {
                         format::json_error(&format!("{}", e));
                     } else {
@@ -1955,6 +1952,27 @@ fn cmd_daemon(args: &[String]) {
                     }
                     std::process::exit(1);
                 }
+            }
+            // Wait for daemon to be ready
+            for _ in 0..100 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if muzan::client::is_running(&paths) {
+                    break;
+                }
+            }
+            if muzan::client::is_running(&paths) {
+                if json {
+                    format::json_ok(Some("daemon restarted".into()));
+                } else {
+                    eprintln!("daemon restarted");
+                }
+            } else {
+                if json {
+                    format::json_error("daemon did not start");
+                } else {
+                    eprintln!("error: daemon did not start");
+                }
+                std::process::exit(1);
             }
         }
         _ => {
