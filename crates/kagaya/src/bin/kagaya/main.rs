@@ -1916,7 +1916,11 @@ fn cmd_daemon(args: &[String]) {
             }
         }
         "restart" => {
-            // Stop if running
+            // Collect all daemon + descendant PIDs while parent-child
+            // relationships still exist (before any killing)
+            let all_pids = collect_all_daemon_pids();
+
+            // Try graceful shutdown first
             if muzan::client::is_running(&paths) {
                 let _ = send_request(&Request::Shutdown {
                     preserve_state: true,
@@ -1929,9 +1933,8 @@ fn cmd_daemon(args: &[String]) {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
-            // Kill ALL ky daemon processes (including orphaned autostart children
-            // from previous restarts that got reparented to init)
-            kill_all_daemon_processes();
+            // Force-kill anything that survived (using PIDs collected earlier)
+            force_kill_pids(&all_pids);
             let daemon = muzan::Daemon::new("kagaya");
             daemon.cleanup();
 
@@ -1992,42 +1995,72 @@ fn cmd_serve(action: Option<ServeAction>) {
     }
 }
 
-fn kill_all_daemon_processes() {
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
-
+/// Collect all daemon PIDs and their descendants while parent-child
+/// relationships still exist (must be called BEFORE killing anything).
+fn collect_all_daemon_pids() -> Vec<u32> {
     let my_pid = std::process::id();
     let output = match std::process::Command::new("pgrep")
         .args(["-f", "ky daemon run"])
         .output()
     {
         Ok(o) => o,
-        Err(_) => return,
+        Err(_) => return vec![],
     };
-    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+    let daemon_pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|l| l.trim().parse::<u32>().ok())
         .filter(|&p| p != my_pid)
         .collect();
 
-    // SIGTERM first, give 3s, then SIGKILL
-    for &pid in &pids {
+    let mut all_pids = daemon_pids.clone();
+    for &pid in &daemon_pids {
+        collect_descendants(pid, &mut all_pids);
+    }
+    all_pids.retain(|&p| p != my_pid);
+    all_pids
+}
+
+/// Kill a list of PIDs: SIGTERM, wait 5s, then SIGKILL survivors.
+fn force_kill_pids(pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    for &pid in pids {
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
     }
-    if !pids.is_empty() {
-        for _ in 0..30 {
-            if pids
-                .iter()
-                .all(|&p| kill(Pid::from_raw(p as i32), None).is_err())
-            {
-                return;
+    for _ in 0..50 {
+        if pids
+            .iter()
+            .all(|&p| kill(Pid::from_raw(p as i32), None).is_err())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for &pid in pids {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+}
+
+fn collect_descendants(pid: u32, out: &mut Vec<u32>) {
+    let output = match std::process::Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Ok(child) = line.trim().parse::<u32>() {
+            if !out.contains(&child) {
+                out.push(child);
+                collect_descendants(child, out);
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        for &pid in &pids {
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 
