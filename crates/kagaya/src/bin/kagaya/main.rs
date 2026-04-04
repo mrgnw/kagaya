@@ -1928,24 +1928,12 @@ fn cmd_daemon(args: &[String]) {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                // If still alive, kill the process group so children die too
-                if muzan::client::is_running(&paths) {
-                    if let Some(pid) = muzan::client::read_pid(&paths) {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::Pid;
-                        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                        for _ in 0..20 {
-                            if !muzan::client::is_running(&paths) {
-                                break;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
-                    // Clean up stale socket/pid so start_background succeeds
-                    let daemon = muzan::Daemon::new("kagaya");
-                    daemon.cleanup();
-                }
             }
+            // Kill ALL ky daemon processes (including orphaned autostart children
+            // from previous restarts that got reparented to init)
+            kill_all_daemon_processes();
+            let daemon = muzan::Daemon::new("kagaya");
+            daemon.cleanup();
             // Start
             let mut spawn_args: Vec<String> = vec!["daemon".to_string(), "run".to_string()];
             spawn_args.extend(args[1..].iter().cloned());
@@ -1983,6 +1971,45 @@ fn cmd_serve(action: Option<ServeAction>) {
         Some(ServeAction::Foreground) => {
             cmd_daemon(&["run".into(), "--foreground".into()])
         }
+    }
+}
+
+fn kill_all_daemon_processes() {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    let my_pid = std::process::id();
+    let output = match std::process::Command::new("pgrep")
+        .args(["-f", "ky daemon run"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .filter(|&p| p != my_pid)
+        .collect();
+
+    // SIGTERM first, give 3s, then SIGKILL
+    for &pid in &pids {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    if !pids.is_empty() {
+        for _ in 0..30 {
+            if pids
+                .iter()
+                .all(|&p| kill(Pid::from_raw(p as i32), None).is_err())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        for &pid in &pids {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 
