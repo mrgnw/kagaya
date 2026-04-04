@@ -1921,19 +1921,19 @@ fn cmd_daemon(args: &[String]) {
                 let _ = send_request(&Request::Shutdown {
                     preserve_state: true,
                 });
-                // Wait for daemon to die (up to 5s)
-                for _ in 0..50 {
+                // Wait for daemon to gracefully stop all services (up to 10s)
+                for _ in 0..100 {
                     if !muzan::client::is_running(&paths) {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                // If still alive, force kill via PID
+                // If still alive, kill the process group so children die too
                 if muzan::client::is_running(&paths) {
                     if let Some(pid) = muzan::client::read_pid(&paths) {
-                        use nix::sys::signal::{kill, Signal};
+                        use nix::sys::signal::{killpg, Signal};
                         use nix::unistd::Pid;
-                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
                         for _ in 0..20 {
                             if !muzan::client::is_running(&paths) {
                                 break;

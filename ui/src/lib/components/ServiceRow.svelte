@@ -127,6 +127,7 @@
 		}
 		if (service.running && service.ports?.length && tailscaleHostname) {
 			for (const port of service.ports) {
+				if (port >= 49152) continue;
 				const href = `http://${tailscaleHostname}:${port}`;
 				const label = `:${port}`;
 				if (!links.some((l) => l.href.includes(`:${port}`))) {
