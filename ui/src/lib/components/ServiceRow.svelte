@@ -449,7 +449,6 @@
 		display: flex;
 		align-items: center;
 		gap: 0.3em;
-		margin-left: auto;
 	}
 
 	.service-link {
