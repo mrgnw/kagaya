@@ -827,6 +827,7 @@ mod tests {
                     inline_command: None,
                     autostart: false,
                     depends_on: vec!["db".to_string()],
+                    urls: vec![],
                 },
             ),
             (
@@ -837,6 +838,7 @@ mod tests {
                     inline_command: None,
                     autostart: false,
                     depends_on: vec![],
+                    urls: vec![],
                 },
             ),
         ]);
@@ -860,6 +862,7 @@ mod tests {
                     inline_command: None,
                     autostart: false,
                     depends_on: vec!["db".to_string()],
+                    urls: vec![],
                 },
             ),
             (
@@ -870,6 +873,7 @@ mod tests {
                     inline_command: None,
                     autostart: false,
                     depends_on: vec!["app".to_string()],
+                    urls: vec![],
                 },
             ),
         ]);

@@ -245,6 +245,7 @@ enum ProjectDef {
         #[serde(default)]
         autostart: bool,
         depends_on: Option<StringOrVec>,
+        urls: Option<StringOrVec>,
     },
     Command {
         run: String,
@@ -258,6 +259,7 @@ enum ProjectDef {
         #[serde(default)]
         autostart: bool,
         depends_on: Option<StringOrVec>,
+        urls: Option<StringOrVec>,
     },
 }
 
@@ -272,6 +274,8 @@ pub struct ServiceEntry {
     pub autostart: bool,
     /// Other projects this project depends on (for autostart ordering)
     pub depends_on: Vec<String>,
+    /// Manually configured URLs for this service (e.g. tunnel subdomains)
+    pub urls: Vec<String>,
 }
 
 pub struct InlineCommand {
@@ -330,6 +334,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                         inline_command: None,
                         autostart: false,
                         depends_on: vec![],
+                        urls: vec![],
                     },
                 );
             }
@@ -337,6 +342,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                 dir: dir_str,
                 autostart,
                 depends_on,
+                urls,
             } => {
                 let dir = expand_tilde(&dir_str);
                 if !dir.exists() {
@@ -355,6 +361,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                         inline_command: None,
                         autostart,
                         depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
+                        urls: urls.map(|u| u.into_vec()).unwrap_or_default(),
                     },
                 );
             }
@@ -367,6 +374,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                 env,
                 autostart,
                 depends_on,
+                urls,
             } => {
                 // Standalone commands get a synthetic dir under ~/.config/kagaya/_commands/
                 let dir = config_dir().join("_commands").join(&name);
@@ -386,6 +394,7 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                         }),
                         autostart,
                         depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
+                        urls: urls.map(|u| u.into_vec()).unwrap_or_default(),
                     },
                 );
             }
@@ -744,6 +753,7 @@ env = { LOCAL = "2" }
             }),
             autostart: false,
             depends_on: vec![],
+            urls: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert_eq!(svc.processes.len(), 1);
@@ -768,6 +778,7 @@ env = { LOCAL = "2" }
             }),
             autostart: false,
             depends_on: vec![],
+            urls: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert_eq!(svc.processes.len(), 1);
@@ -791,6 +802,7 @@ env = { LOCAL = "2" }
             }),
             autostart: false,
             depends_on: vec![],
+            urls: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         let proc = &svc.processes[0];
@@ -823,6 +835,7 @@ type = "task"
             inline_command: None,
             autostart: false,
             depends_on: vec![],
+            urls: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert_eq!(svc.processes.len(), 2);
@@ -844,6 +857,7 @@ type = "task"
             inline_command: None,
             autostart: false,
             depends_on: vec![],
+            urls: vec![],
         };
         let svc = load_service(&entry, &test_defaults());
         assert!(svc.processes.is_empty());
@@ -906,6 +920,7 @@ depends_on = "opencode""#;
                 dir,
                 autostart,
                 depends_on,
+                ..
             } => {
                 assert_eq!(dir, "/dev/openchamber");
                 assert!(autostart);

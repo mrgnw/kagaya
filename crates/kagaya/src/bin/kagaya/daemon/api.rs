@@ -63,6 +63,7 @@ pub fn router(supervisor: Arc<Supervisor>) -> Router {
         .route("/api/autostart", get(autostart_status))
         .route("/api/autostart/on", post(autostart_on))
         .route("/api/autostart/off", post(autostart_off))
+        .route("/api/host-info", get(host_info))
         .route("/api/dev-dirs", get(dev_dirs))
         .route("/api/remote-control", get(rc_list))
         .route(
@@ -120,6 +121,10 @@ struct ServiceInfo {
     autostart: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_tail: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    urls: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ports: Vec<u16>,
 }
 
 #[derive(Serialize)]
@@ -187,13 +192,20 @@ async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> 
     let entries = config::load_service_entries();
     let mut services = Vec::new();
     for s in &statuses {
-        let autostart = entries.get(&s.name).map(|e| e.autostart).unwrap_or(false);
+        let entry = entries.get(&s.name);
+        let autostart = entry.map(|e| e.autostart).unwrap_or(false);
+        let urls = entry.map(|e| e.urls.clone()).unwrap_or_default();
         let agg = s.aggregate_state();
         let error_tail = if matches!(agg, kagaya::ServiceState::Err | kagaya::ServiceState::Degraded) {
             snapshot_error_tail(&state.supervisor, &s.name, 5).await
         } else {
             None
         };
+        let ports: Vec<u16> = s
+            .processes
+            .iter()
+            .flat_map(|p| p.ports.iter().copied())
+            .collect();
         services.push(ServiceInfo {
             name: s.name.clone(),
             dir: s.dir.to_string_lossy().to_string(),
@@ -201,6 +213,8 @@ async fn list_services(State(state): State<AppState>) -> Json<Vec<ServiceInfo>> 
             state: agg.as_str().to_string(),
             autostart,
             error_tail,
+            urls,
+            ports,
         });
     }
     Json(services)
@@ -488,6 +502,33 @@ async fn autostart_off() -> Result<Json<ActionResponse>, (StatusCode, Json<Error
     autostart::disable()
         .map(|msg| Json(ActionResponse { message: msg }))
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+// ── Host info (Tailscale hostname) ───────────────────────────────────────────
+
+#[derive(Serialize)]
+struct HostInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tailscale_hostname: Option<String>,
+}
+
+async fn host_info() -> Json<HostInfo> {
+    Json(HostInfo {
+        tailscale_hostname: detect_tailscale_hostname(),
+    })
+}
+
+fn detect_tailscale_hostname() -> Option<String> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let dns_name = json.get("Self")?.get("DNSName")?.as_str()?;
+    Some(dns_name.trim_end_matches('.').to_string())
 }
 
 // ── Dev directory browser ────────────────────────────────────────────────────
