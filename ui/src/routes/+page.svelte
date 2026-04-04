@@ -4,12 +4,14 @@
 	import {
 		getServices,
 		getAutostartStatus,
+		getHostInfo,
 		getVersion,
 		startService,
 		stopService,
 		reloadService,
 		type ServiceInfo,
 		type AutostartStatus,
+		type HostInfo,
 	} from "$lib/api";
 	import ServiceRow from "$lib/components/ServiceRow.svelte";
 	import StatusIcon from "$lib/components/StatusIcon.svelte";
@@ -28,6 +30,8 @@
 	let bulkLoading = $state(false);
 	let version = $state("");
 	let headerCheckbox = $state<HTMLInputElement | null>(null);
+	let sortActiveFirst = $state(false);
+	let hostInfo = $state<HostInfo>({});
 
 	let hasSelection = $derived(selectedNames.size > 0);
 	let allSelected = $derived(
@@ -37,6 +41,13 @@
 	let runningCount = $derived(services.filter((s) => s.running).length);
 	let stoppedCount = $derived(services.filter((s) => !s.running).length);
 	let stoppedAutostartCount = $derived(services.filter((s) => !s.running && s.autostart).length);
+	let sortedServices = $derived.by(() => {
+		if (!sortActiveFirst) return services;
+		return [...services].sort((a, b) => {
+			if (a.running === b.running) return 0;
+			return a.running ? -1 : 1;
+		});
+	});
 	let stateCounts = $derived.by(() => {
 		let counts: Record<AggregateState, number> = {
 			on: 0,
@@ -142,6 +153,7 @@
 	onMount(() => {
 		refresh();
 		getVersion().then((v) => (version = v)).catch(() => {});
+		getHostInfo().then((h) => (hostInfo = h)).catch(() => {});
 		refreshTimer = setInterval(refresh, 5000);
 		return () => clearInterval(refreshTimer);
 	});
@@ -229,15 +241,10 @@
 				{#if autostartStatus?.installed}
 					<a href="/settings" class="header-link" title="autostart settings">
 						<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-							<path d="M8 2v4" /><path d="M5.2 4.2A5 5 0 1 0 10.8 4.2" />
+							<circle cx="8" cy="8" r="5.5" /><path d="M8 4.5v4l2.5 1.5" />
 						</svg>
 					</a>
 				{/if}
-				<a href="/remote-control" class="header-link" title="remote control">
-					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-						<path d="M8 12v2" /><path d="M4.5 9.5a5 5 0 0 1 7 0" /><path d="M2 7a8 8 0 0 1 12 0" /><circle cx="8" cy="12" r="0.5" fill="currentColor" />
-					</svg>
-				</a>
 			</div>
 		</header>
 
@@ -294,6 +301,16 @@
 					</button>
 				{/if}
 			</div>
+			<button
+				class="toolbar-btn sort"
+				class:active={sortActiveFirst}
+				onclick={() => sortActiveFirst = !sortActiveFirst}
+				title="Sort active first"
+			>
+				<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+					<path d="M3 4h10M3 8h7M3 12h4" />
+				</svg>
+			</button>
 			<label class="select-all">
 				<input
 					type="checkbox"
@@ -308,12 +325,13 @@
 		</div>
 
 		<div class="service-list">
-			{#each services as service (service.name)}
+			{#each sortedServices as service (service.name)}
 				<ServiceRow
 					{service}
 					onUpdate={refresh}
 					selected={selectedNames.has(service.name)}
 					onSelect={hasSelection ? toggleSelect : undefined}
+					tailscaleHostname={hostInfo.tailscale_hostname}
 				/>
 			{/each}
 		</div>
@@ -480,6 +498,7 @@
 	.toolbar-btn.reload:hover { color: #7777cc; }
 	.toolbar-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 	.toolbar-btn.hidden { display: none; }
+	.toolbar-btn.sort.active { color: #8888cc; background: #1e1e3a; }
 
 	@media (max-width: 400px) {
 		.toolbar-btn-label { display: none; }

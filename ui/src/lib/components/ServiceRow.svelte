@@ -20,11 +20,13 @@
 		onUpdate,
 		selected = false,
 		onSelect,
+		tailscaleHostname,
 	}: {
 		service: ServiceWithState;
 		onUpdate: () => void;
 		selected?: boolean;
 		onSelect?: (name: string, checked: boolean) => void;
+		tailscaleHostname?: string;
 	} = $props();
 
 	let loading = $state(false);
@@ -114,6 +116,26 @@
 	}
 
 	let aggregateState = $derived(service.state);
+
+	let serviceLinks = $derived.by(() => {
+		const links: { label: string; href: string }[] = [];
+		if (service.urls?.length) {
+			for (const url of service.urls) {
+				const href = url.includes("://") ? url : `http://${url}`;
+				links.push({ label: url.replace(/^https?:\/\//, ""), href });
+			}
+		}
+		if (service.running && service.ports?.length && tailscaleHostname) {
+			for (const port of service.ports) {
+				const href = `http://${tailscaleHostname}:${port}`;
+				const label = `:${port}`;
+				if (!links.some((l) => l.href.includes(`:${port}`))) {
+					links.push({ label, href });
+				}
+			}
+		}
+		return links;
+	});
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -204,8 +226,15 @@
 			{#if service.autostart}
 				<span class="autostart-badge" title="starts on login">
 					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-						<path d="M8 2v4" /><path d="M5.2 4.2A5 5 0 1 0 10.8 4.2" />
+						<circle cx="8" cy="8" r="5.5" /><path d="M8 4.5v4l2.5 1.5" />
 					</svg>
+				</span>
+			{/if}
+			{#if serviceLinks.length}
+				<span class="service-links" onclick={(e: MouseEvent) => e.stopPropagation()}>
+					{#each serviceLinks as link}
+						<a href={link.href} target="_blank" rel="noopener" class="service-link" onclick={(e: MouseEvent) => e.stopPropagation()}>{link.label}</a>
+					{/each}
 				</span>
 			{/if}
 			{#if service.running}
@@ -408,6 +437,29 @@
 	.autostart-badge svg {
 		width: 0.85em;
 		height: 0.85em;
+	}
+
+	.service-links {
+		display: flex;
+		align-items: center;
+		gap: 0.3em;
+		margin-left: auto;
+	}
+
+	.service-link {
+		font-size: 0.7em;
+		font-family: "SF Mono", Menlo, Monaco, "Courier New", monospace;
+		color: #556;
+		text-decoration: none;
+		padding: 0.1em 0.35em;
+		border-radius: 0.25em;
+		background: #1a1a2e;
+		transition: color 0.12s, background 0.12s;
+	}
+
+	.service-link:hover {
+		color: #88aacc;
+		background: #1e1e3a;
 	}
 
 	.chevron {
