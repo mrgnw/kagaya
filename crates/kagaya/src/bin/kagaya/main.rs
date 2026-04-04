@@ -1921,12 +1921,29 @@ fn cmd_daemon(args: &[String]) {
                 let _ = send_request(&Request::Shutdown {
                     preserve_state: true,
                 });
-                // Wait for daemon to die (up to 3s)
-                for _ in 0..30 {
+                // Wait for daemon to die (up to 5s)
+                for _ in 0..50 {
                     if !muzan::client::is_running(&paths) {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                // If still alive, force kill via PID
+                if muzan::client::is_running(&paths) {
+                    if let Some(pid) = muzan::client::read_pid(&paths) {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                        for _ in 0..20 {
+                            if !muzan::client::is_running(&paths) {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                    // Clean up stale socket/pid so start_background succeeds
+                    let daemon = muzan::Daemon::new("kagaya");
+                    daemon.cleanup();
                 }
             }
             // Start
