@@ -233,7 +233,13 @@
 			{#if serviceLinks.length}
 				<span class="service-links" onclick={(e: MouseEvent) => e.stopPropagation()}>
 					{#each serviceLinks as link}
-						<a href={link.href} target="_blank" rel="noopener" class="service-link" onclick={(e: MouseEvent) => e.stopPropagation()}>{link.label}</a>
+						<span
+							role="link"
+							tabindex="0"
+							class="service-link"
+							onclick={(e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); window.open(link.href, '_blank'); }}
+							onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') window.open(link.href, '_blank'); }}
+						>{link.label}</span>
 					{/each}
 				</span>
 			{/if}
