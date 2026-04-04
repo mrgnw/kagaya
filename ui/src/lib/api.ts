@@ -35,40 +35,7 @@ async function httpPost<T>(path: string): Promise<T> {
   return res.json();
 }
 
-async function httpPostJson<T>(path: string, data: unknown): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || res.statusText);
-  }
-  return res.json();
-}
 
-async function httpPatchJson<T>(path: string, data: unknown): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || res.statusText);
-  }
-  return res.json();
-}
-
-async function httpDelete<T>(path: string): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, { method: "DELETE" });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || res.statusText);
-  }
-  return res.json();
-}
 
 async function httpGetText(path: string): Promise<string> {
   const res = await fetch(`${apiBase()}${path}`);
@@ -83,6 +50,12 @@ export interface ServiceInfo {
   state: "on" | "degraded" | "err" | "off";
   autostart: boolean;
   error_tail?: string[];
+  urls?: string[];
+  ports?: number[];
+}
+
+export interface HostInfo {
+  tailscale_hostname?: string;
 }
 
 export interface AutostartStatus {
@@ -203,32 +176,6 @@ export function echoWebSocketUrl(name: string): string {
   return `${wsProto}//${window.location.host}/ws/echo/${name}`;
 }
 
-export interface RemoteControlProject {
-  name: string;
-  dir: string;
-  mode: string;
-  running: boolean;
-  pid: number | null;
-}
-
-export async function getRemoteControl(): Promise<RemoteControlProject[]> {
-  return httpGet("/api/remote-control");
-}
-
-export async function enableRemoteControl(name: string, dir: string, mode: string): Promise<string> {
-  const res = await httpPostJson<{ message: string }>(`/api/remote-control/${name}`, { dir, mode });
-  return res.message;
-}
-
-export async function disableRemoteControl(name: string): Promise<string> {
-  const res = await httpDelete<{ message: string }>(`/api/remote-control/${name}`);
-  return res.message;
-}
-
-export async function updateRemoteControlMode(name: string, mode: string): Promise<string> {
-  const res = await httpPatchJson<{ message: string }>(`/api/remote-control/${name}`, { mode });
-  return res.message;
-}
 
 export interface DirEntry {
   name: string;
@@ -238,6 +185,10 @@ export interface DirEntry {
 
 export async function getDevDirs(): Promise<DirEntry[]> {
   return httpGet("/api/dev-dirs");
+}
+
+export async function getHostInfo(): Promise<HostInfo> {
+  return httpGet("/api/host-info");
 }
 
 export async function getAutostartStatus(): Promise<AutostartStatus> {
