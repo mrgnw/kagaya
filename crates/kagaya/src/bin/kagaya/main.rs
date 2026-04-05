@@ -937,30 +937,6 @@ fn format_condensed_mini_icons(status: &ServiceStatus) -> String {
     }).collect::<Vec<_>>().join("")
 }
 
-fn condensed_mini_icons_width(status: &ServiceStatus) -> usize {
-    let procs = &status.processes;
-    if procs.len() <= 4 {
-        return procs.len();
-    }
-    let mut groups: Vec<(u8, usize)> = Vec::new();
-    for proc in procs {
-        let key = process_mini_icon_key(proc);
-        if let Some(last) = groups.last_mut() {
-            if last.0 == key {
-                last.1 += 1;
-                continue;
-            }
-        }
-        groups.push((key, 1));
-    }
-    groups.iter().map(|(_, count)| {
-        if *count > 1 {
-            1 + count.to_string().len()
-        } else {
-            1
-        }
-    }).sum()
-}
 
 fn process_state_color(proc: &ProcessStatus) -> AggregateState {
     match &proc.state {
@@ -2453,25 +2429,9 @@ fn render_condensed_status(args: &[String]) -> usize {
     }
 
     let mut lines = 0usize;
-    let name_w = data.max_svc_name_width;
-
-    struct RowData {
-        sym: String,
-        name: String,
-        label: String,
-        dur_str: String,
-        dur_colored: String,
-        mini_icons: String,
-        mini_icons_width: usize,
-        ports_str: String,
-        agg: AggregateState,
-    }
-
-    let mut rows: Vec<RowData> = Vec::new();
-    let mut max_dur_w: usize = 0;
-    let mut max_icons_w: usize = 0;
-    let mut any_has_dur = false;
-    let mut any_has_icons = false;
+    use tabwriter::TabWriter;
+    use std::io::Write as _;
+    let mut tw = TabWriter::new(vec![]).ansi(true).minwidth(0).padding(1);
 
     for name in &data.sorted_filter {
         let status = data.status_map.get(name);
@@ -2481,116 +2441,49 @@ fn render_condensed_status(args: &[String]) -> usize {
         let sym = aggregate_symbol(agg);
         let label = aggregate_label(agg);
         let duration = status.and_then(|s| relevant_state_since(s, agg));
-        let dur_str = format_state_duration(duration);
-        let dur_colored = color_duration(&dur_str, agg);
+        let dur_colored = color_duration(&format_state_duration(duration), agg);
 
         let has_multi = status.map(|s| s.processes.len() > 1).unwrap_or(false);
-
         let mini_icons = if has_multi {
             format_condensed_mini_icons(status.unwrap())
         } else {
             String::new()
         };
 
-        let mini_icons_width = if has_multi {
-            condensed_mini_icons_width(status.unwrap())
-        } else {
-            0
-        };
-
-        let ports_str: String = if let Some(status) = status {
+        let ports_str = if let Some(status) = status {
             format_condensed_ports(status)
         } else {
             String::new()
         };
 
-        if !dur_str.is_empty() {
-            any_has_dur = true;
-            max_dur_w = max_dur_w.max(dur_str.len());
-        }
-        if mini_icons_width > 0 {
-            any_has_icons = true;
-            max_icons_w = max_icons_w.max(mini_icons_width);
-        }
-
-        rows.push(RowData {
-            sym,
-            name: name.clone(),
-            label,
-            dur_str,
-            dur_colored,
-            mini_icons,
-            mini_icons_width,
-            ports_str,
-            agg,
-        });
-    }
-
-    let dur_col_w = if any_has_dur { max_dur_w.max(1) } else { 0 };
-
-    for row in &rows {
-        let mut line = format!("{} {:<nw$}  {:<3}", row.sym, row.name, row.label, nw = name_w);
-
-        if dur_col_w > 0 {
-            if !row.dur_str.is_empty() {
-                let pad = dur_col_w - row.dur_str.len();
-                line.push_str(&format!("  {}{}", " ".repeat(pad), row.dur_colored));
-            } else {
-                line.push_str(&format!("  {}", " ".repeat(dur_col_w)));
-            }
-        }
-
-        if any_has_icons {
-            if row.mini_icons_width > 0 {
-                let pad = max_icons_w - row.mini_icons_width;
-                line.push_str(&format!(" {}{}", row.mini_icons, " ".repeat(pad)));
-            } else {
-                line.push_str(&format!(" {}", " ".repeat(max_icons_w)));
-            }
-        }
-
-        if !row.ports_str.is_empty() {
-            line.push_str(&format!("  {}", row.ports_str));
-        }
-
-        println!("{}", line.trim_end());
+        writeln!(tw, "{}\t{}\t{}\t{}\t{}\t{}",
+            sym, name, label, dur_colored, mini_icons, ports_str).unwrap();
         lines += 1;
 
-        if matches!(row.agg, AggregateState::Err | AggregateState::Degraded) {
-            let tail = tail_log_lines_string(&row.name, &None, 3);
+        if matches!(agg, AggregateState::Err | AggregateState::Degraded) {
+            let tail = tail_log_lines_string(name, &None, 3);
             for tl in tail {
-                println!("  {}", tl.dimmed());
+                writeln!(tw, " \t{}\t\t\t\t", tl.dimmed()).unwrap();
                 lines += 1;
             }
         }
     }
 
     if data.show_extras {
-        println!();
+        writeln!(tw).unwrap();
         lines += 1;
         if let Some(port) = data.http_port {
-            println!(
-                "{} {:<nw$}  {}  http://127.0.0.1:{}",
-                "●".green(),
-                "serve",
-                "on".green(),
-                port,
-                nw = name_w
-            );
+            writeln!(tw, "{}\t{}\t{}\thttp://127.0.0.1:{}\t\t",
+                "●".green(), "serve", "on".green(), port).unwrap();
         } else {
-            println!(
-                "{} {:<nw$}  {}",
-                "○".dimmed(),
-                "serve",
-                "off".dimmed(),
-                nw = name_w
-            );
+            writeln!(tw, "{}\t{}\t{}\t\t\t",
+                "○".dimmed(), "serve", "off".dimmed()).unwrap();
         }
         lines += 1;
 
         if let Some(ref jobs) = data.cron_jobs {
             if !jobs.is_empty() {
-                println!();
+                writeln!(tw).unwrap();
                 lines += 1;
                 for job in jobs {
                     let sym = koku_client::state_symbol(&job.state);
@@ -2612,18 +2505,18 @@ fn render_condensed_status(args: &[String]) -> usize {
                             (sym.red().to_string(), state_str.red().to_string())
                         }
                     };
-                    println!(
-                        "{} {:<nw$}  {}",
-                        sym_colored,
-                        job.name,
-                        state_colored,
-                        nw = name_w
-                    );
+                    writeln!(tw, "{}\t{}\t{}\t\t\t",
+                        sym_colored, job.name, state_colored).unwrap();
                     lines += 1;
                 }
             }
         }
     }
+
+    tw.flush().unwrap();
+    let output = String::from_utf8(tw.into_inner().unwrap()).unwrap();
+    print!("{}", output.trim_end());
+    println!();
 
     lines
 }
