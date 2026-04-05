@@ -875,6 +875,93 @@ fn process_mini_icon(proc: &ProcessStatus) -> String {
     }
 }
 
+fn process_mini_icon_key(proc: &ProcessStatus) -> u8 {
+    match &proc.state {
+        ProcessState::Running { .. } if is_port_pending(proc) => 0,
+        ProcessState::Running { .. } => 1,
+        ProcessState::Stopped if !proc.autostart => 2,
+        ProcessState::Stopped => 3,
+        ProcessState::Crashed { .. } => 4,
+        ProcessState::Failed { .. } => 5,
+    }
+}
+
+fn format_condensed_mini_icons(status: &ServiceStatus) -> String {
+    let procs = &status.processes;
+    if procs.len() <= 4 {
+        return procs.iter().map(|p| process_mini_icon(p)).collect();
+    }
+
+    let mut groups: Vec<(u8, usize)> = Vec::new();
+    for proc in procs {
+        let key = process_mini_icon_key(proc);
+        if let Some(last) = groups.last_mut() {
+            if last.0 == key {
+                last.1 += 1;
+                continue;
+            }
+        }
+        groups.push((key, 1));
+    }
+
+    let dummy_procs: Vec<ProcessStatus> = groups.iter().map(|(key, _)| {
+        let state = match key {
+            0 => ProcessState::Running { pid: 0, uptime_secs: 0 },
+            1 => ProcessState::Running { pid: 0, uptime_secs: 0 },
+            2 => ProcessState::Stopped,
+            3 => ProcessState::Stopped,
+            4 => ProcessState::Crashed { exit_code: 1, retries: 0 },
+            _ => ProcessState::Failed { exit_code: 1 },
+        };
+        ProcessStatus {
+            name: String::new(),
+            state,
+            pid: None,
+            autostart: *key != 2,
+            service_type: ServiceType::Service,
+            ports: vec![],
+            ports_expected: if *key == 0 { vec![1] } else { vec![] },
+            state_since: None,
+            cpu_percent: None,
+            memory_bytes: None,
+        }
+    }).collect();
+
+    groups.iter().zip(dummy_procs.iter()).map(|((_, count), dummy)| {
+        let icon = process_mini_icon(dummy);
+        if *count > 1 {
+            format!("{}{}", icon, count)
+        } else {
+            icon
+        }
+    }).collect::<Vec<_>>().join("")
+}
+
+fn condensed_mini_icons_width(status: &ServiceStatus) -> usize {
+    let procs = &status.processes;
+    if procs.len() <= 4 {
+        return procs.len();
+    }
+    let mut groups: Vec<(u8, usize)> = Vec::new();
+    for proc in procs {
+        let key = process_mini_icon_key(proc);
+        if let Some(last) = groups.last_mut() {
+            if last.0 == key {
+                last.1 += 1;
+                continue;
+            }
+        }
+        groups.push((key, 1));
+    }
+    groups.iter().map(|(_, count)| {
+        if *count > 1 {
+            1 + count.to_string().len()
+        } else {
+            1
+        }
+    }).sum()
+}
+
 fn process_state_color(proc: &ProcessStatus) -> AggregateState {
     match &proc.state {
         ProcessState::Running { .. } => AggregateState::On,
@@ -931,6 +1018,50 @@ fn format_port_ranges(ports: &[u16]) -> String {
         i += 1;
     }
     parts.join(", ")
+}
+
+fn format_condensed_ports(status: &ServiceStatus) -> String {
+    let mut configured: Vec<u16> = Vec::new();
+    let mut detected: Vec<u16> = Vec::new();
+
+    for proc in &status.processes {
+        if !proc.state.is_running() {
+            continue;
+        }
+        for &port in &proc.ports {
+            if proc.ports_expected.contains(&port) {
+                if !configured.contains(&port) {
+                    configured.push(port);
+                }
+            } else if !detected.contains(&port) {
+                detected.push(port);
+            }
+        }
+    }
+
+    configured.sort();
+    detected.sort();
+
+    if configured.is_empty() && detected.is_empty() {
+        return String::new();
+    }
+
+    if configured.is_empty() {
+        let max_show = 3;
+        let shown: Vec<u16> = detected.iter().copied().take(max_show).collect();
+        let rest = detected.len().saturating_sub(max_show);
+        let mut s = format_port_ranges(&shown);
+        if rest > 0 {
+            s.push_str(&format!(" (+{})", rest));
+        }
+        return s;
+    }
+
+    let mut s = format_port_ranges(&configured);
+    if !detected.is_empty() {
+        s.push_str(&format!(" (+{})", detected.len()));
+    }
+    s
 }
 
 fn print_process_line(proc: &ProcessStatus, name_width: usize) {
@@ -2324,6 +2455,24 @@ fn render_condensed_status(args: &[String]) -> usize {
     let mut lines = 0usize;
     let name_w = data.max_svc_name_width;
 
+    struct RowData {
+        sym: String,
+        name: String,
+        label: String,
+        dur_str: String,
+        dur_colored: String,
+        mini_icons: String,
+        mini_icons_width: usize,
+        ports_str: String,
+        agg: AggregateState,
+    }
+
+    let mut rows: Vec<RowData> = Vec::new();
+    let mut max_dur_w: usize = 0;
+    let mut max_icons_w: usize = 0;
+    let mut any_has_dur = false;
+    let mut any_has_icons = false;
+
     for name in &data.sorted_filter {
         let status = data.status_map.get(name);
         let agg = status
@@ -2338,46 +2487,77 @@ fn render_condensed_status(args: &[String]) -> usize {
         let has_multi = status.map(|s| s.processes.len() > 1).unwrap_or(false);
 
         let mini_icons = if has_multi {
-            let icons: String = status
-                .unwrap()
-                .processes
-                .iter()
-                .map(|p| process_mini_icon(p))
-                .collect();
-            icons
+            format_condensed_mini_icons(status.unwrap())
         } else {
             String::new()
+        };
+
+        let mini_icons_width = if has_multi {
+            condensed_mini_icons_width(status.unwrap())
+        } else {
+            0
         };
 
         let ports_str: String = if let Some(status) = status {
-            let all_ports: Vec<u16> = status
-                .processes
-                .iter()
-                .filter(|p| p.state.is_running())
-                .flat_map(|p| p.ports.iter().copied())
-                .collect();
-            format_port_ranges(&all_ports)
+            format_condensed_ports(status)
         } else {
             String::new()
         };
 
-        let mut line = format!("{} {:<nw$}  {:<3}", sym, name, label, nw = name_w);
-        if !dur_colored.is_empty() {
-            line.push_str(&format!("  {:>7}", dur_colored));
-        } else if !mini_icons.is_empty() || !ports_str.is_empty() {
-            line.push_str(&format!("  {:>7}", ""));
+        if !dur_str.is_empty() {
+            any_has_dur = true;
+            max_dur_w = max_dur_w.max(dur_str.len());
         }
-        if !mini_icons.is_empty() {
-            line.push_str(&format!(" {}", mini_icons));
+        if mini_icons_width > 0 {
+            any_has_icons = true;
+            max_icons_w = max_icons_w.max(mini_icons_width);
         }
-        if !ports_str.is_empty() {
-            line.push_str(&format!("  {}", ports_str));
+
+        rows.push(RowData {
+            sym,
+            name: name.clone(),
+            label,
+            dur_str,
+            dur_colored,
+            mini_icons,
+            mini_icons_width,
+            ports_str,
+            agg,
+        });
+    }
+
+    let dur_col_w = if any_has_dur { max_dur_w.max(1) } else { 0 };
+
+    for row in &rows {
+        let mut line = format!("{} {:<nw$}  {:<3}", row.sym, row.name, row.label, nw = name_w);
+
+        if dur_col_w > 0 {
+            if !row.dur_str.is_empty() {
+                let pad = dur_col_w - row.dur_str.len();
+                line.push_str(&format!("  {}{}", " ".repeat(pad), row.dur_colored));
+            } else {
+                line.push_str(&format!("  {}", " ".repeat(dur_col_w)));
+            }
         }
+
+        if any_has_icons {
+            if row.mini_icons_width > 0 {
+                let pad = max_icons_w - row.mini_icons_width;
+                line.push_str(&format!(" {}{}", row.mini_icons, " ".repeat(pad)));
+            } else {
+                line.push_str(&format!(" {}", " ".repeat(max_icons_w)));
+            }
+        }
+
+        if !row.ports_str.is_empty() {
+            line.push_str(&format!("  {}", row.ports_str));
+        }
+
         println!("{}", line.trim_end());
         lines += 1;
 
-        if matches!(agg, AggregateState::Err | AggregateState::Degraded) {
-            let tail = tail_log_lines_string(name, &None, 3);
+        if matches!(row.agg, AggregateState::Err | AggregateState::Degraded) {
+            let tail = tail_log_lines_string(&row.name, &None, 3);
             for tl in tail {
                 println!("  {}", tl.dimmed());
                 lines += 1;
