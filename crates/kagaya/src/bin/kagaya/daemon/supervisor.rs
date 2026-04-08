@@ -133,6 +133,7 @@ impl Supervisor {
         all: bool,
         processes: &[String],
         chains: &[Vec<String>],
+        force: bool,
     ) -> Result<String, String> {
         let entries = config::load_service_entries();
         let entry = entries
@@ -164,7 +165,7 @@ impl Supervisor {
         }
 
         self.inner
-            .start_service(name, &entry.dir, &service.processes, all, processes)
+            .start_service(name, &entry.dir, &service.processes, all, processes, force)
             .await
     }
 
@@ -215,6 +216,7 @@ impl Supervisor {
         name: &str,
         all: bool,
         processes: &[String],
+        force: bool,
     ) -> Result<String, String> {
         let entries = config::load_service_entries();
         let entry = entries
@@ -223,7 +225,7 @@ impl Supervisor {
 
         let service = config::load_service(entry, &self.config.defaults);
         self.inner
-            .reload_service(name, &entry.dir, &service.processes, all, processes)
+            .reload_service(name, &entry.dir, &service.processes, all, processes, force)
             .await
     }
 

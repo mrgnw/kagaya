@@ -113,6 +113,7 @@ impl Supervisor {
     /// Start a service with the given process definitions.
     ///
     /// `filter` limits which processes start; empty means use `all` flag or `autostart`.
+    /// `force` kills existing processes and port holders before starting.
     pub async fn start_service(
         self: &Arc<Self>,
         name: &str,
@@ -120,6 +121,7 @@ impl Supervisor {
         process_defs: &[ProcessDef],
         all: bool,
         filter: &[String],
+        force: bool,
     ) -> Result<String, String> {
         // If the service is already managed and specific processes are requested,
         // start only those stopped/failed processes within the existing service.
@@ -183,10 +185,34 @@ impl Supervisor {
         }
 
         {
-            let services = self.services.read().await;
-            if let Some(managed) = services.get(name) {
-                if managed.processes.values().any(|p| p.state.is_running()) {
-                    return Ok(format!("{}: already running", name));
+            let mut services = self.services.write().await;
+            if let Some(managed) = services.get_mut(name) {
+                let any_actually_running = managed.processes.values().any(|p| {
+                    if let ProcessState::Running { pid, .. } = &p.state {
+                        pid_is_alive(*pid)
+                    } else {
+                        false
+                    }
+                });
+
+                if any_actually_running {
+                    if force {
+                        drop(services);
+                        let _ = self.stop_service(name).await;
+                        let all_ports: Vec<u16> = process_defs
+                            .iter()
+                            .flat_map(|pd| pd.ports.iter().copied())
+                            .collect();
+                        if !all_ports.is_empty() {
+                            kill_port_holders(&all_ports).await;
+                            wait_for_ports_free(&all_ports).await;
+                        }
+                    } else {
+                        return Ok(format!("{}: already running", name));
+                    }
+                } else {
+                    tracing::info!("{}: cleaning up stale state (processes no longer alive)", name);
+                    services.remove(name);
                 }
             }
         }
@@ -470,9 +496,20 @@ impl Supervisor {
         process_defs: &[ProcessDef],
         all: bool,
         filter: &[String],
+        force: bool,
     ) -> Result<String, String> {
         let _ = self.stop_service(name).await;
-        self.start_service(name, dir, process_defs, all, filter)
+        if force {
+            let all_ports: Vec<u16> = process_defs
+                .iter()
+                .flat_map(|pd| pd.ports.iter().copied())
+                .collect();
+            if !all_ports.is_empty() {
+                kill_port_holders(&all_ports).await;
+                wait_for_ports_free(&all_ports).await;
+            }
+        }
+        self.start_service(name, dir, process_defs, all, filter, force)
             .await
     }
 
@@ -1204,6 +1241,13 @@ fn is_alive(pid: i32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid), None).is_ok()
+}
+
+/// Check if a process is still alive by sending signal 0.
+fn pid_is_alive(pid: u32) -> bool {
+	use nix::sys::signal::kill;
+	use nix::unistd::Pid;
+	kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
 /// Kill a process and all its descendants. Sends SIGTERM to process group + individual

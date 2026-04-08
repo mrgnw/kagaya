@@ -34,7 +34,7 @@
 //!     ready_timeout: 10,
 //! }];
 //!
-//! sup.start_service("myapp", "/tmp".as_ref(), &procs, true, &[])
+//! sup.start_service("myapp", "/tmp".as_ref(), &procs, true, &[], false)
 //!     .await
 //!     .unwrap();
 //! # }

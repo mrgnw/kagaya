@@ -140,6 +140,7 @@ pub async fn run(args: &[String]) {
                 processes: vec![],
                 chains,
                 wait: false,
+                force: false,
             };
             let response =
                 handle_request(&supervisor, request, &shutdown, &preserve_state).await;
@@ -213,6 +214,7 @@ async fn handle_request(
             processes,
             chains,
             wait,
+            force,
         } => {
             // Build cross-project dependency map from chains
             let mut project_deps: std::collections::HashMap<String, Vec<String>> =
@@ -240,7 +242,7 @@ async fn handle_request(
                         .cloned()
                         .collect();
                     match supervisor
-                        .start_service_filtered(name, all, &processes, &intra_chains)
+                        .start_service_filtered(name, all, &processes, &intra_chains, force)
                         .await
                     {
                         Ok(msg) => messages.push(msg),
@@ -285,7 +287,7 @@ async fn handle_request(
 
                     for name in &ready_to_start {
                         match supervisor
-                            .start_service_filtered(name, all, &processes, &[])
+                            .start_service_filtered(name, all, &processes, &[], force)
                             .await
                         {
                             Ok(msg) => messages.push(msg),
@@ -333,11 +335,12 @@ async fn handle_request(
             names,
             all,
             processes,
+            force,
         } => {
             let mut messages = Vec::new();
             for name in &names {
                 match supervisor
-                    .reload_service_filtered(name, all, &processes)
+                    .reload_service_filtered(name, all, &processes, force)
                     .await
                 {
                     Ok(msg) => messages.push(msg),
@@ -498,7 +501,7 @@ async fn restore_resume_snapshot(
             continue;
         }
         match supervisor
-            .start_service_filtered(&name, false, processes, &[])
+            .start_service_filtered(&name, false, processes, &[], false)
             .await
         {
             Ok(message) => tracing::info!("restored {} ({})", name, message),
@@ -705,7 +708,7 @@ mod tests {
         let defs = vec![proc("web", "sleep 60"), proc("worker", "sleep 60")];
         supervisor
             .inner
-            .start_service("app", &dir, &defs, false, &["web".to_string()])
+            .start_service("app", &dir, &defs, false, &["web".to_string()], false)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;

@@ -17,6 +17,9 @@ pub enum Request {
         /// Block until all started processes are ready.
         #[serde(default)]
         wait: bool,
+        /// Kill existing processes/port holders before starting.
+        #[serde(default)]
+        force: bool,
     },
     Stop {
         names: Vec<String>,
@@ -29,6 +32,9 @@ pub enum Request {
         all: bool,
         #[serde(default)]
         processes: Vec<String>,
+        /// Kill existing processes/port holders before starting.
+        #[serde(default)]
+        force: bool,
     },
     Restart {
         service: String,

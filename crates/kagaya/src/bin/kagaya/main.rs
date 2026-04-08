@@ -91,6 +91,7 @@ fn main() {
                     detailed,
                     echo,
                     wait,
+                    force,
                     watch,
                     no_watch,
                     watch_interval,
@@ -107,6 +108,9 @@ fn main() {
                     }
                     if wait {
                         args.push("--wait".to_string());
+                    }
+                    if force {
+                        args.push("--force".to_string());
                     }
                     if watch || cli.watch {
                         args.push("--watch".to_string());
@@ -159,6 +163,7 @@ fn main() {
                     all,
                     detailed,
                     echo,
+                    force,
                     watch,
                     no_watch,
                     watch_interval,
@@ -169,6 +174,9 @@ fn main() {
                     }
                     if detailed {
                         args.push("--detailed".to_string());
+                    }
+                    if force {
+                        args.push("--force".to_string());
                     }
                     if watch || cli.watch {
                         args.push("--watch".to_string());
@@ -1153,9 +1161,17 @@ fn cmd_start(args: &[String]) {
     let start_all = rest.iter().any(|a| is_all_flag(a));
     let detailed = rest.iter().any(|a| is_detailed_flag(a));
     let wait_for_ready = rest.iter().any(|a| a == "--wait");
+    let force = rest.iter().any(|a| a == "--force" || a == "-f");
     let rest: Vec<String> = rest
         .into_iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--autostart" && a != "--wait")
+        .filter(|a| {
+            !is_all_flag(a)
+                && !is_detailed_flag(a)
+                && a != "--autostart"
+                && a != "--wait"
+                && a != "--force"
+                && a != "-f"
+        })
         .collect();
 
     if autostart_only {
@@ -1174,6 +1190,7 @@ fn cmd_start(args: &[String]) {
             processes: vec![],
             chains,
             wait: false,
+            force,
         });
         handle_action_response(&response);
         return;
@@ -1217,6 +1234,7 @@ fn cmd_start(args: &[String]) {
         processes: target_processes,
         chains,
         wait: wait_for_ready,
+        force,
     });
 
     if plain {
@@ -1331,9 +1349,10 @@ fn cmd_restart(args: &[String]) {
 
     let restart_all = rest.iter().any(|a| is_all_flag(a));
     let detailed = rest.iter().any(|a| is_detailed_flag(a));
+    let force = rest.iter().any(|a| a == "--force" || a == "-f");
     let rest: Vec<String> = rest
         .into_iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a))
+        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--force" && a != "-f")
         .collect();
 
     if !watch.enabled && !plain && !watch.no_watch && io::stdout().is_terminal() {
@@ -1354,6 +1373,7 @@ fn cmd_restart(args: &[String]) {
             names: names.clone(),
             all: restart_all,
             processes: target_processes,
+            force,
         });
 
         if plain {
@@ -1398,6 +1418,7 @@ fn cmd_restart(args: &[String]) {
             names: vec![service.clone()],
             all: false,
             processes: vec![],
+            force,
         });
 
         if plain {

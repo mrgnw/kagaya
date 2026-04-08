@@ -292,7 +292,7 @@ async fn start_service(
         .unwrap_or(false);
     state
         .supervisor
-        .start_service_filtered(&name, all, &[], &[])
+        .start_service_filtered(&name, all, &[], &[], false)
         .await
         .map(|msg| Json(ActionResponse { message: msg }))
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
@@ -316,7 +316,7 @@ async fn reload_service(
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .supervisor
-        .reload_service_filtered(&name, false, &[])
+        .reload_service_filtered(&name, false, &[], false)
         .await
         .map(|msg| Json(ActionResponse { message: msg }))
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))

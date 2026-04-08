@@ -101,6 +101,9 @@ pub enum Cmd {
         /// Block until all started processes are ready
         #[arg(long)]
         wait: bool,
+        /// Kill existing processes/port holders before starting
+        #[arg(long, short)]
+        force: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
         /// Skip post-command status watch
@@ -145,6 +148,9 @@ pub enum Cmd {
         /// Stream live output after restarting
         #[arg(long, short = 'e')]
         echo: bool,
+        /// Kill existing processes/port holders before starting
+        #[arg(long, short)]
+        force: bool,
         #[arg(long, short, hide = true)]
         watch: bool,
         /// Skip post-command status watch

@@ -255,7 +255,7 @@ async fn supervisor_start_and_stop() {
     let dir = temp_dir("start-stop-workdir");
 
     let procs = vec![simple_proc("sleeper", "sleep 60")];
-    let result = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let result = sup.start_service("test", &dir, &procs, true, &[], false).await;
     assert!(result.is_ok());
 
     // Give it a moment to spawn
@@ -282,10 +282,10 @@ async fn supervisor_already_running() {
     let dir = temp_dir("already-running-workdir");
 
     let procs = vec![simple_proc("sleeper", "sleep 60")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let result = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let result = sup.start_service("test", &dir, &procs, true, &[], false).await;
     assert!(result.unwrap().contains("already running"));
 
     let _ = sup.stop_service("test").await;
@@ -308,7 +308,7 @@ async fn supervisor_empty_processes() {
     let (sup, log_dir) = test_supervisor("empty-procs");
     let dir = temp_dir("empty-procs-workdir");
 
-    let result = sup.start_service("test", &dir, &[], true, &[]).await;
+    let result = sup.start_service("test", &dir, &[], true, &[], false).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("no processes defined"));
 
@@ -324,7 +324,7 @@ async fn supervisor_captures_output() {
     let dir = temp_dir("output-workdir");
 
     let procs = vec![simple_proc("echo", "echo hello-kagaya")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
 
     // Wait for process to run and output to be captured
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -348,7 +348,7 @@ async fn supervisor_process_exits_cleanly() {
     let dir = temp_dir("clean-exit-workdir");
 
     let procs = vec![simple_proc("fast", "echo done")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
 
     // Wait for process to finish
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -385,7 +385,7 @@ async fn task_does_not_restart_on_failure() {
         ready_timeout: 10,
     }];
 
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let statuses = sup.status().await;
@@ -411,7 +411,7 @@ async fn supervisor_filter_processes() {
     // Only start "web"
     let filter = vec!["web".to_string()];
     let _ = sup
-        .start_service("test", &dir, &procs, false, &filter)
+        .start_service("test", &dir, &procs, false, &filter, false)
         .await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -442,7 +442,7 @@ async fn supervisor_kill_process() {
     let dir = temp_dir("kill-workdir");
 
     let procs = vec![simple_proc("sleeper", "sleep 60")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let result = sup.kill_process("test", "sleeper").await;
@@ -483,7 +483,7 @@ async fn supervisor_passes_env_vars() {
         ready_timeout: 10,
     }];
 
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let output = sup.get_output("test", Some("env")).await.unwrap();
@@ -614,7 +614,7 @@ async fn depends_on_starts_dependency_first() {
     };
 
     let procs = vec![marker, checker];
-    let _ = sup.start_service("test", &dir, &procs, true, &[]).await;
+    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // checker should have been able to read the marker file
