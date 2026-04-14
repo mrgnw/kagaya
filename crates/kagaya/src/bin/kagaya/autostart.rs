@@ -160,29 +160,3 @@ fn set_all(value: bool) {
         std::process::exit(1);
     }
 }
-
-// ── Deprecated shims kept only until the daemon module is deleted ────────────
-
-pub struct AutostartInfo {
-    pub installed: bool,
-    pub active: bool,
-    pub agent_path: Option<String>,
-    pub projects: Vec<String>,
-}
-
-pub fn status_info() -> AutostartInfo {
-    AutostartInfo {
-        installed: false,
-        active: false,
-        agent_path: None,
-        projects: crate::config::autostart_project_names(),
-    }
-}
-
-pub fn enable() -> Result<String, String> {
-    Err("bulk autostart removed; use `ky autostart <name> on`".into())
-}
-
-pub fn disable() -> Result<String, String> {
-    Err("bulk autostart removed; use `ky autostart <name> off`".into())
-}

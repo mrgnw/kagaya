@@ -1,4 +1,4 @@
-use crate::protocol::config_dir;
+use crate::utils::config_dir;
 use kagaya::{ProcessDef, Service, ServiceType};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};

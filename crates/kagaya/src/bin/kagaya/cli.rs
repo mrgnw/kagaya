@@ -180,11 +180,7 @@ pub enum Cmd {
     #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Cron { args: Vec<String> },
 
-    /// Manage the daemon process
-    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
-    Daemon { args: Vec<String> },
-
-    /// Reload projects.toml without restarting services
+    /// Reload projects.toml and re-sync plists
     #[command(visible_alias = "rc")]
     ReloadConfig,
 
