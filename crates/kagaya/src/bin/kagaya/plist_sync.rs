@@ -20,22 +20,81 @@ pub fn plist_exists(name: &str) -> bool {
     plist_path(name).exists()
 }
 
-fn resolved_command(svc: &ServiceEntry) -> Option<Vec<String>> {
-    if let Some(inline) = &svc.inline_command {
-        return Some(vec!["/bin/sh".into(), "-c".into(), inline.run.clone()]);
+fn has_shell_metachars(cmd: &str) -> bool {
+    cmd.contains("&&")
+        || cmd.contains("||")
+        || cmd.contains(';')
+        || cmd.contains('|')
+        || cmd.contains('>')
+        || cmd.contains('<')
+        || cmd.contains("$(")
+        || cmd.contains('`')
+        || cmd.contains('*')
+        || cmd.contains('~')
+}
+
+fn which_in_path(bin: &str) -> Option<PathBuf> {
+    if bin.contains('/') {
+        let p = PathBuf::from(bin);
+        return if p.is_file() { Some(p) } else { None };
     }
-    let services_toml = svc.dir.join("services.toml");
-    if services_toml.exists() {
-        let content = std::fs::read_to_string(&services_toml).ok()?;
-        let root: toml::Value = toml::from_str(&content).ok()?;
-        let table = root.as_table()?;
-        for (_, value) in table {
-            if let Some(run) = value.get("run").and_then(|v| v.as_str()) {
-                return Some(vec!["/bin/sh".into(), "-c".into(), run.to_string()]);
-            }
+    let path = std::env::var("PATH").ok()?;
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        let candidate = PathBuf::from(dir).join(bin);
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     None
+}
+
+/// Build the ProgramArguments array for a run string. If the command has shell
+/// metacharacters, wrap in `/bin/sh -c` (launchd's PATH is minimal, but the
+/// shell-wrapped form is explicit user intent). Otherwise tokenize the command
+/// and resolve the first token against the caller's PATH at plist-write time
+/// so the absolute binary path is baked in.
+fn build_program_args(cmd: &str) -> Vec<String> {
+    if has_shell_metachars(cmd) {
+        return vec!["/bin/sh".into(), "-c".into(), cmd.to_string()];
+    }
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    if tokens.is_empty() {
+        return vec!["/bin/sh".into(), "-c".into(), cmd.to_string()];
+    }
+    let resolved = which_in_path(tokens[0])
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| tokens[0].to_string());
+    let mut args = vec![resolved];
+    for t in &tokens[1..] {
+        args.push(t.to_string());
+    }
+    args
+}
+
+fn resolved_command(svc: &ServiceEntry) -> Option<Vec<String>> {
+    if let Some(inline) = &svc.inline_command {
+        return Some(build_program_args(&inline.run));
+    }
+    let services_toml = svc.dir.join("services.toml");
+    if services_toml.exists() {
+        if let Ok(content) = std::fs::read_to_string(&services_toml) {
+            if let Ok(root) = toml::from_str::<toml::Value>(&content) {
+                if let Some(table) = root.as_table() {
+                    for (_, value) in table {
+                        if let Some(run) = value.as_str() {
+                            return Some(build_program_args(run));
+                        }
+                        if let Some(run) = value.get("run").and_then(|v| v.as_str()) {
+                            return Some(build_program_args(run));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let suggestions = crate::detect::detect_services(&svc.dir);
+    let first = suggestions.into_iter().next()?;
+    Some(build_program_args(&first.command))
 }
 
 fn service_env(svc: &ServiceEntry) -> std::collections::HashMap<String, String> {
@@ -74,7 +133,12 @@ pub fn build_plist(svc: &ServiceEntry) -> Option<plist::Value> {
         plist::Value::String(stderr_log.to_string_lossy().to_string()),
     );
 
-    let env = service_env(svc);
+    let mut env = service_env(svc);
+    if !env.contains_key("PATH") {
+        if let Ok(current_path) = std::env::var("PATH") {
+            env.insert("PATH".into(), current_path);
+        }
+    }
     if !env.is_empty() {
         let mut env_dict = plist::Dictionary::new();
         for (k, v) in env {
