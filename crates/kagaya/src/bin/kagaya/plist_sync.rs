@@ -97,7 +97,7 @@ pub fn is_loaded(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn bootstrap(path: &PathBuf) -> Result<(), String> {
+pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
     let target = format!("gui/{}", get_uid());
     let out = Command::new("launchctl")
         .args(["bootstrap", &target, &path.to_string_lossy()])
@@ -116,7 +116,7 @@ fn bootstrap(path: &PathBuf) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
-fn bootout(name: &str) -> Result<(), String> {
+pub fn bootout(name: &str) -> Result<(), String> {
     let label = label_for(name);
     let target = format!("gui/{}/{}", get_uid(), label);
     let out = Command::new("launchctl")
@@ -303,6 +303,125 @@ pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
 
 pub fn query_all(services: &BTreeMap<String, ServiceEntry>) -> Vec<ServiceStatus> {
     services.values().map(status_for).collect()
+}
+
+// ── Orchestration (used by start/stop/restart handlers) ──────────────────────
+
+pub struct OpResult {
+    pub name: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+pub fn start_services(names: &[String]) -> Vec<OpResult> {
+    names.iter().map(|n| start_one(n)).collect()
+}
+
+pub fn stop_services(names: &[String]) -> Vec<OpResult> {
+    names.iter().map(|n| stop_one(n)).collect()
+}
+
+pub fn restart_services(names: &[String]) -> Vec<OpResult> {
+    names.iter().map(|n| restart_one(n)).collect()
+}
+
+fn start_one(name: &str) -> OpResult {
+    let path = plist_path(name);
+    if !path.exists() {
+        return OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("no plist for '{}'. run `ky add {}` first", name, name),
+        };
+    }
+    if is_loaded(name) {
+        return kickstart(name);
+    }
+    match bootstrap(&path) {
+        Ok(()) => OpResult {
+            name: name.to_string(),
+            ok: true,
+            message: format!("{}: started", name),
+        },
+        Err(e) => OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("{}: {}", name, e),
+        },
+    }
+}
+
+fn stop_one(name: &str) -> OpResult {
+    if !plist_path(name).exists() {
+        return OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("{}: not registered", name),
+        };
+    }
+    match bootout(name) {
+        Ok(()) => OpResult {
+            name: name.to_string(),
+            ok: true,
+            message: format!("{}: stopped", name),
+        },
+        Err(e) => OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("{}: {}", name, e),
+        },
+    }
+}
+
+fn restart_one(name: &str) -> OpResult {
+    let path = plist_path(name);
+    if !path.exists() {
+        return OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("no plist for '{}'. run `ky add {}` first", name, name),
+        };
+    }
+    if is_loaded(name) {
+        return kickstart(name);
+    }
+    match bootstrap(&path) {
+        Ok(()) => OpResult {
+            name: name.to_string(),
+            ok: true,
+            message: format!("{}: started", name),
+        },
+        Err(e) => OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("{}: {}", name, e),
+        },
+    }
+}
+
+fn kickstart(name: &str) -> OpResult {
+    let label = label_for(name);
+    let target = format!("gui/{}/{}", get_uid(), label);
+    let out = Command::new("launchctl")
+        .args(["kickstart", "-kp", &target])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => OpResult {
+            name: name.to_string(),
+            ok: true,
+            message: format!("{}: restarted", name),
+        },
+        Ok(o) => OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("{}: {}", name, String::from_utf8_lossy(&o.stderr).trim()),
+        },
+        Err(e) => OpResult {
+            name: name.to_string(),
+            ok: false,
+            message: format!("{}: {}", name, e),
+        },
+    }
 }
 
 #[cfg(test)]

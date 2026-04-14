@@ -1127,6 +1127,22 @@ fn print_process_line(proc: &ProcessStatus, name_width: usize) {
     );
 }
 
+fn response_from_ops(results: Vec<plist_sync::OpResult>) -> Response {
+    let has_err = results.iter().any(|r| !r.ok);
+    let body = results
+        .iter()
+        .map(|r| r.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if has_err {
+        Response::Error { message: body }
+    } else {
+        Response::Ok {
+            message: Some(body),
+        }
+    }
+}
+
 fn handle_action_response(response: &Response) {
     let fmt = output_format();
     match response {
@@ -1177,7 +1193,7 @@ fn cmd_start(args: &[String]) {
         .collect();
 
     if autostart_only {
-        let (names, chains) = config::autostart_sorted();
+        let (names, _chains) = config::autostart_sorted();
         if names.is_empty() {
             if plain {
                 format::json_error("no projects with autostart = true");
@@ -1186,14 +1202,8 @@ fn cmd_start(args: &[String]) {
             }
             return;
         }
-        let response = send_request(&Request::Start {
-            names: names.clone(),
-            all: true,
-            processes: vec![],
-            chains,
-            wait: false,
-            force,
-        });
+        let _ = force;
+        let response = response_from_ops(plist_sync::start_services(&names));
         handle_action_response(&response);
         return;
     }
@@ -1230,14 +1240,8 @@ fn cmd_start(args: &[String]) {
         std::process::exit(1);
     }
 
-    let response = send_request(&Request::Start {
-        names: resolved.clone(),
-        all: start_all || !target_processes.is_empty(),
-        processes: target_processes,
-        chains,
-        wait: wait_for_ready,
-        force,
-    });
+    let _ = (target_processes, chains, wait_for_ready, force, start_all);
+    let response = response_from_ops(plist_sync::start_services(&resolved));
 
     if plain {
         handle_action_response(&response);
@@ -1301,10 +1305,8 @@ fn cmd_stop(args: &[String]) {
         std::process::exit(1);
     }
 
-    let response = send_request(&Request::Stop {
-        names: names.clone(),
-        processes: target_processes,
-    });
+    let _ = target_processes;
+    let response = response_from_ops(plist_sync::stop_services(&names));
 
     if plain {
         handle_action_response(&response);
@@ -1371,12 +1373,8 @@ fn cmd_restart(args: &[String]) {
             std::process::exit(1);
         }
 
-        let response = send_request(&Request::Reload {
-            names: names.clone(),
-            all: restart_all,
-            processes: target_processes,
-            force,
-        });
+        let _ = (target_processes, restart_all, force);
+        let response = response_from_ops(plist_sync::restart_services(&names));
 
         if plain {
             handle_action_response(&response);
@@ -1416,12 +1414,9 @@ fn cmd_restart(args: &[String]) {
 
     // No process name means restart all processes in the service
     if process.is_none() {
-        let response = send_request(&Request::Reload {
-            names: vec![service.clone()],
-            all: false,
-            processes: vec![],
-            force,
-        });
+        let _ = force;
+        let response =
+            response_from_ops(plist_sync::restart_services(&[service.clone()]));
 
         if plain {
             handle_action_response(&response);
@@ -1456,12 +1451,9 @@ fn cmd_restart(args: &[String]) {
         return;
     }
 
-    // Restart a single process
-    let process_name = process.unwrap();
-    let response = send_request(&Request::Restart {
-        service: service.clone(),
-        process: process_name.clone(),
-    });
+    // Restart a single process — multi-process is gone; treat as full-service restart
+    let _ = process;
+    let response = response_from_ops(plist_sync::restart_services(&[service.clone()]));
 
     if plain {
         handle_action_response(&response);
@@ -2282,25 +2274,9 @@ fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpt
 }
 
 fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
-    let response = send_request(&Request::Status);
-    match response {
-        Response::Status {
-            services,
-            http_port,
-        } => (services, http_port),
-        Response::Error { message } => {
-            if output_format() == OutputFormat::Json {
-                format::json_error(&message);
-            } else {
-                eprintln!("error: {}", message);
-            }
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("unexpected response from daemon");
-            std::process::exit(1);
-        }
-    }
+    let entries = config::load_service_entries();
+    let services = plist_sync::query_all(&entries);
+    (services, None)
 }
 
 struct StatusData {
