@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const KAGAYA_PREFIX: &str = "com.kagaya.";
+pub(crate) const KAGAYA_PREFIX: &str = "com.kagaya.";
 
 // --- Public entry point ---
 
@@ -196,7 +196,7 @@ use crate::utils::listening_ports_for_pids;
 
 // --- Discovery ---
 
-fn get_uid() -> u32 {
+pub(crate) fn get_uid() -> u32 {
     Command::new("id")
         .arg("-u")
         .output()
@@ -205,7 +205,7 @@ fn get_uid() -> u32 {
         .unwrap_or(501)
 }
 
-fn user_agents_dir() -> PathBuf {
+pub(crate) fn user_agents_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join("Library").join("LaunchAgents")
 }

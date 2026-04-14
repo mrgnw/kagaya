@@ -8,6 +8,8 @@ mod koku_client;
 mod launchd;
 mod logs;
 mod migrate;
+#[allow(dead_code)]
+mod plist_sync;
 mod protocol;
 mod self_update;
 mod utils;
