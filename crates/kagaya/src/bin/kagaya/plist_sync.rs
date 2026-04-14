@@ -240,10 +240,14 @@ pub fn set_run_at_load(name: &str, value: bool) -> Result<(), String> {
     value_plist
         .to_file_xml(&path)
         .map_err(|e| format!("writing plist: {}", e))?;
-    if is_loaded(name) {
+    // Always bootout so launchd drops its in-memory state (which ignores
+    // the new RunAtLoad and keeps the process alive via KeepAlive).
+    let was_loaded = is_loaded(name);
+    if was_loaded {
         let _ = bootout(name);
-        bootstrap(&path)?;
-    } else if value {
+    }
+    // Only re-bootstrap if we're turning autostart ON. Turning OFF = stop.
+    if value {
         bootstrap(&path)?;
     }
     Ok(())
