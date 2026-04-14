@@ -1,5 +1,7 @@
 # Per-project start scripts for multi-process / dependency-aware services
 
+**Resolved** — kagaya now writes one plist per process when services.toml has multiple entries (`com.kagaya.<project>.<proc>.plist`). Multi-process is native. See commit `be5bfc9`. Wrapper scripts remain useful for projects that genuinely need pre_start hooks or dependency ordering (e.g. openchamber waiting on opencode, matrix's tuwunel LOCK cleanup), but are no longer required for routine multi-process services.
+
 ## Context
 
 After the launchctl-frontend refactor, kagaya dropped the daemon's built-in `depends_on`, `ready`, multi-process, and `pre_start` features. Most services re-run fine as single launchd agents, but some need orchestration kagaya no longer provides.
