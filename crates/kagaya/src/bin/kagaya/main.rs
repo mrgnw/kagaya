@@ -2104,11 +2104,87 @@ fn cmd_daemon(args: &[String]) {
 
 fn cmd_serve(action: Option<ServeAction>) {
     match action {
-        Some(ServeAction::Stop) => cmd_daemon(&["stop".into()]),
+        Some(ServeAction::Stop) => serve_stop(),
         Some(ServeAction::Status) => cmd_serve_status(),
-        Some(ServeAction::Daemon) | None => cmd_daemon(&["start".into()]),
-        Some(ServeAction::Foreground) => {
-            cmd_daemon(&["run".into(), "--foreground".into()])
+        Some(ServeAction::Foreground) => cmd_daemon(&["run".into(), "--foreground".into()]),
+        Some(ServeAction::Daemon) | None => serve_install_and_start(),
+    }
+}
+
+const SERVE_LABEL: &str = "serve";
+
+fn serve_install_and_start() {
+    let agents_dir = launchd::user_agents_dir();
+    let _ = std::fs::create_dir_all(&agents_dir);
+    let plist_path = agents_dir.join(format!("com.kagaya.{}.plist", SERVE_LABEL));
+    let log_root = logs::log_dir();
+    let _ = std::fs::create_dir_all(&log_root);
+
+    let bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "ky".into());
+
+    let needs_write = !plist_path.exists();
+    if needs_write {
+        let mut dict = plist::Dictionary::new();
+        dict.insert(
+            "Label".into(),
+            plist::Value::String(format!("com.kagaya.{}", SERVE_LABEL)),
+        );
+        dict.insert(
+            "ProgramArguments".into(),
+            plist::Value::Array(vec![
+                plist::Value::String(bin),
+                plist::Value::String("serve".into()),
+                plist::Value::String("--foreground".into()),
+            ]),
+        );
+        dict.insert("RunAtLoad".into(), plist::Value::Boolean(true));
+        dict.insert("KeepAlive".into(), plist::Value::Boolean(true));
+        dict.insert(
+            "StandardOutPath".into(),
+            plist::Value::String(log_root.join("serve.log").to_string_lossy().into()),
+        );
+        dict.insert(
+            "StandardErrorPath".into(),
+            plist::Value::String(log_root.join("serve.err.log").to_string_lossy().into()),
+        );
+        if let Err(e) = plist::Value::Dictionary(dict).to_file_xml(&plist_path) {
+            eprintln!("error writing plist: {}", e);
+            std::process::exit(1);
+        }
+        eprintln!("serve: installed {}", plist_path.display());
+    }
+
+    if plist_sync::is_loaded(SERVE_LABEL) {
+        let uid = launchd::get_uid();
+        let target = format!("gui/{}/com.kagaya.{}", uid, SERVE_LABEL);
+        let _ = std::process::Command::new("launchctl")
+            .args(["kickstart", "-kp", &target])
+            .output();
+        eprintln!("serve: restarted");
+    } else {
+        match plist_sync::bootstrap(&plist_path) {
+            Ok(()) => eprintln!("serve: started"),
+            Err(e) => {
+                eprintln!("serve: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn serve_stop() {
+    if !plist_sync::is_loaded(SERVE_LABEL) {
+        eprintln!("serve: not running");
+        return;
+    }
+    match plist_sync::bootout(SERVE_LABEL) {
+        Ok(()) => eprintln!("serve: stopped"),
+        Err(e) => {
+            eprintln!("serve: {}", e);
+            std::process::exit(1);
         }
     }
 }
