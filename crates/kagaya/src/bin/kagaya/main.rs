@@ -593,6 +593,7 @@ fn cmd_add(args: &[String], run: Option<&str>) {
             .unwrap();
         writeln!(file, "\n[{}]\nrun = {:?}", name, cmd).unwrap();
         eprintln!("{}: added (run: {})", name, cmd);
+        sync_plist_after_add(&name);
         return;
     }
 
@@ -650,6 +651,18 @@ fn cmd_add(args: &[String], run: Option<&str>) {
     let updated = insert_before_first_table(&existing_content, &new_line);
     std::fs::write(&projects_file, updated).unwrap();
     eprintln!("{}: added ({})", name, dir.display());
+    sync_plist_after_add(&name);
+}
+
+fn sync_plist_after_add(name: &str) {
+    let entries = config::load_service_entries();
+    let Some(svc) = entries.get(name) else {
+        return;
+    };
+    match plist_sync::sync_service(svc) {
+        Ok(()) => eprintln!("{}: plist written", name),
+        Err(e) => eprintln!("{}: plist not written: {}", name, e),
+    }
 }
 
 fn cmd_remove(args: &[String]) {
@@ -691,6 +704,10 @@ fn cmd_remove(args: &[String]) {
     let commands_dir = config_dir.join("_commands").join(&name);
     if commands_dir.exists() {
         let _ = std::fs::remove_dir_all(&commands_dir);
+    }
+
+    if let Err(e) = plist_sync::remove_service(&name) {
+        eprintln!("{}: plist cleanup: {}", name, e);
     }
 
     eprintln!("{}: removed", name);
