@@ -44,18 +44,16 @@ pub fn plist_paths_for_project(project: &str) -> Vec<(Option<String>, PathBuf)> 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".plist") {
+            let Some(label) = name.strip_suffix(".plist") else {
                 continue;
-            }
-            if !name.starts_with(&prefix) {
+            };
+            let Some(proc) = label.strip_prefix(&prefix) else {
                 continue;
-            }
-            let label = name.trim_end_matches(".plist");
-            let proc = label.trim_start_matches(&prefix).to_string();
+            };
             if proc.is_empty() {
                 continue;
             }
-            out.push((Some(proc), entry.path()));
+            out.push((Some(proc.to_string()), entry.path()));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));

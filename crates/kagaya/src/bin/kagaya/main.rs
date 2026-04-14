@@ -2290,7 +2290,13 @@ fn render_condensed_status(args: &[String]) -> usize {
         if matches!(agg, AggregateState::Err | AggregateState::Degraded) {
             let tail = tail_log_lines_string(name, &None, 3);
             for tl in tail {
-                writeln!(tw, " \t{}\t\t\t\t", tl.dimmed()).unwrap();
+                // Cap width so a long crash log doesn't blow up the
+                // tabwriter column widths for unrelated rows.
+                let mut truncated: String = tl.chars().take(60).collect();
+                if tl.chars().count() > 60 {
+                    truncated.push('…');
+                }
+                writeln!(tw, " \t{}\t\t\t\t", truncated.dimmed()).unwrap();
                 lines += 1;
             }
         }
