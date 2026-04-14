@@ -246,6 +246,11 @@ enum ProjectDef {
         autostart: bool,
         depends_on: Option<StringOrVec>,
         urls: Option<StringOrVec>,
+        /// Optional inline run command (e.g. `run = "./start.sh"`).
+        /// When set, this overrides services.toml / auto-detection.
+        run: Option<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
     },
     Command {
         run: String,
@@ -343,6 +348,8 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                 autostart,
                 depends_on,
                 urls,
+                run,
+                env,
             } => {
                 let dir = expand_tilde(&dir_str);
                 if !dir.exists() {
@@ -353,12 +360,20 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                     );
                     continue;
                 }
+                let inline_command = run.map(|r| InlineCommand {
+                    run: r,
+                    service_type: ServiceType::default(),
+                    restart: None,
+                    max_retries: None,
+                    restart_delay: None,
+                    env,
+                });
                 services.insert(
                     name.clone(),
                     ServiceEntry {
                         name,
                         dir,
-                        inline_command: None,
+                        inline_command,
                         autostart,
                         depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
                         urls: urls.map(|u| u.into_vec()).unwrap_or_default(),

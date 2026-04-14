@@ -3,22 +3,66 @@ use crate::launchd::{get_uid, parse_launchctl_list, user_agents_dir, KAGAYA_PREF
 use crate::logs::log_dir;
 use crate::utils::listening_ports_for_pids;
 use kagaya::types::{ProcessState, ProcessStatus, ServiceStatus, ServiceType};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn label_for(name: &str) -> String {
-    format!("{}{}", KAGAYA_PREFIX, name)
+// ── Labels + paths ────────────────────────────────────────────────────────────
+//
+// A project with one process uses:    com.kagaya.<project>
+// A project with N processes uses:    com.kagaya.<project>.<proc>   (one per proc)
+//
+// proc=None  means "this is the single plist for the project".
+// proc=Some  means "this is the <proc> plist inside the project's group".
+
+pub fn label_for(project: &str, proc: Option<&str>) -> String {
+    match proc {
+        Some(p) => format!("{}{}.{}", KAGAYA_PREFIX, project, p),
+        None => format!("{}{}", KAGAYA_PREFIX, project),
+    }
 }
 
-pub fn plist_path(name: &str) -> PathBuf {
-    user_agents_dir().join(format!("{}.plist", label_for(name)))
+pub fn plist_path_for(project: &str, proc: Option<&str>) -> PathBuf {
+    user_agents_dir().join(format!("{}.plist", label_for(project, proc)))
 }
 
-pub fn plist_exists(name: &str) -> bool {
-    plist_path(name).exists()
+pub fn plist_exists(project: &str) -> bool {
+    !plist_paths_for_project(project).is_empty()
 }
+
+/// Return every plist file under this project: the single `com.kagaya.<project>.plist`
+/// plus any per-process `com.kagaya.<project>.<proc>.plist`. Processes are
+/// returned with `proc_name = Some(...)`, single-proc plist with None.
+pub fn plist_paths_for_project(project: &str) -> Vec<(Option<String>, PathBuf)> {
+    let mut out = Vec::new();
+    let dir = user_agents_dir();
+    let single = plist_path_for(project, None);
+    if single.exists() {
+        out.push((None, single));
+    }
+    let prefix = format!("{}{}.", KAGAYA_PREFIX, project);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".plist") {
+                continue;
+            }
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let label = name.trim_end_matches(".plist");
+            let proc = label.trim_start_matches(&prefix).to_string();
+            if proc.is_empty() {
+                continue;
+            }
+            out.push((Some(proc), entry.path()));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+// ── Command resolution ────────────────────────────────────────────────────────
 
 fn has_shell_metachars(cmd: &str) -> bool {
     cmd.contains("&&")
@@ -48,11 +92,6 @@ fn which_in_path(bin: &str) -> Option<PathBuf> {
     None
 }
 
-/// Build the ProgramArguments array for a run string. If the command has shell
-/// metacharacters, wrap in `/bin/sh -c` (launchd's PATH is minimal, but the
-/// shell-wrapped form is explicit user intent). Otherwise tokenize the command
-/// and resolve the first token against the caller's PATH at plist-write time
-/// so the absolute binary path is baked in.
 fn build_program_args(cmd: &str) -> Vec<String> {
     if has_shell_metachars(cmd) {
         return vec!["/bin/sh".into(), "-c".into(), cmd.to_string()];
@@ -71,52 +110,118 @@ fn build_program_args(cmd: &str) -> Vec<String> {
     args
 }
 
-fn resolved_command(svc: &ServiceEntry) -> Option<Vec<String>> {
+pub struct ProcessSpec {
+    pub proc_name: Option<String>,
+    pub command: String,
+    pub env: HashMap<String, String>,
+}
+
+/// Decide how many processes this project has and what each one runs.
+/// Precedence:
+///   1. Inline `run = ...` from projects.toml       → one process, proc=None
+///   2. services.toml with N entries                → N processes (or one if N==1)
+///   3. Auto-detection (Procfile / package.json ..) → one process per suggestion
+fn resolve_processes(svc: &ServiceEntry) -> Vec<ProcessSpec> {
     if let Some(inline) = &svc.inline_command {
-        return Some(build_program_args(&inline.run));
+        return vec![ProcessSpec {
+            proc_name: None,
+            command: inline.run.clone(),
+            env: inline.env.clone(),
+        }];
     }
+
     let services_toml = svc.dir.join("services.toml");
     if services_toml.exists() {
         if let Ok(content) = std::fs::read_to_string(&services_toml) {
             if let Ok(root) = toml::from_str::<toml::Value>(&content) {
                 if let Some(table) = root.as_table() {
-                    for (_, value) in table {
-                        if let Some(run) = value.as_str() {
-                            return Some(build_program_args(run));
+                    let mut procs = Vec::new();
+                    for (pname, value) in table {
+                        let cmd = if let Some(s) = value.as_str() {
+                            Some(s.to_string())
+                        } else if let Some(s) = value.get("run").and_then(|v| v.as_str()) {
+                            Some(s.to_string())
+                        } else {
+                            None
+                        };
+                        let env = value
+                            .get("env")
+                            .and_then(|v| v.as_table())
+                            .map(|t| {
+                                t.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Some(cmd) = cmd {
+                            procs.push(ProcessSpec {
+                                proc_name: Some(pname.clone()),
+                                command: cmd,
+                                env,
+                            });
                         }
-                        if let Some(run) = value.get("run").and_then(|v| v.as_str()) {
-                            return Some(build_program_args(run));
-                        }
+                    }
+                    if procs.len() == 1 {
+                        procs[0].proc_name = None;
+                    }
+                    if !procs.is_empty() {
+                        return procs;
                     }
                 }
             }
         }
     }
+
     let suggestions = crate::detect::detect_services(&svc.dir);
-    let first = suggestions.into_iter().next()?;
-    Some(build_program_args(&first.command))
+    if suggestions.is_empty() {
+        return Vec::new();
+    }
+    if suggestions.len() == 1 {
+        return vec![ProcessSpec {
+            proc_name: None,
+            command: suggestions.into_iter().next().unwrap().command,
+            env: HashMap::new(),
+        }];
+    }
+    suggestions
+        .into_iter()
+        .map(|s| ProcessSpec {
+            proc_name: Some(s.name),
+            command: s.command,
+            env: HashMap::new(),
+        })
+        .collect()
 }
 
-fn service_env(svc: &ServiceEntry) -> std::collections::HashMap<String, String> {
-    svc.inline_command
-        .as_ref()
-        .map(|c| c.env.clone())
-        .unwrap_or_default()
-}
+// ── Plist writer ──────────────────────────────────────────────────────────────
 
-pub fn build_plist(svc: &ServiceEntry) -> Option<plist::Value> {
-    let label = label_for(&svc.name);
-    let command = resolved_command(svc)?;
+fn log_path_for(project: &str, proc: Option<&str>, stderr: bool) -> PathBuf {
     let log_root = log_dir();
     let _ = std::fs::create_dir_all(&log_root);
-    let stdout_log = log_root.join(format!("{}.log", svc.name));
-    let stderr_log = log_root.join(format!("{}.err.log", svc.name));
+    let stem = match proc {
+        Some(p) => format!("{}.{}", project, p),
+        None => project.to_string(),
+    };
+    log_root.join(if stderr {
+        format!("{}.err.log", stem)
+    } else {
+        format!("{}.log", stem)
+    })
+}
+
+fn build_plist_value(svc: &ServiceEntry, spec: &ProcessSpec) -> plist::Value {
+    let label = label_for(&svc.name, spec.proc_name.as_deref());
+    let stdout_log = log_path_for(&svc.name, spec.proc_name.as_deref(), false);
+    let stderr_log = log_path_for(&svc.name, spec.proc_name.as_deref(), true);
+    let program_args = build_program_args(&spec.command);
 
     let mut dict = plist::Dictionary::new();
     dict.insert("Label".into(), plist::Value::String(label));
     dict.insert(
         "ProgramArguments".into(),
-        plist::Value::Array(command.into_iter().map(plist::Value::String).collect()),
+        plist::Value::Array(program_args.into_iter().map(plist::Value::String).collect()),
     );
     dict.insert(
         "WorkingDirectory".into(),
@@ -133,7 +238,7 @@ pub fn build_plist(svc: &ServiceEntry) -> Option<plist::Value> {
         plist::Value::String(stderr_log.to_string_lossy().to_string()),
     );
 
-    let mut env = service_env(svc);
+    let mut env = spec.env.clone();
     if !env.contains_key("PATH") {
         if let Ok(current_path) = std::env::var("PATH") {
             env.insert("PATH".into(), current_path);
@@ -149,16 +254,21 @@ pub fn build_plist(svc: &ServiceEntry) -> Option<plist::Value> {
             plist::Value::Dictionary(env_dict),
         );
     }
-    Some(plist::Value::Dictionary(dict))
+    plist::Value::Dictionary(dict)
 }
 
-pub fn is_loaded(name: &str) -> bool {
-    let label = label_for(name);
+// ── launchctl primitives ──────────────────────────────────────────────────────
+
+pub fn is_loaded_label(label: &str) -> bool {
     Command::new("launchctl")
         .args(["print", &format!("gui/{}/{}", get_uid(), label)])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+pub fn is_loaded(project: &str) -> bool {
+    is_loaded_label(&label_for(project, None))
 }
 
 pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
@@ -180,8 +290,7 @@ pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
-pub fn bootout(name: &str) -> Result<(), String> {
-    let label = label_for(name);
+fn bootout_label(label: &str, fallback_plist: Option<&PathBuf>) -> Result<(), String> {
     let target = format!("gui/{}/{}", get_uid(), label);
     let out = Command::new("launchctl")
         .args(["bootout", &target])
@@ -194,86 +303,119 @@ pub fn bootout(name: &str) -> Result<(), String> {
     if stderr.contains("Could not find specified service") {
         return Ok(());
     }
-    let legacy = Command::new("launchctl")
-        .args(["unload", &plist_path(name).to_string_lossy()])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if legacy.status.success() {
-        return Ok(());
+    if let Some(p) = fallback_plist {
+        let legacy = Command::new("launchctl")
+            .args(["unload", &p.to_string_lossy()])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if legacy.status.success() {
+            return Ok(());
+        }
     }
     Err(stderr.trim().to_string())
 }
 
+pub fn bootout(project: &str) -> Result<(), String> {
+    let label = label_for(project, None);
+    let path = plist_path_for(project, None);
+    bootout_label(&label, Some(&path))
+}
+
+// ── Sync ──────────────────────────────────────────────────────────────────────
+
 pub fn sync_service(svc: &ServiceEntry) -> Result<(), String> {
-    let Some(value) = build_plist(svc) else {
+    let procs = resolve_processes(svc);
+    if procs.is_empty() {
         return Err(format!(
-            "no runnable command for '{}' (need inline `run = ...` or services.toml with `run`)",
-            svc.name
-        ));
-    };
-    let path = plist_path(&svc.name);
+			"no runnable command for '{}' (need inline `run = ...`, services.toml, or auto-detectable project)",
+			svc.name
+		));
+    }
+
     let _ = std::fs::create_dir_all(user_agents_dir());
-    let was_loaded = is_loaded(&svc.name);
-    if was_loaded {
-        let _ = bootout(&svc.name);
+
+    // Figure out which labels we'll write this pass.
+    let wanted_labels: std::collections::HashSet<String> = procs
+        .iter()
+        .map(|p| label_for(&svc.name, p.proc_name.as_deref()))
+        .collect();
+
+    // Any plist currently on disk under this project that we're NOT about to
+    // write is stale — bootout + delete.
+    for (proc_opt, path) in plist_paths_for_project(&svc.name) {
+        let lbl = label_for(&svc.name, proc_opt.as_deref());
+        if !wanted_labels.contains(&lbl) {
+            let _ = bootout_label(&lbl, Some(&path));
+            let _ = std::fs::remove_file(&path);
+        }
     }
-    value
-        .to_file_xml(&path)
-        .map_err(|e| format!("writing plist: {}", e))?;
-    if was_loaded || svc.autostart {
-        bootstrap(&path)?;
+
+    for spec in &procs {
+        let label = label_for(&svc.name, spec.proc_name.as_deref());
+        let path = plist_path_for(&svc.name, spec.proc_name.as_deref());
+        let was_loaded = is_loaded_label(&label);
+        if was_loaded {
+            let _ = bootout_label(&label, Some(&path));
+        }
+        let value = build_plist_value(svc, spec);
+        value
+            .to_file_xml(&path)
+            .map_err(|e| format!("writing {}: {}", path.display(), e))?;
+        if was_loaded || svc.autostart {
+            bootstrap(&path)?;
+        }
     }
     Ok(())
 }
 
-pub fn set_run_at_load(name: &str, value: bool) -> Result<(), String> {
-    let path = plist_path(name);
-    if !path.exists() {
-        return Err(format!("no plist for '{}'", name));
+pub fn set_run_at_load(project: &str, value: bool) -> Result<(), String> {
+    let plists = plist_paths_for_project(project);
+    if plists.is_empty() {
+        return Err(format!("no plist for '{}'", project));
     }
-    let mut value_plist =
-        plist::Value::from_file(&path).map_err(|e| format!("reading plist: {}", e))?;
-    let dict = value_plist
-        .as_dictionary_mut()
-        .ok_or_else(|| "plist root is not a dictionary".to_string())?;
-    dict.insert("RunAtLoad".into(), plist::Value::Boolean(value));
-    value_plist
-        .to_file_xml(&path)
-        .map_err(|e| format!("writing plist: {}", e))?;
-    // Always bootout so launchd drops its in-memory state (which ignores
-    // the new RunAtLoad and keeps the process alive via KeepAlive).
-    let was_loaded = is_loaded(name);
-    if was_loaded {
-        let _ = bootout(name);
-    }
-    // Only re-bootstrap if we're turning autostart ON. Turning OFF = stop.
-    if value {
-        bootstrap(&path)?;
-    }
-    Ok(())
-}
-
-pub fn remove_service(name: &str) -> Result<(), String> {
-    let _ = bootout(name);
-    let path = plist_path(name);
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("removing plist: {}", e))?;
+    for (proc_opt, path) in plists {
+        let label = label_for(project, proc_opt.as_deref());
+        let mut v = plist::Value::from_file(&path)
+            .map_err(|e| format!("reading {}: {}", path.display(), e))?;
+        let dict = v
+            .as_dictionary_mut()
+            .ok_or_else(|| format!("{}: plist root is not a dictionary", label))?;
+        dict.insert("RunAtLoad".into(), plist::Value::Boolean(value));
+        v.to_file_xml(&path)
+            .map_err(|e| format!("writing {}: {}", path.display(), e))?;
+        let was_loaded = is_loaded_label(&label);
+        if was_loaded {
+            let _ = bootout_label(&label, Some(&path));
+        }
+        if value {
+            bootstrap(&path)?;
+        }
     }
     Ok(())
 }
 
-// ── Readers (launchctl + plist) ───────────────────────────────────────────────
+pub fn remove_service(project: &str) -> Result<(), String> {
+    for (proc_opt, path) in plist_paths_for_project(project) {
+        let label = label_for(project, proc_opt.as_deref());
+        let _ = bootout_label(&label, Some(&path));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("removing {}: {}", path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+// ── Readers ───────────────────────────────────────────────────────────────────
 
 pub struct PlistInfo {
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
     pub run_at_load: bool,
-    pub ports: Vec<u16>,
 }
 
-pub fn read_plist(name: &str) -> Option<PlistInfo> {
-    let path = plist_path(name);
-    let value = plist::Value::from_file(&path).ok()?;
+pub fn read_plist_at(path: &PathBuf) -> Option<PlistInfo> {
+    let value = plist::Value::from_file(path).ok()?;
     let dict = value.as_dictionary()?;
     Some(PlistInfo {
         stdout_path: dict
@@ -288,13 +430,34 @@ pub fn read_plist(name: &str) -> Option<PlistInfo> {
             .get("RunAtLoad")
             .and_then(|v| v.as_boolean())
             .unwrap_or(false),
-        ports: vec![],
     })
 }
 
-pub fn log_paths(name: &str) -> Option<(PathBuf, PathBuf)> {
-    let info = read_plist(name)?;
-    Some((info.stdout_path?, info.stderr_path?))
+pub fn read_plist(project: &str) -> Option<PlistInfo> {
+    let plists = plist_paths_for_project(project);
+    let (_, path) = plists.into_iter().next()?;
+    read_plist_at(&path)
+}
+
+/// Return `(stdout_path, stderr_path)` pairs for every plist under this project.
+pub fn log_paths_all(project: &str) -> Vec<(Option<String>, PathBuf, PathBuf)> {
+    let mut out = Vec::new();
+    for (proc_opt, path) in plist_paths_for_project(project) {
+        if let Some(info) = read_plist_at(&path) {
+            if let (Some(o), Some(e)) = (info.stdout_path, info.stderr_path) {
+                out.push((proc_opt, o, e));
+            }
+        }
+    }
+    out
+}
+
+/// Back-compat: first (stdout, stderr) pair for this project.
+pub fn log_paths(project: &str) -> Option<(PathBuf, PathBuf)> {
+    log_paths_all(project)
+        .into_iter()
+        .next()
+        .map(|(_, o, e)| (o, e))
 }
 
 fn uptime_secs_for_pid(pid: u32) -> Option<u64> {
@@ -310,7 +473,6 @@ fn uptime_secs_for_pid(pid: u32) -> Option<u64> {
 }
 
 fn parse_etime(s: &str) -> Option<u64> {
-    // ps etime formats: "SS", "MM:SS", "HH:MM:SS", "DD-HH:MM:SS"
     let (days, rest) = match s.split_once('-') {
         Some((d, r)) => (d.parse::<u64>().ok()?, r),
         None => (0, s),
@@ -329,66 +491,79 @@ fn parse_etime(s: &str) -> Option<u64> {
     Some(days * 86400 + h * 3600 + m * 60 + sec)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
-    let label = label_for(&svc.name);
     let launchctl = parse_launchctl_list();
-    let info = read_plist(&svc.name);
-    let run_at_load = info
-        .as_ref()
-        .map(|i| i.run_at_load)
-        .unwrap_or(svc.autostart);
+    let plists = plist_paths_for_project(&svc.name);
 
-    let entry = launchctl.get(&label);
-    let (state, pid) = match entry {
-        Some((Some(pid), _)) => (
-            ProcessState::Running {
-                pid: *pid,
-                uptime_secs: uptime_secs_for_pid(*pid).unwrap_or(0),
-            },
-            Some(*pid),
-        ),
-        Some((None, Some(exit))) if *exit != 0 => (
-            ProcessState::Crashed {
-                exit_code: *exit,
-                retries: 0,
-            },
-            None,
-        ),
-        Some((None, _)) => (ProcessState::Stopped, None),
-        None => (ProcessState::Stopped, None),
-    };
-
-    let ports: Vec<u16> = pid
-        .map(|p| {
-            listening_ports_for_pids(&[p])
-                .into_values()
-                .flatten()
-                .collect()
-        })
-        .unwrap_or_default();
-
-    ServiceStatus {
-        name: svc.name.clone(),
-        dir: svc.dir.clone(),
-        processes: vec![ProcessStatus {
+    let mut processes = Vec::new();
+    if plists.is_empty() {
+        processes.push(ProcessStatus {
             name: svc.name.clone(),
-            state,
-            pid,
-            autostart: run_at_load,
+            state: ProcessState::Stopped,
+            pid: None,
+            autostart: svc.autostart,
             service_type: ServiceType::Service,
-            ports,
+            ports: vec![],
             ports_expected: vec![],
             state_since: None,
             cpu_percent: None,
             memory_bytes: None,
-        }],
+        });
+    } else {
+        for (proc_opt, path) in &plists {
+            let label = label_for(&svc.name, proc_opt.as_deref());
+            let info = read_plist_at(path);
+            let run_at_load = info
+                .as_ref()
+                .map(|i| i.run_at_load)
+                .unwrap_or(svc.autostart);
+            let entry = launchctl.get(&label);
+            let (state, pid) = match entry {
+                Some((Some(pid), _)) => (
+                    ProcessState::Running {
+                        pid: *pid,
+                        uptime_secs: uptime_secs_for_pid(*pid).unwrap_or(0),
+                    },
+                    Some(*pid),
+                ),
+                Some((None, Some(exit))) if *exit != 0 => (
+                    ProcessState::Crashed {
+                        exit_code: *exit,
+                        retries: 0,
+                    },
+                    None,
+                ),
+                Some((None, _)) => (ProcessState::Stopped, None),
+                None => (ProcessState::Stopped, None),
+            };
+            let ports: Vec<u16> = pid
+                .map(|p| {
+                    listening_ports_for_pids(&[p])
+                        .into_values()
+                        .flatten()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let proc_display = proc_opt.clone().unwrap_or_else(|| svc.name.clone());
+            processes.push(ProcessStatus {
+                name: proc_display,
+                state,
+                pid,
+                autostart: run_at_load,
+                service_type: ServiceType::Service,
+                ports,
+                ports_expected: vec![],
+                state_since: None,
+                cpu_percent: None,
+                memory_bytes: None,
+            });
+        }
+    }
+
+    ServiceStatus {
+        name: svc.name.clone(),
+        dir: svc.dir.clone(),
+        processes,
     }
 }
 
@@ -396,7 +571,7 @@ pub fn query_all(services: &BTreeMap<String, ServiceEntry>) -> Vec<ServiceStatus
     services.values().map(status_for).collect()
 }
 
-// ── Orchestration (used by start/stop/restart handlers) ──────────────────────
+// ── Orchestration ─────────────────────────────────────────────────────────────
 
 pub struct OpResult {
     pub name: String,
@@ -405,114 +580,92 @@ pub struct OpResult {
 }
 
 pub fn start_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| start_one(n)).collect()
+    names.iter().map(|n| fan_op(n, Op::Start)).collect()
 }
 
 pub fn stop_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| stop_one(n)).collect()
+    names.iter().map(|n| fan_op(n, Op::Stop)).collect()
 }
 
 pub fn restart_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| restart_one(n)).collect()
+    names.iter().map(|n| fan_op(n, Op::Restart)).collect()
 }
 
-fn start_one(name: &str) -> OpResult {
-    let path = plist_path(name);
-    if !path.exists() {
+#[derive(Clone, Copy)]
+enum Op {
+    Start,
+    Stop,
+    Restart,
+}
+
+fn fan_op(project: &str, op: Op) -> OpResult {
+    let plists = plist_paths_for_project(project);
+    if plists.is_empty() {
         return OpResult {
-            name: name.to_string(),
+            name: project.to_string(),
             ok: false,
-            message: format!("no plist for '{}'. run `ky add {}` first", name, name),
+            message: format!("no plist for '{}'. run `ky add {}` first", project, project),
         };
     }
-    if is_loaded(name) {
-        return kickstart(name);
-    }
-    match bootstrap(&path) {
-        Ok(()) => OpResult {
-            name: name.to_string(),
-            ok: true,
-            message: format!("{}: started", name),
-        },
-        Err(e) => OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("{}: {}", name, e),
-        },
-    }
-}
-
-fn stop_one(name: &str) -> OpResult {
-    if !plist_path(name).exists() {
-        return OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("{}: not registered", name),
+    let mut messages = Vec::new();
+    let mut any_err = false;
+    for (proc_opt, path) in plists {
+        let label = label_for(project, proc_opt.as_deref());
+        let display = proc_opt.clone().unwrap_or_else(|| project.to_string());
+        let result = match op {
+            Op::Start => start_one_label(&label, &path),
+            Op::Stop => stop_one_label(&label, &path),
+            Op::Restart => restart_one_label(&label, &path),
         };
+        match result {
+            Ok(verb) => messages.push(format!("{}: {}", display, verb)),
+            Err(e) => {
+                any_err = true;
+                messages.push(format!("{}: {}", display, e));
+            }
+        }
     }
-    match bootout(name) {
-        Ok(()) => OpResult {
-            name: name.to_string(),
-            ok: true,
-            message: format!("{}: stopped", name),
-        },
-        Err(e) => OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("{}: {}", name, e),
-        },
-    }
-}
-
-fn restart_one(name: &str) -> OpResult {
-    let path = plist_path(name);
-    if !path.exists() {
-        return OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("no plist for '{}'. run `ky add {}` first", name, name),
-        };
-    }
-    if is_loaded(name) {
-        return kickstart(name);
-    }
-    match bootstrap(&path) {
-        Ok(()) => OpResult {
-            name: name.to_string(),
-            ok: true,
-            message: format!("{}: started", name),
-        },
-        Err(e) => OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("{}: {}", name, e),
-        },
+    OpResult {
+        name: project.to_string(),
+        ok: !any_err,
+        message: messages.join("\n"),
     }
 }
 
-fn kickstart(name: &str) -> OpResult {
-    let label = label_for(name);
+fn start_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> {
+    if is_loaded_label(label) {
+        kickstart_label(label)?;
+        return Ok("restarted");
+    }
+    bootstrap(path)?;
+    Ok("started")
+}
+
+fn stop_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> {
+    bootout_label(label, Some(path))?;
+    Ok("stopped")
+}
+
+fn restart_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> {
+    if is_loaded_label(label) {
+        kickstart_label(label)?;
+        Ok("restarted")
+    } else {
+        bootstrap(path)?;
+        Ok("started")
+    }
+}
+
+fn kickstart_label(label: &str) -> Result<(), String> {
     let target = format!("gui/{}/{}", get_uid(), label);
     let out = Command::new("launchctl")
         .args(["kickstart", "-kp", &target])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => OpResult {
-            name: name.to_string(),
-            ok: true,
-            message: format!("{}: restarted", name),
-        },
-        Ok(o) => OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("{}: {}", name, String::from_utf8_lossy(&o.stderr).trim()),
-        },
-        Err(e) => OpResult {
-            name: name.to_string(),
-            ok: false,
-            message: format!("{}: {}", name, e),
-        },
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
     }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
 #[cfg(test)]
