@@ -162,6 +162,29 @@ pub fn sync_service(svc: &ServiceEntry) -> Result<(), String> {
     Ok(())
 }
 
+pub fn set_run_at_load(name: &str, value: bool) -> Result<(), String> {
+    let path = plist_path(name);
+    if !path.exists() {
+        return Err(format!("no plist for '{}'", name));
+    }
+    let mut value_plist =
+        plist::Value::from_file(&path).map_err(|e| format!("reading plist: {}", e))?;
+    let dict = value_plist
+        .as_dictionary_mut()
+        .ok_or_else(|| "plist root is not a dictionary".to_string())?;
+    dict.insert("RunAtLoad".into(), plist::Value::Boolean(value));
+    value_plist
+        .to_file_xml(&path)
+        .map_err(|e| format!("writing plist: {}", e))?;
+    if is_loaded(name) {
+        let _ = bootout(name);
+        bootstrap(&path)?;
+    } else if value {
+        bootstrap(&path)?;
+    }
+    Ok(())
+}
+
 pub fn remove_service(name: &str) -> Result<(), String> {
     let _ = bootout(name);
     let path = plist_path(name);
