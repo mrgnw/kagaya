@@ -234,7 +234,7 @@ fn plist_dirs(include_global: bool) -> Vec<(PathBuf, AgentDomain)> {
     dirs
 }
 
-fn parse_launchctl_list() -> BTreeMap<String, (Option<u32>, Option<i32>)> {
+pub(crate) fn parse_launchctl_list() -> BTreeMap<String, (Option<u32>, Option<i32>)> {
     let mut map = BTreeMap::new();
     let output = match Command::new("launchctl").arg("list").output() {
         Ok(o) => o,

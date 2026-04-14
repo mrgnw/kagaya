@@ -1,8 +1,12 @@
 use crate::config::ServiceEntry;
-use crate::launchd::{get_uid, user_agents_dir, KAGAYA_PREFIX};
+use crate::launchd::{get_uid, parse_launchctl_list, user_agents_dir, KAGAYA_PREFIX};
 use crate::logs::log_dir;
+use crate::utils::listening_ports_for_pids;
+use kagaya::types::{ProcessState, ProcessStatus, ServiceStatus, ServiceType};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn label_for(name: &str) -> String {
     format!("{}{}", KAGAYA_PREFIX, name)
@@ -165,4 +169,155 @@ pub fn remove_service(name: &str) -> Result<(), String> {
         std::fs::remove_file(&path).map_err(|e| format!("removing plist: {}", e))?;
     }
     Ok(())
+}
+
+// ── Readers (launchctl + plist) ───────────────────────────────────────────────
+
+pub struct PlistInfo {
+    pub stdout_path: Option<PathBuf>,
+    pub stderr_path: Option<PathBuf>,
+    pub run_at_load: bool,
+    pub ports: Vec<u16>,
+}
+
+pub fn read_plist(name: &str) -> Option<PlistInfo> {
+    let path = plist_path(name);
+    let value = plist::Value::from_file(&path).ok()?;
+    let dict = value.as_dictionary()?;
+    Some(PlistInfo {
+        stdout_path: dict
+            .get("StandardOutPath")
+            .and_then(|v| v.as_string())
+            .map(PathBuf::from),
+        stderr_path: dict
+            .get("StandardErrorPath")
+            .and_then(|v| v.as_string())
+            .map(PathBuf::from),
+        run_at_load: dict
+            .get("RunAtLoad")
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(false),
+        ports: vec![],
+    })
+}
+
+pub fn log_paths(name: &str) -> Option<(PathBuf, PathBuf)> {
+    let info = read_plist(name)?;
+    Some((info.stdout_path?, info.stderr_path?))
+}
+
+fn uptime_secs_for_pid(pid: u32) -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_etime(&raw)
+}
+
+fn parse_etime(s: &str) -> Option<u64> {
+    // ps etime formats: "SS", "MM:SS", "HH:MM:SS", "DD-HH:MM:SS"
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let (h, m, sec) = match parts.len() {
+        1 => (0u64, 0u64, parts[0].parse::<u64>().ok()?),
+        2 => (0, parts[0].parse().ok()?, parts[1].parse().ok()?),
+        3 => (
+            parts[0].parse().ok()?,
+            parts[1].parse().ok()?,
+            parts[2].parse().ok()?,
+        ),
+        _ => return None,
+    };
+    Some(days * 86400 + h * 3600 + m * 60 + sec)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
+    let label = label_for(&svc.name);
+    let launchctl = parse_launchctl_list();
+    let info = read_plist(&svc.name);
+    let run_at_load = info
+        .as_ref()
+        .map(|i| i.run_at_load)
+        .unwrap_or(svc.autostart);
+
+    let entry = launchctl.get(&label);
+    let (state, pid) = match entry {
+        Some((Some(pid), _)) => (
+            ProcessState::Running {
+                pid: *pid,
+                uptime_secs: uptime_secs_for_pid(*pid).unwrap_or(0),
+            },
+            Some(*pid),
+        ),
+        Some((None, Some(exit))) if *exit != 0 => (
+            ProcessState::Crashed {
+                exit_code: *exit,
+                retries: 0,
+            },
+            None,
+        ),
+        Some((None, _)) => (ProcessState::Stopped, None),
+        None => (ProcessState::Stopped, None),
+    };
+
+    let ports: Vec<u16> = pid
+        .map(|p| {
+            listening_ports_for_pids(&[p])
+                .into_values()
+                .flatten()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    ServiceStatus {
+        name: svc.name.clone(),
+        dir: svc.dir.clone(),
+        processes: vec![ProcessStatus {
+            name: svc.name.clone(),
+            state,
+            pid,
+            autostart: run_at_load,
+            service_type: ServiceType::Service,
+            ports,
+            ports_expected: vec![],
+            state_since: None,
+            cpu_percent: None,
+            memory_bytes: None,
+        }],
+    }
+}
+
+pub fn query_all(services: &BTreeMap<String, ServiceEntry>) -> Vec<ServiceStatus> {
+    services.values().map(status_for).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_etime;
+
+    #[test]
+    fn etime_formats() {
+        assert_eq!(parse_etime("42"), Some(42));
+        assert_eq!(parse_etime("01:30"), Some(90));
+        assert_eq!(parse_etime("02:15:04"), Some(2 * 3600 + 15 * 60 + 4));
+        assert_eq!(
+            parse_etime("3-04:05:06"),
+            Some(3 * 86400 + 4 * 3600 + 5 * 60 + 6)
+        );
+        assert_eq!(parse_etime("garbage"), None);
+    }
 }
