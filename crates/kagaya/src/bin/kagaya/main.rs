@@ -1485,35 +1485,25 @@ fn cmd_restart(args: &[String]) {
     }
 }
 
-fn find_log_files(service: &str, process: &Option<String>) -> Vec<PathBuf> {
-    let log_dir = logs::service_log_dir(service);
-    if !log_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    if let Ok(dir_entries) = std::fs::read_dir(&log_dir) {
-        for entry in dir_entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if !name.ends_with(".log") {
-                continue;
-            }
-            if let Some(ref proc_filter) = process {
-                if !name.starts_with(proc_filter.as_str()) {
-                    continue;
-                }
-            }
-            files.push(path);
+fn find_log_files(service: &str, _process: &Option<String>) -> Vec<PathBuf> {
+    if let Some((out, err)) = plist_sync::log_paths(service) {
+        let mut files = Vec::new();
+        if out.exists() {
+            files.push(out);
+        }
+        if err.exists() {
+            files.push(err);
+        }
+        if !files.is_empty() {
+            return files;
         }
     }
-
-    files.sort();
-    files
+    // Fallback: flat log file next to plist-derived path
+    let flat = logs::log_dir().join(format!("{}.log", service));
+    if flat.exists() {
+        return vec![flat];
+    }
+    Vec::new()
 }
 
 fn tail_log_lines(service: &str, process: &Option<String>, n: usize) {
@@ -1540,24 +1530,25 @@ fn cmd_logs(args: &[String]) {
 
     let (service, process) = resolve_single_target(args, &svc_entries);
 
-    let log_dir = logs::service_log_dir(&service);
-    if !log_dir.exists() {
+    let plist_paths = plist_sync::log_paths(&service);
+    let files = find_log_files(&service, &process);
+
+    if plist_paths.is_none() && files.is_empty() {
         eprintln!("no logs for {}", service);
         std::process::exit(1);
     }
 
-    let files = find_log_files(&service, &process);
-
-    if files.is_empty() {
-        eprintln!("no log files found");
-        std::process::exit(1);
-    }
-
     if json {
-        let paths: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        let paths: Vec<String> = if let Some((o, e)) = &plist_paths {
+            vec![o.display().to_string(), e.display().to_string()]
+        } else {
+            files.iter().map(|f| f.display().to_string()).collect()
+        };
         format::json_value(&paths);
+    } else if let Some((o, e)) = plist_paths {
+        println!("{}", o.display());
+        println!("{}", e.display());
     } else {
-        eprintln!("{}", log_dir.display().to_string().dimmed());
         for f in &files {
             println!("{}", f.display());
         }
@@ -1599,42 +1590,56 @@ fn cmd_echo(args: &[String]) {
     let (tail_lines, rest) = parse_echo_opts(args);
     let (service, process) = resolve_single_target(&rest, &svc_entries);
 
-    // Tail last N lines from log file first
     tail_log_lines(&service, &process, tail_lines);
+    tail_files_forever(&service, &process, json);
+}
 
-    // Stream live output from daemon
-    let mut offset = 0u64;
+fn tail_files_forever(service: &str, _process: &Option<String>, json: bool) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let paths: Vec<PathBuf> = match plist_sync::log_paths(service) {
+        Some((o, e)) => vec![o, e],
+        None => find_log_files(service, &None),
+    };
+    if paths.is_empty() {
+        eprintln!("no log files for {}", service);
+        std::process::exit(1);
+    }
+
+    let mut handles: Vec<(PathBuf, Option<std::fs::File>, u64)> =
+        paths.into_iter().map(|p| (p, None, 0)).collect();
+
     loop {
-        let response = send_request(&Request::Logs {
-            service: service.clone(),
-            process: process.clone(),
-            follow: true,
-            offset,
-        });
-
-        match response {
-            Response::Log {
-                line,
-                offset: new_offset,
-            } => {
-                if !line.is_empty() {
-                    if json {
-                        format::json_log_line(&line.trim_end(), new_offset);
-                    } else {
-                        print!("{}", line);
-                        let _ = io::stdout().flush();
-                    }
+        for (path, file_opt, offset) in handles.iter_mut() {
+            if file_opt.is_none() {
+                if let Ok(mut f) = std::fs::File::open(&*path) {
+                    let end = f.seek(SeekFrom::End(0)).unwrap_or(0);
+                    *offset = end;
+                    *file_opt = Some(f);
                 }
-                offset = new_offset;
             }
-            Response::Error { message } => {
-                eprintln!("error: {}", message);
-                std::process::exit(1);
+            let Some(f) = file_opt else { continue };
+            if let Ok(meta) = f.metadata() {
+                if meta.len() < *offset {
+                    *offset = 0;
+                    let _ = f.seek(SeekFrom::Start(0));
+                }
             }
-            _ => {}
+            let _ = f.seek(SeekFrom::Start(*offset));
+            let mut buf = String::new();
+            if f.read_to_string(&mut buf).is_ok() && !buf.is_empty() {
+                *offset += buf.len() as u64;
+                if json {
+                    for line in buf.lines() {
+                        format::json_log_line(line, *offset);
+                    }
+                } else {
+                    print!("{}", buf);
+                    let _ = io::stdout().flush();
+                }
+            }
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 }
 
@@ -1651,33 +1656,7 @@ fn echo_after_action(names: &[String], process: Option<String>) {
     };
 
     tail_log_lines(&service, &process, DEFAULT_ECHO_TAIL);
-
-    let mut offset = 0u64;
-    loop {
-        let response = send_request(&Request::Logs {
-            service: service.clone(),
-            process: process.clone(),
-            follow: true,
-            offset,
-        });
-
-        match response {
-            Response::Log {
-                line,
-                offset: new_offset,
-            } => {
-                if !line.is_empty() {
-                    print!("{}", line);
-                    let _ = io::stdout().flush();
-                }
-                offset = new_offset;
-            }
-            Response::Error { .. } => break,
-            _ => {}
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    tail_files_forever(&service, &process, false);
 }
 
 fn echo_after_stop(names: &[String]) {
