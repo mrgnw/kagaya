@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-04-15
+
+### Changed
+
+- **`ky rc` is now a no-op when nothing changed**: `reload-config` compares each generated plist structurally (order-independent) against the on-disk version and skips `bootout`/`bootstrap` when identical. Previously every reload restarted all services, flooding macOS "Login Items" notifications. Output now reports `all N service(s) up to date` or `synced N plist(s) (M unchanged)`.
+
 ## [0.12.1] - 2026-03-28
 
 ### Added

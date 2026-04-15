@@ -657,7 +657,8 @@ fn sync_plist_after_add(name: &str) {
         return;
     };
     match plist_sync::sync_service(svc) {
-        Ok(()) => eprintln!("{}: plist written", name),
+        Ok(0) => eprintln!("{}: plist unchanged", name),
+        Ok(_) => eprintln!("{}: plist written", name),
         Err(e) => eprintln!("{}: plist not written: {}", name, e),
     }
 }
@@ -1911,21 +1912,36 @@ fn cmd_reload_config() {
         return;
     }
     let mut written = 0usize;
+    let mut changed_services = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for (name, svc) in &entries {
         match plist_sync::sync_service(svc) {
-            Ok(()) => written += 1,
+            Ok(0) => {}
+            Ok(n) => {
+                written += n;
+                changed_services += 1;
+            }
             Err(e) => failed.push(format!("{}: {}", name, e)),
         }
     }
+    let unchanged_services = entries.len() - changed_services - failed.len();
     let json = output_format() == OutputFormat::Json;
     if json {
         format::json_value(&serde_json::json!({
             "written": written,
+            "unchanged": unchanged_services,
             "failed": failed,
         }));
+    } else if written == 0 {
+        println!("all {} service(s) up to date", entries.len());
+        for msg in &failed {
+            eprintln!("{}", msg);
+        }
     } else {
-        println!("synced {} plist(s)", written);
+        println!(
+            "synced {} plist(s) ({} unchanged)",
+            written, unchanged_services
+        );
         for msg in &failed {
             eprintln!("{}", msg);
         }

@@ -319,9 +319,30 @@ pub fn bootout(project: &str) -> Result<(), String> {
     bootout_label(&label, Some(&path))
 }
 
+// Order-independent comparison: `plist::Dictionary` is backed by IndexMap, so
+// the derived `PartialEq` is order-sensitive. We only care about semantic
+// equivalence — matching keys/values regardless of insertion order.
+fn plist_value_eq(a: &plist::Value, b: &plist::Value) -> bool {
+    use plist::Value;
+    match (a, b) {
+        (Value::Dictionary(x), Value::Dictionary(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|v2| plist_value_eq(v, v2)))
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(ai, bi)| plist_value_eq(ai, bi))
+        }
+        _ => a == b,
+    }
+}
+
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
-pub fn sync_service(svc: &ServiceEntry) -> Result<(), String> {
+pub fn sync_service(svc: &ServiceEntry) -> Result<usize, String> {
     let procs = resolve_processes(svc);
     if procs.is_empty() {
         return Err(format!(
@@ -338,6 +359,8 @@ pub fn sync_service(svc: &ServiceEntry) -> Result<(), String> {
         .map(|p| label_for(&svc.name, p.proc_name.as_deref()))
         .collect();
 
+    let mut written = 0usize;
+
     // Any plist currently on disk under this project that we're NOT about to
     // write is stale — bootout + delete.
     for (proc_opt, path) in plist_paths_for_project(&svc.name) {
@@ -345,25 +368,37 @@ pub fn sync_service(svc: &ServiceEntry) -> Result<(), String> {
         if !wanted_labels.contains(&lbl) {
             let _ = bootout_label(&lbl, Some(&path));
             let _ = std::fs::remove_file(&path);
+            written += 1;
         }
     }
 
     for spec in &procs {
         let label = label_for(&svc.name, spec.proc_name.as_deref());
         let path = plist_path_for(&svc.name, spec.proc_name.as_deref());
+        let new_value = build_plist_value(svc, spec);
+
+        // Skip bootout/write/bootstrap if the on-disk plist is already identical —
+        // every bootstrap fires a "Login Items" notification from macOS.
+        let unchanged = plist::Value::from_file(&path)
+            .map(|existing| plist_value_eq(&existing, &new_value))
+            .unwrap_or(false);
+        if unchanged {
+            continue;
+        }
+
         let was_loaded = is_loaded_label(&label);
         if was_loaded {
             let _ = bootout_label(&label, Some(&path));
         }
-        let value = build_plist_value(svc, spec);
-        value
+        new_value
             .to_file_xml(&path)
             .map_err(|e| format!("writing {}: {}", path.display(), e))?;
         if was_loaded || svc.autostart {
             bootstrap(&path)?;
         }
+        written += 1;
     }
-    Ok(())
+    Ok(written)
 }
 
 pub fn set_run_at_load(project: &str, value: bool) -> Result<(), String> {
