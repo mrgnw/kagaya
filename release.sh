@@ -3,7 +3,7 @@ set -euo pipefail
 
 version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 tag="v${version}"
-bin="kagaya"
+bin="ky"
 dist="dist"
 
 targets=(
