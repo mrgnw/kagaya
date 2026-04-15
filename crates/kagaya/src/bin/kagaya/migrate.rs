@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::protocol;
+use crate::utils;
 
 struct ProcEntry {
     name: String,
@@ -112,7 +112,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 
 pub fn cmd_migrate(force: bool) {
     let old_dir = ubermind_config_dir();
-    let new_dir = protocol::config_dir();
+    let new_dir = utils::config_dir();
 
     // Read old projects file
     let old_projects_path = old_dir.join("projects");

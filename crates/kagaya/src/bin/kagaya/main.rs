@@ -1,14 +1,13 @@
 mod autostart;
 mod cli;
 mod config;
-mod daemon;
 mod detect;
 mod format;
 mod koku_client;
 mod launchd;
 mod logs;
 mod migrate;
-mod protocol;
+mod plist_sync;
 mod self_update;
 mod utils;
 
@@ -17,14 +16,15 @@ use cli::{output_format, set_output_format, Cli, Cmd, OutputFormat, ServeAction}
 use config::ServiceEntry;
 use kagaya::*;
 use owo_colors::OwoColorize;
-use protocol::{Request, Response};
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn daemon_paths() -> muzan::DaemonPaths {
-    muzan::DaemonPaths::new("kagaya")
+/// Local result shape used by the remaining action handlers (post-daemon).
+enum Response {
+    Ok { message: Option<String> },
+    Error { message: String },
 }
 
 fn main() {
@@ -54,11 +54,8 @@ fn main() {
                 None => {
                     if cli.watch {
                         cmd_status(&["--watch".to_string()]);
-                    } else if connect_daemon().is_some() {
-                        render_condensed_status(&[]);
                     } else {
-                        print_usage();
-                        check_alias_hint();
+                        render_condensed_status(&[]);
                     }
                 }
                 Some(Cmd::Status {
@@ -198,7 +195,6 @@ fn main() {
                 Some(Cmd::Echo { args }) => cmd_echo(&args),
                 Some(Cmd::Show { args }) => cmd_show(&args),
                 Some(Cmd::Cron { args }) => cmd_cron(&args),
-                Some(Cmd::Daemon { args }) => cmd_daemon(&args),
                 Some(Cmd::ReloadConfig) => cmd_reload_config(),
                 Some(Cmd::Serve { action }) => cmd_serve(action),
                 Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
@@ -296,7 +292,7 @@ fn hline(cmd: &str, args: &str, desc: &str, cmd_width: usize) {
 
 fn print_usage() {
     eprintln!(
-        "{} {} — process daemon manager",
+        "{} {} — launchctl frontend for services",
         "ky".bold(),
         env!("CARGO_PKG_VERSION")
     );
@@ -330,11 +326,6 @@ fn print_usage() {
         "-e".bold(),
         "-d".bold()
     );
-    eprintln!("  {} blocks until processes are ready", "--wait".bold());
-    eprintln!(
-        "  {} for chains: start db, wait for ready, then api",
-        "db..api".bold()
-    );
     eprintln!();
 
     eprintln!("{}", "logs".cyan().bold());
@@ -367,11 +358,20 @@ fn print_usage() {
     eprintln!();
 
     eprintln!("{}", "system".cyan().bold());
-    hline("autostart", "[on|off|status]", "Start services on login", w);
-    hline("daemon", "[start|stop|status]", "Manage the daemon", w);
-    hline("reload-config|rc", "", "Reload projects.toml", w);
-    hline("serve", "[-d|--stop]", "HTTP server for web UI", w);
-    hline("launchd|lctl", "[command]", "macOS launchd agents", w);
+    hline(
+        "autostart",
+        "[<name>] [on|off]",
+        "RunAtLoad toggle per service",
+        w,
+    );
+    hline(
+        "reload-config|rc",
+        "",
+        "Re-sync plists from projects.toml",
+        w,
+    );
+    hline("serve", "[stop|status]", "HTTP UI launchd agent", w);
+    hline("launchd|lctl", "[command]", "macOS launchd escape hatch", w);
     hline("self update", "", "Update to latest version", w);
     eprintln!();
 
@@ -435,7 +435,6 @@ fn print_subcommand_help(cmd: &Cmd) {
         Cmd::Echo { .. } => "echo",
         Cmd::Show { .. } => "show",
         Cmd::Cron { .. } => "cron",
-        Cmd::Daemon { .. } => "daemon",
         Cmd::ReloadConfig => "reload-config",
         Cmd::Serve { .. } => "serve",
         Cmd::Add { .. } => "add",
@@ -461,7 +460,7 @@ fn print_subcommand_help(cmd: &Cmd) {
 // --- Config management (no daemon needed) ---
 
 fn cmd_init() {
-    let config_dir = protocol::config_dir();
+    let config_dir = utils::config_dir();
     let _ = std::fs::create_dir_all(&config_dir);
 
     let projects_file = config_dir.join("projects.toml");
@@ -561,7 +560,7 @@ fn ensure_services_toml(dir: &Path) -> bool {
 }
 
 fn cmd_add(args: &[String], run: Option<&str>) {
-    let config_dir = protocol::config_dir();
+    let config_dir = utils::config_dir();
     let _ = std::fs::create_dir_all(&config_dir);
     let projects_file = config_dir.join("projects.toml");
 
@@ -591,6 +590,7 @@ fn cmd_add(args: &[String], run: Option<&str>) {
             .unwrap();
         writeln!(file, "\n[{}]\nrun = {:?}", name, cmd).unwrap();
         eprintln!("{}: added (run: {})", name, cmd);
+        sync_plist_after_add(&name);
         return;
     }
 
@@ -648,6 +648,18 @@ fn cmd_add(args: &[String], run: Option<&str>) {
     let updated = insert_before_first_table(&existing_content, &new_line);
     std::fs::write(&projects_file, updated).unwrap();
     eprintln!("{}: added ({})", name, dir.display());
+    sync_plist_after_add(&name);
+}
+
+fn sync_plist_after_add(name: &str) {
+    let entries = config::load_service_entries();
+    let Some(svc) = entries.get(name) else {
+        return;
+    };
+    match plist_sync::sync_service(svc) {
+        Ok(()) => eprintln!("{}: plist written", name),
+        Err(e) => eprintln!("{}: plist not written: {}", name, e),
+    }
 }
 
 fn cmd_remove(args: &[String]) {
@@ -664,7 +676,7 @@ fn cmd_remove(args: &[String]) {
             .collect::<String>()
     };
 
-    let config_dir = protocol::config_dir();
+    let config_dir = utils::config_dir();
     let projects_file = config_dir.join("projects.toml");
 
     let content = match std::fs::read_to_string(&projects_file) {
@@ -689,6 +701,10 @@ fn cmd_remove(args: &[String]) {
     let commands_dir = config_dir.join("_commands").join(&name);
     if commands_dir.exists() {
         let _ = std::fs::remove_dir_all(&commands_dir);
+    }
+
+    if let Err(e) = plist_sync::remove_service(&name) {
+        eprintln!("{}: plist cleanup: {}", name, e);
     }
 
     eprintln!("{}: removed", name);
@@ -779,41 +795,7 @@ fn remove_project_entry(content: &str, name: &str) -> Option<String> {
     Some(result)
 }
 
-// --- Daemon communication ---
-
-fn connect_daemon() -> Option<muzan::DaemonClient<Request, Response>> {
-    muzan::DaemonClient::connect(&daemon_paths()).ok()
-}
-
-fn send_request(request: &Request) -> Response {
-    let paths = daemon_paths();
-    let mut client =
-        match muzan::ensure_daemon_with_args::<Request, Response>(&paths, &["daemon", "run"]) {
-            Ok(c) => c,
-            Err(e) => {
-                if output_format() == OutputFormat::Json {
-                    format::json_error(&format!("{}", e));
-                    std::process::exit(1);
-                }
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
-        };
-
-    match client.send(request) {
-        Ok(resp) => resp,
-        Err(e) => {
-            if output_format() == OutputFormat::Json {
-                format::json_error(&format!("{}", e));
-                std::process::exit(1);
-            }
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-    }
-}
-
-// --- Commands that talk to daemon ---
+// --- Commands ---
 
 fn cmd_status(args: &[String]) {
     let (watch, rest) = parse_watch_opts(args, None);
@@ -912,39 +894,55 @@ fn format_condensed_mini_icons(status: &ServiceStatus) -> String {
         groups.push((key, 1));
     }
 
-    let dummy_procs: Vec<ProcessStatus> = groups.iter().map(|(key, _)| {
-        let state = match key {
-            0 => ProcessState::Running { pid: 0, uptime_secs: 0 },
-            1 => ProcessState::Running { pid: 0, uptime_secs: 0 },
-            2 => ProcessState::Stopped,
-            3 => ProcessState::Stopped,
-            4 => ProcessState::Crashed { exit_code: 1, retries: 0 },
-            _ => ProcessState::Failed { exit_code: 1 },
-        };
-        ProcessStatus {
-            name: String::new(),
-            state,
-            pid: None,
-            autostart: *key != 2,
-            service_type: ServiceType::Service,
-            ports: vec![],
-            ports_expected: if *key == 0 { vec![1] } else { vec![] },
-            state_since: None,
-            cpu_percent: None,
-            memory_bytes: None,
-        }
-    }).collect();
+    let dummy_procs: Vec<ProcessStatus> = groups
+        .iter()
+        .map(|(key, _)| {
+            let state = match key {
+                0 => ProcessState::Running {
+                    pid: 0,
+                    uptime_secs: 0,
+                },
+                1 => ProcessState::Running {
+                    pid: 0,
+                    uptime_secs: 0,
+                },
+                2 => ProcessState::Stopped,
+                3 => ProcessState::Stopped,
+                4 => ProcessState::Crashed {
+                    exit_code: 1,
+                    retries: 0,
+                },
+                _ => ProcessState::Failed { exit_code: 1 },
+            };
+            ProcessStatus {
+                name: String::new(),
+                state,
+                pid: None,
+                autostart: *key != 2,
+                service_type: ServiceType::Service,
+                ports: vec![],
+                ports_expected: if *key == 0 { vec![1] } else { vec![] },
+                state_since: None,
+                cpu_percent: None,
+                memory_bytes: None,
+            }
+        })
+        .collect();
 
-    groups.iter().zip(dummy_procs.iter()).map(|((_, count), dummy)| {
-        let icon = process_mini_icon(dummy);
-        if *count > 1 {
-            format!("{}{}", icon, count)
-        } else {
-            icon
-        }
-    }).collect::<Vec<_>>().join("")
+    groups
+        .iter()
+        .zip(dummy_procs.iter())
+        .map(|((_, count), dummy)| {
+            let icon = process_mini_icon(dummy);
+            if *count > 1 {
+                format!("{}{}", icon, count)
+            } else {
+                icon
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
-
 
 fn process_state_color(proc: &ProcessStatus) -> AggregateState {
     match &proc.state {
@@ -1125,6 +1123,22 @@ fn print_process_line(proc: &ProcessStatus, name_width: usize) {
     );
 }
 
+fn response_from_ops(results: Vec<plist_sync::OpResult>) -> Response {
+    let has_err = results.iter().any(|r| !r.ok);
+    let body = results
+        .iter()
+        .map(|r| r.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if has_err {
+        Response::Error { message: body }
+    } else {
+        Response::Ok {
+            message: Some(body),
+        }
+    }
+}
+
 fn handle_action_response(response: &Response) {
     let fmt = output_format();
     match response {
@@ -1175,7 +1189,7 @@ fn cmd_start(args: &[String]) {
         .collect();
 
     if autostart_only {
-        let (names, chains) = config::autostart_sorted();
+        let (names, _chains) = config::autostart_sorted();
         if names.is_empty() {
             if plain {
                 format::json_error("no projects with autostart = true");
@@ -1184,14 +1198,8 @@ fn cmd_start(args: &[String]) {
             }
             return;
         }
-        let response = send_request(&Request::Start {
-            names: names.clone(),
-            all: true,
-            processes: vec![],
-            chains,
-            wait: false,
-            force,
-        });
+        let _ = force;
+        let response = response_from_ops(plist_sync::start_services(&names));
         handle_action_response(&response);
         return;
     }
@@ -1228,14 +1236,8 @@ fn cmd_start(args: &[String]) {
         std::process::exit(1);
     }
 
-    let response = send_request(&Request::Start {
-        names: resolved.clone(),
-        all: start_all || !target_processes.is_empty(),
-        processes: target_processes,
-        chains,
-        wait: wait_for_ready,
-        force,
-    });
+    let _ = (target_processes, chains, wait_for_ready, force, start_all);
+    let response = response_from_ops(plist_sync::start_services(&resolved));
 
     if plain {
         handle_action_response(&response);
@@ -1299,10 +1301,8 @@ fn cmd_stop(args: &[String]) {
         std::process::exit(1);
     }
 
-    let response = send_request(&Request::Stop {
-        names: names.clone(),
-        processes: target_processes,
-    });
+    let _ = target_processes;
+    let response = response_from_ops(plist_sync::stop_services(&names));
 
     if plain {
         handle_action_response(&response);
@@ -1369,12 +1369,8 @@ fn cmd_restart(args: &[String]) {
             std::process::exit(1);
         }
 
-        let response = send_request(&Request::Reload {
-            names: names.clone(),
-            all: restart_all,
-            processes: target_processes,
-            force,
-        });
+        let _ = (target_processes, restart_all, force);
+        let response = response_from_ops(plist_sync::restart_services(&names));
 
         if plain {
             handle_action_response(&response);
@@ -1414,12 +1410,8 @@ fn cmd_restart(args: &[String]) {
 
     // No process name means restart all processes in the service
     if process.is_none() {
-        let response = send_request(&Request::Reload {
-            names: vec![service.clone()],
-            all: false,
-            processes: vec![],
-            force,
-        });
+        let _ = force;
+        let response = response_from_ops(plist_sync::restart_services(&[service.clone()]));
 
         if plain {
             handle_action_response(&response);
@@ -1454,12 +1446,9 @@ fn cmd_restart(args: &[String]) {
         return;
     }
 
-    // Restart a single process
-    let process_name = process.unwrap();
-    let response = send_request(&Request::Restart {
-        service: service.clone(),
-        process: process_name.clone(),
-    });
+    // Restart a single process — multi-process is gone; treat as full-service restart
+    let _ = process;
+    let response = response_from_ops(plist_sync::restart_services(&[service.clone()]));
 
     if plain {
         handle_action_response(&response);
@@ -1491,35 +1480,25 @@ fn cmd_restart(args: &[String]) {
     }
 }
 
-fn find_log_files(service: &str, process: &Option<String>) -> Vec<PathBuf> {
-    let log_dir = logs::service_log_dir(service);
-    if !log_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    if let Ok(dir_entries) = std::fs::read_dir(&log_dir) {
-        for entry in dir_entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if !name.ends_with(".log") {
-                continue;
-            }
-            if let Some(ref proc_filter) = process {
-                if !name.starts_with(proc_filter.as_str()) {
-                    continue;
-                }
-            }
-            files.push(path);
+fn find_log_files(service: &str, _process: &Option<String>) -> Vec<PathBuf> {
+    if let Some((out, err)) = plist_sync::log_paths(service) {
+        let mut files = Vec::new();
+        if out.exists() {
+            files.push(out);
+        }
+        if err.exists() {
+            files.push(err);
+        }
+        if !files.is_empty() {
+            return files;
         }
     }
-
-    files.sort();
-    files
+    // Fallback: flat log file next to plist-derived path
+    let flat = logs::log_dir().join(format!("{}.log", service));
+    if flat.exists() {
+        return vec![flat];
+    }
+    Vec::new()
 }
 
 fn tail_log_lines(service: &str, process: &Option<String>, n: usize) {
@@ -1546,24 +1525,25 @@ fn cmd_logs(args: &[String]) {
 
     let (service, process) = resolve_single_target(args, &svc_entries);
 
-    let log_dir = logs::service_log_dir(&service);
-    if !log_dir.exists() {
+    let plist_paths = plist_sync::log_paths(&service);
+    let files = find_log_files(&service, &process);
+
+    if plist_paths.is_none() && files.is_empty() {
         eprintln!("no logs for {}", service);
         std::process::exit(1);
     }
 
-    let files = find_log_files(&service, &process);
-
-    if files.is_empty() {
-        eprintln!("no log files found");
-        std::process::exit(1);
-    }
-
     if json {
-        let paths: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        let paths: Vec<String> = if let Some((o, e)) = &plist_paths {
+            vec![o.display().to_string(), e.display().to_string()]
+        } else {
+            files.iter().map(|f| f.display().to_string()).collect()
+        };
         format::json_value(&paths);
+    } else if let Some((o, e)) = plist_paths {
+        println!("{}", o.display());
+        println!("{}", e.display());
     } else {
-        eprintln!("{}", log_dir.display().to_string().dimmed());
         for f in &files {
             println!("{}", f.display());
         }
@@ -1605,42 +1585,56 @@ fn cmd_echo(args: &[String]) {
     let (tail_lines, rest) = parse_echo_opts(args);
     let (service, process) = resolve_single_target(&rest, &svc_entries);
 
-    // Tail last N lines from log file first
     tail_log_lines(&service, &process, tail_lines);
+    tail_files_forever(&service, &process, json);
+}
 
-    // Stream live output from daemon
-    let mut offset = 0u64;
+fn tail_files_forever(service: &str, _process: &Option<String>, json: bool) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let paths: Vec<PathBuf> = match plist_sync::log_paths(service) {
+        Some((o, e)) => vec![o, e],
+        None => find_log_files(service, &None),
+    };
+    if paths.is_empty() {
+        eprintln!("no log files for {}", service);
+        std::process::exit(1);
+    }
+
+    let mut handles: Vec<(PathBuf, Option<std::fs::File>, u64)> =
+        paths.into_iter().map(|p| (p, None, 0)).collect();
+
     loop {
-        let response = send_request(&Request::Logs {
-            service: service.clone(),
-            process: process.clone(),
-            follow: true,
-            offset,
-        });
-
-        match response {
-            Response::Log {
-                line,
-                offset: new_offset,
-            } => {
-                if !line.is_empty() {
-                    if json {
-                        format::json_log_line(&line.trim_end(), new_offset);
-                    } else {
-                        print!("{}", line);
-                        let _ = io::stdout().flush();
-                    }
+        for (path, file_opt, offset) in handles.iter_mut() {
+            if file_opt.is_none() {
+                if let Ok(mut f) = std::fs::File::open(&*path) {
+                    let end = f.seek(SeekFrom::End(0)).unwrap_or(0);
+                    *offset = end;
+                    *file_opt = Some(f);
                 }
-                offset = new_offset;
             }
-            Response::Error { message } => {
-                eprintln!("error: {}", message);
-                std::process::exit(1);
+            let Some(f) = file_opt else { continue };
+            if let Ok(meta) = f.metadata() {
+                if meta.len() < *offset {
+                    *offset = 0;
+                    let _ = f.seek(SeekFrom::Start(0));
+                }
             }
-            _ => {}
+            let _ = f.seek(SeekFrom::Start(*offset));
+            let mut buf = String::new();
+            if f.read_to_string(&mut buf).is_ok() && !buf.is_empty() {
+                *offset += buf.len() as u64;
+                if json {
+                    for line in buf.lines() {
+                        format::json_log_line(line, *offset);
+                    }
+                } else {
+                    print!("{}", buf);
+                    let _ = io::stdout().flush();
+                }
+            }
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 }
 
@@ -1657,33 +1651,7 @@ fn echo_after_action(names: &[String], process: Option<String>) {
     };
 
     tail_log_lines(&service, &process, DEFAULT_ECHO_TAIL);
-
-    let mut offset = 0u64;
-    loop {
-        let response = send_request(&Request::Logs {
-            service: service.clone(),
-            process: process.clone(),
-            follow: true,
-            offset,
-        });
-
-        match response {
-            Response::Log {
-                line,
-                offset: new_offset,
-            } => {
-                if !line.is_empty() {
-                    print!("{}", line);
-                    let _ = io::stdout().flush();
-                }
-                offset = new_offset;
-            }
-            Response::Error { .. } => break,
-            _ => {}
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    tail_files_forever(&service, &process, false);
 }
 
 fn echo_after_stop(names: &[String]) {
@@ -1717,7 +1685,7 @@ fn cmd_show(args: &[String]) {
         if let Some(current) = get_current_project(&entries) {
             (current, None)
         } else {
-            let projects_path = protocol::config_dir().join("projects");
+            let projects_path = utils::config_dir().join("projects");
             if json {
                 let map: BTreeMap<&String, &PathBuf> =
                     entries.iter().map(|(n, e)| (n, &e.dir)).collect();
@@ -1749,7 +1717,7 @@ fn cmd_show(args: &[String]) {
         if service_entry.inline_command.is_some() {
             eprintln!(
                 "no services defined ({})",
-                protocol::config_dir().join("projects.toml").display()
+                utils::config_dir().join("projects.toml").display()
             );
         } else {
             eprintln!(
@@ -1774,7 +1742,7 @@ fn cmd_show(args: &[String]) {
         }
     } else {
         if service_entry.inline_command.is_some() {
-            let projects_path = protocol::config_dir().join("projects.toml");
+            let projects_path = utils::config_dir().join("projects.toml");
             println!("{}", projects_path.display().to_string().dimmed());
         } else {
             let services_path = service_entry.dir.join("services.toml");
@@ -1937,285 +1905,135 @@ fn cmd_cron(args: &[String]) {
 }
 
 fn cmd_reload_config() {
-    let response = send_request(&Request::ReloadConfig);
-    let json = output_format() == OutputFormat::Json;
-    if json {
-        handle_action_response(&response);
-    } else {
-        match response {
-            Response::Ok { message } => {
-                println!(
-                    "{}",
-                    message.unwrap_or_else(|| "config reloaded".to_string())
-                );
-            }
-            Response::Error { message } => {
-                eprintln!("error: {}", message);
-                std::process::exit(1);
-            }
-            _ => {
-                eprintln!("unexpected response");
-                std::process::exit(1);
-            }
+    let entries = config::load_service_entries();
+    if entries.is_empty() {
+        eprintln!("no services registered");
+        return;
+    }
+    let mut written = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (name, svc) in &entries {
+        match plist_sync::sync_service(svc) {
+            Ok(()) => written += 1,
+            Err(e) => failed.push(format!("{}: {}", name, e)),
         }
     }
-}
-
-fn cmd_daemon(args: &[String]) {
-    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
-    let paths = daemon_paths();
     let json = output_format() == OutputFormat::Json;
-
-    match subcmd {
-        "run" => {
-            let daemon_args: Vec<String> = args[1..].to_vec();
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(daemon::run(&daemon_args));
+    if json {
+        format::json_value(&serde_json::json!({
+            "written": written,
+            "failed": failed,
+        }));
+    } else {
+        println!("synced {} plist(s)", written);
+        for msg in &failed {
+            eprintln!("{}", msg);
         }
-        "start" => {
-            if muzan::client::is_running(&paths) {
-                if json {
-                    format::json_ok(Some("daemon already running".into()));
-                } else {
-                    eprintln!("daemon already running");
-                }
-                return;
-            }
-            let mut spawn_args: Vec<String> = vec!["daemon".to_string(), "run".to_string()];
-            spawn_args.extend(args[1..].iter().cloned());
-            let spawn_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
-            let daemon = muzan::Daemon::new("kagaya");
-            match daemon.start_background_with_args(&spawn_refs) {
-                Ok(_) => {
-                    if json {
-                        format::json_ok(Some("daemon started".into()));
-                    } else {
-                        eprintln!("daemon started");
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&format!("{}", e));
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "stop" => {
-            let response = send_request(&Request::Shutdown {
-                preserve_state: false,
-            });
-            if json {
-                handle_action_response(&response);
-            } else {
-                match response {
-                    Response::Ok { message } => {
-                        eprintln!("daemon: {}", message.unwrap_or_default());
-                    }
-                    _ => eprintln!("daemon not running"),
-                }
-            }
-        }
-        "status" => {
-            if json {
-                #[derive(serde::Serialize)]
-                struct DaemonStatus {
-                    running: bool,
-                    pid: Option<u32>,
-                }
-                let running = muzan::client::is_running(&paths);
-                let pid = if running {
-                    muzan::client::read_pid(&paths)
-                } else {
-                    None
-                };
-                format::json_value(&DaemonStatus { running, pid });
-            } else if muzan::client::is_running(&paths) {
-                if let Some(pid) = muzan::client::read_pid(&paths) {
-                    eprintln!("daemon running (pid {})", pid);
-                } else {
-                    eprintln!("daemon running");
-                }
-            } else {
-                eprintln!("daemon not running");
-            }
-        }
-        "restart" => {
-            // Collect all daemon + descendant PIDs while parent-child
-            // relationships still exist (before any killing)
-            let all_pids = collect_all_daemon_pids();
-
-            // Try graceful shutdown first
-            if muzan::client::is_running(&paths) {
-                let _ = send_request(&Request::Shutdown {
-                    preserve_state: true,
-                });
-                // Wait for daemon to gracefully stop all services (up to 10s)
-                for _ in 0..100 {
-                    if !muzan::client::is_running(&paths) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-            // Force-kill anything that survived (using PIDs collected earlier)
-            force_kill_pids(&all_pids);
-            let daemon = muzan::Daemon::new("kagaya");
-            daemon.cleanup();
-
-            // If LaunchAgent is installed, it will respawn automatically.
-            // Otherwise start manually.
-            let launchd_managed = crate::autostart::status_info().installed;
-            if !launchd_managed {
-                let mut spawn_args: Vec<String> =
-                    vec!["daemon".to_string(), "run".to_string()];
-                spawn_args.extend(args[1..].iter().cloned());
-                let spawn_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
-                let daemon = muzan::Daemon::new("kagaya");
-                if let Err(e) = daemon.start_background_with_args(&spawn_refs) {
-                    if json {
-                        format::json_error(&format!("{}", e));
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-            // Wait for daemon to be ready
-            for _ in 0..100 {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                if muzan::client::is_running(&paths) {
-                    break;
-                }
-            }
-            if muzan::client::is_running(&paths) {
-                if json {
-                    format::json_ok(Some("daemon restarted".into()));
-                } else {
-                    eprintln!("daemon restarted");
-                }
-            } else {
-                if json {
-                    format::json_error("daemon did not start");
-                } else {
-                    eprintln!("error: daemon did not start");
-                }
-                std::process::exit(1);
-            }
-        }
-        _ => {
-            eprintln!("usage: ky daemon [start|stop|restart|status|run]");
-        }
+    }
+    if !failed.is_empty() {
+        std::process::exit(1);
     }
 }
 
 fn cmd_serve(action: Option<ServeAction>) {
     match action {
-        Some(ServeAction::Stop) => cmd_daemon(&["stop".into()]),
+        Some(ServeAction::Stop) => serve_stop(),
         Some(ServeAction::Status) => cmd_serve_status(),
-        Some(ServeAction::Daemon) | None => cmd_daemon(&["start".into()]),
         Some(ServeAction::Foreground) => {
-            cmd_daemon(&["run".into(), "--foreground".into()])
+            eprintln!("serve --foreground: HTTP server not implemented yet");
+            std::process::exit(1);
         }
+        Some(ServeAction::Daemon) | None => serve_install_and_start(),
     }
 }
 
-/// Collect all daemon PIDs and their descendants while parent-child
-/// relationships still exist (must be called BEFORE killing anything).
-fn collect_all_daemon_pids() -> Vec<u32> {
-    let my_pid = std::process::id();
-    let output = match std::process::Command::new("pgrep")
-        .args(["-f", "ky daemon run"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-    let daemon_pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<u32>().ok())
-        .filter(|&p| p != my_pid)
-        .collect();
+const SERVE_LABEL: &str = "serve";
 
-    let mut all_pids = daemon_pids.clone();
-    for &pid in &daemon_pids {
-        collect_descendants(pid, &mut all_pids);
-    }
-    all_pids.retain(|&p| p != my_pid);
-    all_pids
-}
+fn serve_install_and_start() {
+    let agents_dir = launchd::user_agents_dir();
+    let _ = std::fs::create_dir_all(&agents_dir);
+    let plist_path = agents_dir.join(format!("com.kagaya.{}.plist", SERVE_LABEL));
+    let log_root = logs::log_dir();
+    let _ = std::fs::create_dir_all(&log_root);
 
-/// Kill a list of PIDs: SIGTERM, wait 5s, then SIGKILL survivors.
-fn force_kill_pids(pids: &[u32]) {
-    if pids.is_empty() {
-        return;
-    }
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
+    let bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "ky".into());
 
-    for &pid in pids {
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-    }
-    for _ in 0..50 {
-        if pids
-            .iter()
-            .all(|&p| kill(Pid::from_raw(p as i32), None).is_err())
-        {
-            return;
+    let needs_write = !plist_path.exists();
+    if needs_write {
+        let mut dict = plist::Dictionary::new();
+        dict.insert(
+            "Label".into(),
+            plist::Value::String(format!("com.kagaya.{}", SERVE_LABEL)),
+        );
+        dict.insert(
+            "ProgramArguments".into(),
+            plist::Value::Array(vec![
+                plist::Value::String(bin),
+                plist::Value::String("serve".into()),
+                plist::Value::String("--foreground".into()),
+            ]),
+        );
+        dict.insert("RunAtLoad".into(), plist::Value::Boolean(true));
+        dict.insert("KeepAlive".into(), plist::Value::Boolean(true));
+        dict.insert(
+            "StandardOutPath".into(),
+            plist::Value::String(log_root.join("serve.log").to_string_lossy().into()),
+        );
+        dict.insert(
+            "StandardErrorPath".into(),
+            plist::Value::String(log_root.join("serve.err.log").to_string_lossy().into()),
+        );
+        if let Err(e) = plist::Value::Dictionary(dict).to_file_xml(&plist_path) {
+            eprintln!("error writing plist: {}", e);
+            std::process::exit(1);
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eprintln!("serve: installed {}", plist_path.display());
     }
-    for &pid in pids {
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(500));
-}
 
-fn collect_descendants(pid: u32, out: &mut Vec<u32>) {
-    let output = match std::process::Command::new("pgrep")
-        .args(["-P", &pid.to_string()])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Ok(child) = line.trim().parse::<u32>() {
-            if !out.contains(&child) {
-                out.push(child);
-                collect_descendants(child, out);
+    if plist_sync::is_loaded(SERVE_LABEL) {
+        let uid = launchd::get_uid();
+        let target = format!("gui/{}/com.kagaya.{}", uid, SERVE_LABEL);
+        let _ = std::process::Command::new("launchctl")
+            .args(["kickstart", "-kp", &target])
+            .output();
+        eprintln!("serve: restarted");
+    } else {
+        match plist_sync::bootstrap(&plist_path) {
+            Ok(()) => eprintln!("serve: started"),
+            Err(e) => {
+                eprintln!("serve: {}", e);
+                std::process::exit(1);
             }
         }
     }
 }
 
-fn cmd_serve_status() {
-    let paths = daemon_paths();
-    let json = output_format() == OutputFormat::Json;
-
-    if !muzan::client::is_running(&paths) {
-        if json {
-            format::json_value(&serde_json::json!({ "running": false, "http": false }));
-        } else {
-            eprintln!("serve off (daemon not running)");
-        }
+fn serve_stop() {
+    if !plist_sync::is_loaded(SERVE_LABEL) {
+        eprintln!("serve: not running");
         return;
     }
+    match plist_sync::bootout(SERVE_LABEL) {
+        Ok(()) => eprintln!("serve: stopped"),
+        Err(e) => {
+            eprintln!("serve: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
 
-    let (_, http_port) = fetch_status();
+fn cmd_serve_status() {
+    let running = plist_sync::is_loaded("serve");
+    let json = output_format() == OutputFormat::Json;
     if json {
-        format::json_value(&serde_json::json!({
-            "running": true,
-            "http": http_port.is_some(),
-            "port": http_port,
-        }));
-    } else if let Some(port) = http_port {
-        eprintln!("serve on  http://127.0.0.1:{}", port);
+        format::json_value(&serde_json::json!({ "running": running }));
+    } else if running {
+        eprintln!("serve on");
     } else {
-        eprintln!("serve off (daemon running without HTTP)");
+        eprintln!("serve off");
     }
 }
 
@@ -2280,25 +2098,9 @@ fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpt
 }
 
 fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
-    let response = send_request(&Request::Status);
-    match response {
-        Response::Status {
-            services,
-            http_port,
-        } => (services, http_port),
-        Response::Error { message } => {
-            if output_format() == OutputFormat::Json {
-                format::json_error(&message);
-            } else {
-                eprintln!("error: {}", message);
-            }
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("unexpected response from daemon");
-            std::process::exit(1);
-        }
-    }
+    let entries = config::load_service_entries();
+    let services = plist_sync::query_all(&entries);
+    (services, None)
 }
 
 struct StatusData {
@@ -2450,8 +2252,8 @@ fn render_condensed_status(args: &[String]) -> usize {
     }
 
     let mut lines = 0usize;
-    use tabwriter::TabWriter;
     use std::io::Write as _;
+    use tabwriter::TabWriter;
     let mut tw = TabWriter::new(vec![]).ansi(true).minwidth(0).padding(1);
 
     for name in &data.sorted_filter {
@@ -2477,14 +2279,24 @@ fn render_condensed_status(args: &[String]) -> usize {
             String::new()
         };
 
-        writeln!(tw, "{}\t{}\t{}\t{}\t{}\t{}",
-            sym, name, label, dur_colored, mini_icons, ports_str).unwrap();
+        writeln!(
+            tw,
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            sym, name, label, dur_colored, mini_icons, ports_str
+        )
+        .unwrap();
         lines += 1;
 
         if matches!(agg, AggregateState::Err | AggregateState::Degraded) {
             let tail = tail_log_lines_string(name, &None, 3);
             for tl in tail {
-                writeln!(tw, " \t{}\t\t\t\t", tl.dimmed()).unwrap();
+                // Cap width so a long crash log doesn't blow up the
+                // tabwriter column widths for unrelated rows.
+                let mut truncated: String = tl.chars().take(60).collect();
+                if tl.chars().count() > 60 {
+                    truncated.push('…');
+                }
+                writeln!(tw, " \t{}\t\t\t\t", truncated.dimmed()).unwrap();
                 lines += 1;
             }
         }
@@ -2494,11 +2306,24 @@ fn render_condensed_status(args: &[String]) -> usize {
         writeln!(tw).unwrap();
         lines += 1;
         if let Some(port) = data.http_port {
-            writeln!(tw, "{}\t{}\t{}\thttp://127.0.0.1:{}\t\t",
-                "●".green(), "serve", "on".green(), port).unwrap();
+            writeln!(
+                tw,
+                "{}\t{}\t{}\thttp://127.0.0.1:{}\t\t",
+                "●".green(),
+                "serve",
+                "on".green(),
+                port
+            )
+            .unwrap();
         } else {
-            writeln!(tw, "{}\t{}\t{}\t\t\t",
-                "○".dimmed(), "serve", "off".dimmed()).unwrap();
+            writeln!(
+                tw,
+                "{}\t{}\t{}\t\t\t",
+                "○".dimmed(),
+                "serve",
+                "off".dimmed()
+            )
+            .unwrap();
         }
         lines += 1;
 
@@ -2526,8 +2351,7 @@ fn render_condensed_status(args: &[String]) -> usize {
                             (sym.red().to_string(), state_str.red().to_string())
                         }
                     };
-                    writeln!(tw, "{}\t{}\t{}\t\t\t",
-                        sym_colored, job.name, state_colored).unwrap();
+                    writeln!(tw, "{}\t{}\t{}\t\t\t", sym_colored, job.name, state_colored).unwrap();
                     lines += 1;
                 }
             }

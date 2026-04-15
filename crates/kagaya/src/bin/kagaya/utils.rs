@@ -1,5 +1,18 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn kagaya_paths() -> muzan::DaemonPaths {
+    muzan::DaemonPaths::new("kagaya")
+}
+
+pub fn state_dir() -> PathBuf {
+    kagaya_paths().state_dir()
+}
+
+pub fn config_dir() -> PathBuf {
+    kagaya_paths().config_dir()
+}
 
 pub fn duration_since_timestamp(ts: u64) -> u64 {
     SystemTime::now()
