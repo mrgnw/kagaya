@@ -112,6 +112,8 @@ pub struct ProcessSpec {
     pub proc_name: Option<String>,
     pub command: String,
     pub env: HashMap<String, String>,
+    pub service_type: ServiceType,
+    pub restart: bool,
 }
 
 /// Decide how many processes this project has and what each one runs.
@@ -121,10 +123,13 @@ pub struct ProcessSpec {
 ///   3. Auto-detection (Procfile / package.json ..) → one process per suggestion
 fn resolve_processes(svc: &ServiceEntry) -> Vec<ProcessSpec> {
     if let Some(inline) = &svc.inline_command {
+        let is_task = inline.service_type == ServiceType::Task;
         return vec![ProcessSpec {
             proc_name: None,
             command: inline.run.clone(),
             env: inline.env.clone(),
+            service_type: inline.service_type.clone(),
+            restart: inline.restart.unwrap_or(!is_task),
         }];
     }
 
@@ -153,11 +158,22 @@ fn resolve_processes(svc: &ServiceEntry) -> Vec<ProcessSpec> {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        let service_type = match value.get("type").and_then(|v| v.as_str()) {
+                            Some("task") => ServiceType::Task,
+                            _ => ServiceType::Service,
+                        };
+                        let is_task = service_type == ServiceType::Task;
+                        let restart = value
+                            .get("restart")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(!is_task);
                         if let Some(cmd) = cmd {
                             procs.push(ProcessSpec {
                                 proc_name: Some(pname.clone()),
                                 command: cmd,
                                 env,
+                                service_type,
+                                restart,
                             });
                         }
                     }
@@ -181,6 +197,8 @@ fn resolve_processes(svc: &ServiceEntry) -> Vec<ProcessSpec> {
             proc_name: None,
             command: suggestions.into_iter().next().unwrap().command,
             env: HashMap::new(),
+            service_type: ServiceType::Service,
+            restart: true,
         }];
     }
     suggestions
@@ -189,6 +207,8 @@ fn resolve_processes(svc: &ServiceEntry) -> Vec<ProcessSpec> {
             proc_name: Some(s.name),
             command: s.command,
             env: HashMap::new(),
+            service_type: ServiceType::Service,
+            restart: true,
         })
         .collect()
 }
@@ -225,7 +245,15 @@ fn build_plist_value(svc: &ServiceEntry, spec: &ProcessSpec) -> plist::Value {
         "WorkingDirectory".into(),
         plist::Value::String(svc.dir.to_string_lossy().to_string()),
     );
-    dict.insert("KeepAlive".into(), plist::Value::Boolean(true));
+    let is_task = spec.service_type == ServiceType::Task;
+    if is_task || !spec.restart {
+        dict.insert("KeepAlive".into(), plist::Value::Boolean(false));
+    } else {
+        let mut ka = plist::Dictionary::new();
+        ka.insert("SuccessfulExit".into(), plist::Value::Boolean(false));
+        dict.insert("KeepAlive".into(), plist::Value::Dictionary(ka));
+        dict.insert("ThrottleInterval".into(), plist::Value::Integer(30.into()));
+    }
     dict.insert("RunAtLoad".into(), plist::Value::Boolean(svc.autostart));
     dict.insert(
         "StandardOutPath".into(),
