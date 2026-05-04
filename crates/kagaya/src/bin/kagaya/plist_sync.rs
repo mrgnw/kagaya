@@ -293,6 +293,24 @@ pub fn is_loaded_label(label: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_running_label(label: &str) -> bool {
+    let out = Command::new("launchctl")
+        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("pid = ")
+                    && !trimmed.starts_with("pid = 0")
+                    && !trimmed.contains("(none)")
+            })
+        }
+        _ => false,
+    }
+}
+
 pub fn is_loaded(project: &str) -> bool {
     is_loaded_label(&label_for(project, None))
 }
@@ -415,6 +433,7 @@ pub fn sync_service(svc: &ServiceEntry) -> Result<usize, String> {
         }
 
         let was_loaded = is_loaded_label(&label);
+        let was_running = was_loaded && is_running_label(&label);
         if was_loaded {
             let _ = bootout_label(&label, Some(&path));
         }
@@ -423,6 +442,9 @@ pub fn sync_service(svc: &ServiceEntry) -> Result<usize, String> {
             .map_err(|e| format!("writing {}: {}", path.display(), e))?;
         if was_loaded || svc.autostart {
             bootstrap(&path)?;
+        }
+        if was_running && !svc.autostart {
+            let _ = kickstart_label(&label);
         }
         written += 1;
     }
@@ -442,14 +464,18 @@ pub fn set_run_at_load(project: &str, value: bool) -> Result<(), String> {
             .as_dictionary_mut()
             .ok_or_else(|| format!("{}: plist root is not a dictionary", label))?;
         dict.insert("RunAtLoad".into(), plist::Value::Boolean(value));
+        let was_loaded = is_loaded_label(&label);
+        let was_running = was_loaded && is_running_label(&label);
         v.to_file_xml(&path)
             .map_err(|e| format!("writing {}: {}", path.display(), e))?;
-        let was_loaded = is_loaded_label(&label);
         if was_loaded {
             let _ = bootout_label(&label, Some(&path));
         }
-        if value {
+        if value || was_running {
             bootstrap(&path)?;
+        }
+        if was_running && !value {
+            let _ = kickstart_label(&label);
         }
     }
     Ok(())
