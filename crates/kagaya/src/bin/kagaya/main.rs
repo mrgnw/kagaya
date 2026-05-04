@@ -1200,7 +1200,7 @@ fn cmd_start(args: &[String]) {
             return;
         }
         let _ = force;
-        let response = response_from_ops(plist_sync::start_services(&names));
+        let response = response_from_ops(plist_sync::start_services(&names, &[]));
         handle_action_response(&response);
         return;
     }
@@ -1237,8 +1237,8 @@ fn cmd_start(args: &[String]) {
         std::process::exit(1);
     }
 
-    let _ = (target_processes, chains, wait_for_ready, force, start_all);
-    let response = response_from_ops(plist_sync::start_services(&resolved));
+    let _ = (chains, wait_for_ready, force, start_all);
+    let response = response_from_ops(plist_sync::start_services(&resolved, &target_processes));
 
     if plain {
         handle_action_response(&response);
@@ -1401,7 +1401,6 @@ fn cmd_restart(args: &[String]) {
                 eprintln!("error: {}", message);
                 std::process::exit(1);
             }
-            _ => {}
         }
         return;
     }
@@ -1442,7 +1441,6 @@ fn cmd_restart(args: &[String]) {
                 eprintln!("error: {}", message);
                 std::process::exit(1);
             }
-            _ => {}
         }
         return;
     }
@@ -1477,7 +1475,6 @@ fn cmd_restart(args: &[String]) {
             eprintln!("error: {}", message);
             std::process::exit(1);
         }
-        _ => {}
     }
 }
 

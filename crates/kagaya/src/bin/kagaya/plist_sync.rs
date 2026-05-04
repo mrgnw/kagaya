@@ -640,16 +640,16 @@ pub struct OpResult {
     pub message: String,
 }
 
-pub fn start_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| fan_op(n, Op::Start)).collect()
+pub fn start_services(names: &[String], proc_filter: &[String]) -> Vec<OpResult> {
+    names.iter().map(|n| fan_op(n, Op::Start, proc_filter)).collect()
 }
 
 pub fn stop_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| fan_op(n, Op::Stop)).collect()
+    names.iter().map(|n| fan_op(n, Op::Stop, &[])).collect()
 }
 
 pub fn restart_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| fan_op(n, Op::Restart)).collect()
+    names.iter().map(|n| fan_op(n, Op::Restart, &[])).collect()
 }
 
 #[derive(Clone, Copy)]
@@ -659,7 +659,7 @@ enum Op {
     Restart,
 }
 
-fn fan_op(project: &str, op: Op) -> OpResult {
+fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
     let plists = plist_paths_for_project(project);
     if plists.is_empty() {
         return OpResult {
@@ -671,6 +671,13 @@ fn fan_op(project: &str, op: Op) -> OpResult {
     let mut messages = Vec::new();
     let mut any_err = false;
     for (proc_opt, path) in plists {
+        if !proc_filter.is_empty() {
+            match &proc_opt {
+                Some(proc_name) if !proc_filter.contains(proc_name) => continue,
+                None => continue,
+                _ => {}
+            }
+        }
         let label = label_for(project, proc_opt.as_deref());
         let display = proc_opt.clone().unwrap_or_else(|| project.to_string());
         let result = match op {
