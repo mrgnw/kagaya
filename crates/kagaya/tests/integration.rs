@@ -1,26 +1,15 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use kagaya::logs;
 use kagaya::supervisor::{Supervisor, SupervisorConfig};
 use kagaya::types::*;
-use serde_json::Value;
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("kagaya-test-{}-{}", n, name));
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
-fn cli_temp_dir(name: &str) -> PathBuf {
-    let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = PathBuf::from("/tmp").join(format!("kagaya-cli-test-{}-{}", n, name));
-    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -32,6 +21,76 @@ fn test_supervisor(name: &str) -> (std::sync::Arc<Supervisor>, std::path::PathBu
         max_log_size: 1024 * 1024,
     });
     (sup, log_dir)
+}
+
+async fn wait_for_process_status<F>(
+    sup: &std::sync::Arc<Supervisor>,
+    service: &str,
+    process: &str,
+    predicate: F,
+) -> ProcessStatus
+where
+    F: Fn(&ProcessStatus) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut last_status = None;
+
+    loop {
+        let statuses = sup.status().await;
+        let current = statuses
+            .iter()
+            .find(|status| status.name == service)
+            .and_then(|status| {
+                status
+                    .processes
+                    .iter()
+                    .find(|proc_status| proc_status.name == process)
+            })
+            .cloned();
+
+        if let Some(status) = current {
+            if predicate(&status) {
+                return status;
+            }
+            last_status = Some(status);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "{service}/{process} did not reach expected state; last status: {:?}",
+                last_status.map(|status| status.state)
+            );
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_output_contains(
+    sup: &std::sync::Arc<Supervisor>,
+    service: &str,
+    process: &str,
+    expected: &str,
+) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+
+    loop {
+        let output = sup.get_output(service, Some(process)).await.unwrap();
+        let snapshot = output.snapshot().await;
+        let last_text = String::from_utf8_lossy(&snapshot).to_string();
+
+        if last_text.contains(expected) {
+            return last_text;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "{service}/{process} output did not contain {expected:?}; output was: {last_text}"
+            );
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 fn simple_proc(name: &str, command: &str) -> ProcessDef {
@@ -49,114 +108,6 @@ fn simple_proc(name: &str, command: &str) -> ProcessDef {
         depends_on: vec![],
         ready: None,
         ready_timeout: 10,
-    }
-}
-
-struct CliTestEnv {
-    root: PathBuf,
-    home: PathBuf,
-    xdg_config_home: PathBuf,
-    xdg_state_home: PathBuf,
-    project_dir: PathBuf,
-}
-
-impl CliTestEnv {
-    fn new(name: &str) -> Self {
-        let root = cli_temp_dir(name);
-        let home = root.join("home");
-        let xdg_config_home = root.join("xdg-config");
-        let xdg_state_home = root.join("xdg-state");
-        let project_dir = root.join("project");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&xdg_config_home).unwrap();
-        std::fs::create_dir_all(&xdg_state_home).unwrap();
-        std::fs::create_dir_all(&project_dir).unwrap();
-        Self {
-            root,
-            home,
-            xdg_config_home,
-            xdg_state_home,
-            project_dir,
-        }
-    }
-
-    fn daemon_pid_path(&self) -> PathBuf {
-        self.xdg_state_home.join("kagaya").join("daemon.pid")
-    }
-
-    fn setup_project(&self) {
-        std::fs::create_dir_all(self.xdg_config_home.join("kagaya")).unwrap();
-        std::fs::write(
-            self.project_dir.join("services.toml"),
-            "web = \"sleep 60\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            self.xdg_config_home.join("kagaya").join("projects.toml"),
-            format!("[app]\ndir = \"{}\"\n", self.project_dir.display()),
-        )
-        .unwrap();
-    }
-
-    fn command(&self, binary: &Path, args: &[&str]) -> Command {
-        let mut cmd = Command::new(binary);
-        cmd.args(args)
-            .env("HOME", &self.home)
-            .env("XDG_CONFIG_HOME", &self.xdg_config_home)
-            .env("XDG_STATE_HOME", &self.xdg_state_home);
-        cmd
-    }
-
-    fn run_json(&self, binary: &Path, args: &[&str]) -> Value {
-        let output = self.command(binary, args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "command failed: {}\nstdout: {}\nstderr: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
-    }
-
-    fn wait_for_service_running(&self, binary: &Path, service: &str) {
-        for _ in 0..50 {
-            let status = self.run_json(binary, &["--json", "status", service]);
-            let running = status["services"]
-                .as_array()
-                .and_then(|services| services.iter().find(|entry| entry["name"] == service))
-                .and_then(|service| service["processes"].as_array())
-                .map(|processes| {
-                    processes
-                        .iter()
-                        .any(|process| process["state"].get("Running").is_some())
-                })
-                .unwrap_or(false);
-            if running {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        panic!("service '{service}' did not become running in time");
-    }
-
-    fn wait_for_daemon_pid_change(&self, binary: &Path, previous_pid: u64) -> u64 {
-        for _ in 0..50 {
-            let status = self.run_json(binary, &["--json", "daemon", "status"]);
-            let running = status["running"].as_bool().unwrap_or(false);
-            let pid = status["pid"].as_u64().unwrap_or(0);
-            if running && pid != 0 && pid != previous_pid {
-                return pid;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        panic!("daemon pid did not change after restart");
-    }
-}
-
-impl Drop for CliTestEnv {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -255,7 +206,9 @@ async fn supervisor_start_and_stop() {
     let dir = temp_dir("start-stop-workdir");
 
     let procs = vec![simple_proc("sleeper", "sleep 60")];
-    let result = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let result = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
     assert!(result.is_ok());
 
     // Give it a moment to spawn
@@ -282,10 +235,14 @@ async fn supervisor_already_running() {
     let dir = temp_dir("already-running-workdir");
 
     let procs = vec![simple_proc("sleeper", "sleep 60")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let result = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let result = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
     assert!(result.unwrap().contains("already running"));
 
     let _ = sup.stop_service("test").await;
@@ -324,16 +281,11 @@ async fn supervisor_captures_output() {
     let dir = temp_dir("output-workdir");
 
     let procs = vec![simple_proc("echo", "echo hello-kagaya")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
 
-    // Wait for process to run and output to be captured
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let output = sup.get_output("test", Some("echo")).await;
-    assert!(output.is_ok());
-    let snapshot = output.unwrap().snapshot().await;
-    let text = String::from_utf8_lossy(&snapshot);
-    assert!(text.contains("hello-kagaya"), "output was: {}", text);
+    wait_for_output_contains(&sup, "test", "echo", "hello-kagaya").await;
 
     let _ = sup.stop_service("test").await;
     let _ = std::fs::remove_dir_all(&log_dir);
@@ -348,15 +300,14 @@ async fn supervisor_process_exits_cleanly() {
     let dir = temp_dir("clean-exit-workdir");
 
     let procs = vec![simple_proc("fast", "echo done")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
 
-    // Wait for process to finish
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let statuses = sup.status().await;
-    assert_eq!(statuses.len(), 1);
-    let proc = &statuses[0].processes[0];
-    assert_eq!(proc.state, ProcessState::Stopped);
+    wait_for_process_status(&sup, "test", "fast", |proc| {
+        proc.state == ProcessState::Stopped
+    })
+    .await;
 
     let _ = std::fs::remove_dir_all(&log_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -385,12 +336,14 @@ async fn task_does_not_restart_on_failure() {
         ready_timeout: 10,
     }];
 
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
 
-    let statuses = sup.status().await;
-    let proc = &statuses[0].processes[0];
-    assert!(matches!(proc.state, ProcessState::Failed { exit_code: 1 }));
+    wait_for_process_status(&sup, "test", "task", |proc| {
+        matches!(proc.state, ProcessState::Failed { exit_code: 1 })
+    })
+    .await;
 
     let _ = std::fs::remove_dir_all(&log_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -442,7 +395,9 @@ async fn supervisor_kill_process() {
     let dir = temp_dir("kill-workdir");
 
     let procs = vec![simple_proc("sleeper", "sleep 60")];
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let result = sup.kill_process("test", "sleeper").await;
@@ -483,13 +438,11 @@ async fn supervisor_passes_env_vars() {
         ready_timeout: 10,
     }];
 
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
 
-    let output = sup.get_output("test", Some("env")).await.unwrap();
-    let snapshot = output.snapshot().await;
-    let text = String::from_utf8_lossy(&snapshot);
-    assert!(text.contains("hello123"), "output was: {}", text);
+    wait_for_output_contains(&sup, "test", "env", "hello123").await;
 
     let _ = std::fs::remove_dir_all(&log_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -614,7 +567,9 @@ async fn depends_on_starts_dependency_first() {
     };
 
     let procs = vec![marker, checker];
-    let _ = sup.start_service("test", &dir, &procs, true, &[], false).await;
+    let _ = sup
+        .start_service("test", &dir, &procs, true, &[], false)
+        .await;
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // checker should have been able to read the marker file
@@ -625,56 +580,4 @@ async fn depends_on_starts_dependency_first() {
 
     let _ = std::fs::remove_dir_all(&log_dir);
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn cli_daemon_restart_restores_running_services_with_new_binary_path() {
-    let env = CliTestEnv::new("daemon-restart");
-    env.setup_project();
-
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ky"));
-    let binary_copy = env.root.join("ky-new");
-    std::fs::copy(&binary, &binary_copy).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&binary_copy).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&binary_copy, perms).unwrap();
-    }
-
-    env.run_json(&binary, &["--json", "start", "app"]);
-    env.wait_for_service_running(&binary, "app");
-
-    let before = env.run_json(&binary, &["--json", "daemon", "status"]);
-    let old_pid = before["pid"].as_u64().unwrap();
-    assert!(before["running"].as_bool().unwrap());
-    assert!(env.daemon_pid_path().exists());
-
-    let restart = env.run_json(&binary_copy, &["--json", "daemon", "restart"]);
-    assert_eq!(restart["ok"].as_bool(), Some(true));
-    let new_pid = env.wait_for_daemon_pid_change(&binary_copy, old_pid);
-    assert_ne!(old_pid, new_pid);
-    assert_eq!(
-        std::fs::read_to_string(env.daemon_pid_path())
-            .unwrap()
-            .trim(),
-        new_pid.to_string()
-    );
-
-    env.wait_for_service_running(&binary_copy, "app");
-    let final_status = env.run_json(&binary_copy, &["--json", "status", "app"]);
-    let service = final_status["services"]
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap();
-    assert_eq!(service["name"], "app");
-    assert!(service["processes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|process| process["state"].get("Running").is_some()));
-
-    let _ = env.run_json(&binary_copy, &["--json", "daemon", "stop"]);
 }

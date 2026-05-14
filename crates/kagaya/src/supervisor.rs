@@ -8,17 +8,17 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 
 pub static ENRICHED_PATH: LazyLock<String> = LazyLock::new(|| {
-	if let Ok(output) = std::process::Command::new("/bin/zsh")
-		.args(["-li", "-c", "echo $PATH"])
-		.output()
-	{
-		let shell_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-		if !shell_path.is_empty() {
-			return shell_path;
-		}
-	}
-	let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/Users/m"));
-	format!(
+    if let Ok(output) = std::process::Command::new("/bin/zsh")
+        .args(["-li", "-c", "echo $PATH"])
+        .output()
+    {
+        let shell_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !shell_path.is_empty() {
+            return shell_path;
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/Users/m"));
+    format!(
 		"{home}/.local/bin:{home}/.cargo/bin:{home}/Library/pnpm:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	)
 });
@@ -211,7 +211,10 @@ impl Supervisor {
                         return Ok(format!("{}: already running", name));
                     }
                 } else {
-                    tracing::info!("{}: cleaning up stale state (processes no longer alive)", name);
+                    tracing::info!(
+                        "{}: cleaning up stale state (processes no longer alive)",
+                        name
+                    );
                     services.remove(name);
                 }
             }
@@ -1245,9 +1248,9 @@ fn is_alive(pid: i32) -> bool {
 
 /// Check if a process is still alive by sending signal 0.
 fn pid_is_alive(pid: u32) -> bool {
-	use nix::sys::signal::kill;
-	use nix::unistd::Pid;
-	kill(Pid::from_raw(pid as i32), None).is_ok()
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
 /// Kill a process and all its descendants. Sends SIGTERM to process group + individual

@@ -269,7 +269,7 @@ fn dispatch_external(args: &[String]) {
     } else {
         eprintln!("unknown command or service: {}", name);
         eprintln!();
-        eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, daemon, reload-config, serve, cron, autostart");
+        eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, reload-config, serve, cron, autostart");
         eprintln!();
         let names: Vec<&str> = services.keys().map(|s| s.as_str()).collect();
         if !names.is_empty() {

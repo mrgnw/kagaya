@@ -9,7 +9,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GlobalConfig {
     #[serde(default)]
-    #[cfg_attr(feature = "dev", allow(dead_code))]
+    #[allow(dead_code)]
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub logs: LogsConfig,
@@ -29,7 +29,7 @@ pub struct DaemonConfig {
     #[allow(dead_code)]
     pub release_dir: Option<String>,
     #[serde(default = "default_port")]
-    #[cfg_attr(feature = "dev", allow(dead_code))]
+    #[allow(dead_code)]
     pub port: u16,
 }
 
