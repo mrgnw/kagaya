@@ -189,11 +189,11 @@ ky add [name] [dir]            # register a project directory (uses cwd if omitt
 ky add <name> --run <command>  # register a standalone command
 
 ky status              # show all projects
-ky start [name]        # start project(s)
-ky stop [name]         # stop project(s)
+ky start [name]        # start project(s), or one process with project.process
+ky stop [name]         # stop project(s), or one process with project.process
 ky reload [name]       # restart project(s) (picks up config changes)
 ky kill [name]         # kill process(es) in project(s)
-ky restart [name]      # restart process(es) in project(s)
+ky restart [name]      # restart project(s), or one process with project.process
 ky echo [name]         # live stream logs from project(s)
 ky logs [name]         # show last 100 lines of log file
 ky tail [name]         # follow log file (tail -f)
@@ -310,6 +310,15 @@ Pass project names to target specific projects:
 ```
 ky status myapp        # show status of myapp
 ky myapp status        # same thing, flexible arg ordering
+```
+
+Use `project.process` to target one process inside a multi-process project:
+
+```
+ky start jobs.ui       # start/restart only the ui process in jobs
+ky stop jobs.sync      # stop only the sync process in jobs
+ky restart jobs.ui     # restart only the ui process in jobs
+ky status jobs.ui      # show only the ui process in jobs
 ```
 
 Omit the name to target all projects (or current project if in a registered directory):

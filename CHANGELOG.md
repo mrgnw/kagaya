@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-05-15
+
+### Fixed
+
+- **`project.process` targets now stay process-scoped**: `ky start jobs.ui`, `ky stop jobs.ui`, and `ky restart jobs.ui` now operate only on the requested process instead of fanning out to every launchd plist in the project. Missing process targets now fail with a clear error before launchd is touched.
+
 ## [0.14.0] - 2026-04-15
 
 ### Changed

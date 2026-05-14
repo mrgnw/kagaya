@@ -377,7 +377,7 @@ fn print_usage() {
 
     eprintln!("{}", "targeting".cyan().bold());
     eprintln!(
-        "  {} dot syntax targets a process:  ky status app.web",
+        "  {} dot syntax targets one process: ky start app.web",
         "name.process".bold()
     );
     eprintln!("  Service-first syntax:              ky myapp start");
@@ -1200,7 +1200,10 @@ fn cmd_start(args: &[String]) {
             return;
         }
         let _ = force;
-        let response = response_from_ops(plist_sync::start_services(&names, &[]));
+        let response = response_from_ops(plist_sync::start_services(
+            &names,
+            &plist_sync::ProcessFilters::new(),
+        ));
         handle_action_response(&response);
         return;
     }
@@ -1302,8 +1305,7 @@ fn cmd_stop(args: &[String]) {
         std::process::exit(1);
     }
 
-    let _ = target_processes;
-    let response = response_from_ops(plist_sync::stop_services(&names));
+    let response = response_from_ops(plist_sync::stop_services(&names, &target_processes));
 
     if plain {
         handle_action_response(&response);
@@ -1370,8 +1372,8 @@ fn cmd_restart(args: &[String]) {
             std::process::exit(1);
         }
 
-        let _ = (target_processes, restart_all, force);
-        let response = response_from_ops(plist_sync::restart_services(&names));
+        let _ = (restart_all, force);
+        let response = response_from_ops(plist_sync::restart_services(&names, &target_processes));
 
         if plain {
             handle_action_response(&response);
@@ -1411,7 +1413,10 @@ fn cmd_restart(args: &[String]) {
     // No process name means restart all processes in the service
     if process.is_none() {
         let _ = force;
-        let response = response_from_ops(plist_sync::restart_services(&[service.clone()]));
+        let response = response_from_ops(plist_sync::restart_services(
+            &[service.clone()],
+            &plist_sync::ProcessFilters::new(),
+        ));
 
         if plain {
             handle_action_response(&response);
@@ -1445,9 +1450,14 @@ fn cmd_restart(args: &[String]) {
         return;
     }
 
-    // Restart a single process — multi-process is gone; treat as full-service restart
-    let _ = process;
-    let response = response_from_ops(plist_sync::restart_services(&[service.clone()]));
+    let mut target_processes = plist_sync::ProcessFilters::new();
+    if let Some(process) = process {
+        target_processes.insert(service.clone(), vec![process]);
+    }
+    let response = response_from_ops(plist_sync::restart_services(
+        &[service.clone()],
+        &target_processes,
+    ));
 
     if plain {
         handle_action_response(&response);
@@ -2158,7 +2168,13 @@ fn gather_status_data(args: &[String]) -> StatusData {
         (svcs, None)
     } else {
         let (svcs, procs) = resolve_service_targets(&filtered_args, &entries);
-        let proc_filter = procs.into_iter().next();
+        let proc_filter = procs.into_values().next().and_then(|mut p| {
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.remove(0))
+            }
+        });
         (svcs, proc_filter)
     };
 
@@ -3371,16 +3387,16 @@ fn get_current_project(entries: &BTreeMap<String, ServiceEntry>) -> Option<Strin
     None
 }
 
-/// Resolve a list of CLI args into (service_names, process_names).
+/// Resolve a list of CLI args into service names and per-service process filters.
 /// Handles: dot notation, known service names, bare process names via CWD, --all.
 /// If args is empty, falls back to CWD project or errors.
 fn resolve_service_targets(
     args: &[String],
     entries: &BTreeMap<String, ServiceEntry>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, plist_sync::ProcessFilters) {
     if args.is_empty() {
         if let Some(current) = get_current_project(entries) {
-            return (vec![current], vec![]);
+            return (vec![current], plist_sync::ProcessFilters::new());
         }
         eprintln!("no service specified and not in a registered project directory");
         eprintln!("use --all to target all services, or specify a name");
@@ -3392,11 +3408,14 @@ fn resolve_service_targets(
     }
 
     if args.len() == 1 && is_all_flag(&args[0]) {
-        return (entries.keys().cloned().collect(), vec![]);
+        return (
+            entries.keys().cloned().collect(),
+            plist_sync::ProcessFilters::new(),
+        );
     }
 
     let mut service_names: Vec<String> = Vec::new();
-    let mut process_names: Vec<String> = Vec::new();
+    let mut process_filters = plist_sync::ProcessFilters::new();
 
     for arg in args {
         if is_all_flag(arg) {
@@ -3405,10 +3424,11 @@ fn resolve_service_targets(
         let (svc, proc) = resolve_dot_target(arg, entries);
         if let Some(p) = proc {
             if !service_names.contains(&svc) {
-                service_names.push(svc);
+                service_names.push(svc.clone());
             }
-            if !process_names.contains(&p) {
-                process_names.push(p);
+            let filters = process_filters.entry(svc).or_default();
+            if !filters.contains(&p) {
+                filters.push(p);
             }
         } else if entries.contains_key(&svc) {
             if !service_names.contains(&svc) {
@@ -3416,10 +3436,11 @@ fn resolve_service_targets(
             }
         } else if let Some(current) = get_current_project(entries) {
             if !service_names.contains(&current) {
-                service_names.push(current);
+                service_names.push(current.clone());
             }
-            if !process_names.contains(&svc) {
-                process_names.push(svc);
+            let filters = process_filters.entry(current).or_default();
+            if !filters.contains(&svc) {
+                filters.push(svc);
             }
         } else {
             eprintln!("unknown service: {}", svc);
@@ -3431,7 +3452,7 @@ fn resolve_service_targets(
         }
     }
 
-    (service_names, process_names)
+    (service_names, process_filters)
 }
 
 /// Resolve CLI args to a single (service, Option<process>) target.
@@ -3566,6 +3587,25 @@ mod tests {
         }
     }
 
+    fn test_entries(names: &[&str]) -> BTreeMap<String, ServiceEntry> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    ServiceEntry {
+                        name: name.to_string(),
+                        dir: PathBuf::from("/tmp").join(name),
+                        inline_command: None,
+                        autostart: false,
+                        depends_on: vec![],
+                        urls: vec![],
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn span_text(line: &ratatui::text::Line) -> String {
         line.spans
             .iter()
@@ -3575,6 +3615,26 @@ mod tests {
 
     fn find_span<'a>(line: &'a ratatui::text::Line, content: &str) -> Option<&'a Span<'a>> {
         line.spans.iter().find(|s| s.content.as_ref() == content)
+    }
+
+    #[test]
+    fn resolve_dot_target_scopes_process_to_service() {
+        let entries = test_entries(&["jobs"]);
+        let (services, processes) = resolve_service_targets(&["jobs.ui".to_string()], &entries);
+
+        assert_eq!(services, vec!["jobs"]);
+        assert_eq!(processes.get("jobs"), Some(&vec!["ui".to_string()]));
+    }
+
+    #[test]
+    fn resolve_process_filters_do_not_cross_services() {
+        let entries = test_entries(&["jobs", "admin"]);
+        let args = vec!["jobs.ui".to_string(), "admin.worker".to_string()];
+        let (services, processes) = resolve_service_targets(&args, &entries);
+
+        assert_eq!(services, vec!["jobs", "admin"]);
+        assert_eq!(processes.get("jobs"), Some(&vec!["ui".to_string()]));
+        assert_eq!(processes.get("admin"), Some(&vec!["worker".to_string()]));
     }
 
     // --- format_uptime ---

@@ -666,16 +666,45 @@ pub struct OpResult {
     pub message: String,
 }
 
-pub fn start_services(names: &[String], proc_filter: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| fan_op(n, Op::Start, proc_filter)).collect()
+pub type ProcessFilters = BTreeMap<String, Vec<String>>;
+
+pub fn start_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+    names
+        .iter()
+        .map(|n| {
+            fan_op(
+                n,
+                Op::Start,
+                proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+            )
+        })
+        .collect()
 }
 
-pub fn stop_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| fan_op(n, Op::Stop, &[])).collect()
+pub fn stop_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+    names
+        .iter()
+        .map(|n| {
+            fan_op(
+                n,
+                Op::Stop,
+                proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+            )
+        })
+        .collect()
 }
 
-pub fn restart_services(names: &[String]) -> Vec<OpResult> {
-    names.iter().map(|n| fan_op(n, Op::Restart, &[])).collect()
+pub fn restart_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+    names
+        .iter()
+        .map(|n| {
+            fan_op(
+                n,
+                Op::Restart,
+                proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -694,16 +723,19 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
             message: format!("no plist for '{}'. run `ky add {}` first", project, project),
         };
     }
+    let plists = match filtered_project_plists(project, plists, proc_filter) {
+        Ok(plists) => plists,
+        Err(message) => {
+            return OpResult {
+                name: project.to_string(),
+                ok: false,
+                message,
+            };
+        }
+    };
     let mut messages = Vec::new();
     let mut any_err = false;
     for (proc_opt, path) in plists {
-        if !proc_filter.is_empty() {
-            match &proc_opt {
-                Some(proc_name) if !proc_filter.contains(proc_name) => continue,
-                None => continue,
-                _ => {}
-            }
-        }
         let label = label_for(project, proc_opt.as_deref());
         let display = proc_opt.clone().unwrap_or_else(|| project.to_string());
         let result = match op {
@@ -723,6 +755,35 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
         name: project.to_string(),
         ok: !any_err,
         message: messages.join("\n"),
+    }
+}
+
+fn filtered_project_plists(
+    project: &str,
+    plists: Vec<(Option<String>, PathBuf)>,
+    proc_filter: &[String],
+) -> Result<Vec<(Option<String>, PathBuf)>, String> {
+    if proc_filter.is_empty() {
+        return Ok(plists);
+    }
+
+    let filtered: Vec<_> = plists
+        .into_iter()
+        .filter(|(proc_opt, _)| {
+            proc_opt
+                .as_ref()
+                .is_some_and(|proc_name| proc_filter.contains(proc_name))
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        Err(format!(
+            "{}: process target not found: {}",
+            project,
+            proc_filter.join(", ")
+        ))
+    } else {
+        Ok(filtered)
     }
 }
 
@@ -764,7 +825,8 @@ fn kickstart_label(label: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_etime;
+    use super::{filtered_project_plists, parse_etime};
+    use std::path::PathBuf;
 
     #[test]
     fn etime_formats() {
@@ -776,5 +838,53 @@ mod tests {
             Some(3 * 86400 + 4 * 3600 + 5 * 60 + 6)
         );
         assert_eq!(parse_etime("garbage"), None);
+    }
+
+    fn plist_set() -> Vec<(Option<String>, PathBuf)> {
+        vec![
+            (None, PathBuf::from("/tmp/com.kagaya.jobs.plist")),
+            (
+                Some("sync".to_string()),
+                PathBuf::from("/tmp/com.kagaya.jobs.sync.plist"),
+            ),
+            (
+                Some("ui".to_string()),
+                PathBuf::from("/tmp/com.kagaya.jobs.ui.plist"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn empty_process_filter_keeps_whole_service() {
+        let filtered = filtered_project_plists("jobs", plist_set(), &[]).unwrap();
+
+        let names: Vec<Option<String>> = filtered.into_iter().map(|(proc, _)| proc).collect();
+        assert_eq!(names, vec![None, Some("sync".into()), Some("ui".into())]);
+    }
+
+    #[test]
+    fn process_filter_selects_only_named_process() {
+        let filtered = filtered_project_plists("jobs", plist_set(), &["ui".to_string()]).unwrap();
+
+        let names: Vec<Option<String>> = filtered.into_iter().map(|(proc, _)| proc).collect();
+        assert_eq!(names, vec![Some("ui".into())]);
+    }
+
+    #[test]
+    fn process_filter_selects_multiple_named_processes_without_single_plist() {
+        let filtered =
+            filtered_project_plists("jobs", plist_set(), &["sync".to_string(), "ui".to_string()])
+                .unwrap();
+
+        let names: Vec<Option<String>> = filtered.into_iter().map(|(proc, _)| proc).collect();
+        assert_eq!(names, vec![Some("sync".into()), Some("ui".into())]);
+    }
+
+    #[test]
+    fn process_filter_errors_when_target_is_missing() {
+        let err =
+            filtered_project_plists("jobs", plist_set(), &["worker".to_string()]).unwrap_err();
+
+        assert_eq!(err, "jobs: process target not found: worker");
     }
 }
