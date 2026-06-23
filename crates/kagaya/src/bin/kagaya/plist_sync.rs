@@ -3,9 +3,10 @@ use crate::launchd::{get_uid, parse_launchctl_list, user_agents_dir, KAGAYA_PREF
 use crate::logs::log_dir;
 use crate::utils::listening_ports_for_pids;
 use kagaya::types::{ProcessState, ProcessStatus, ServiceStatus, ServiceType};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 // ── Labels + paths ────────────────────────────────────────────────────────────
 //
@@ -499,6 +500,7 @@ pub struct PlistInfo {
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
     pub run_at_load: bool,
+    pub working_dir: Option<PathBuf>,
 }
 
 pub fn read_plist_at(path: &PathBuf) -> Option<PlistInfo> {
@@ -517,6 +519,10 @@ pub fn read_plist_at(path: &PathBuf) -> Option<PlistInfo> {
             .get("RunAtLoad")
             .and_then(|v| v.as_boolean())
             .unwrap_or(false),
+        working_dir: dict
+            .get("WorkingDirectory")
+            .and_then(|v| v.as_string())
+            .map(PathBuf::from),
     })
 }
 
@@ -741,7 +747,10 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
         let result = match op {
             Op::Start => start_one_label(&label, &path),
             Op::Stop => stop_one_label(&label, &path),
-            Op::Restart => restart_one_label(&label, &path),
+            Op::Restart => {
+                let expected = expected_ports_for(&path, proc_opt.as_deref());
+                restart_one_label(&label, &path, &expected)
+            }
         };
         match result {
             Ok(verb) => messages.push(format!("{}: {}", display, verb)),
@@ -801,7 +810,62 @@ fn stop_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> {
     Ok("stopped")
 }
 
-fn restart_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> {
+/// Restart a single launchd label.
+///
+/// When the service binds ports, do it port-safely: fully stop the running
+/// instance, wait (bounded) for it to release its ports, refuse to rebind over a
+/// foreign process, then start fresh. This guarantees we never leave two
+/// listeners or fail to rebind on a rapid `ky restart`. Portless services take
+/// the cheap native path (`kickstart`), which avoids a macOS Login Items
+/// notification that bootout+bootstrap would otherwise raise on every restart.
+fn restart_one_label(
+    label: &str,
+    path: &PathBuf,
+    expected_ports: &[u16],
+) -> Result<&'static str, String> {
+    let old_pid = pid_for_label(label);
+    let owned: Vec<u16> = old_pid.map(runtime_ports_for_pid).unwrap_or_default();
+
+    // Ports we must guarantee are free before the new instance binds: the ports
+    // the running instance holds now, plus any configured in services.toml.
+    let mut guard = owned.clone();
+    for &p in expected_ports {
+        if !guard.contains(&p) {
+            guard.push(p);
+        }
+    }
+
+    if guard.is_empty() {
+        return restart_native(label, path);
+    }
+
+    // Stop the running instance so we — not launchd — own the gap before rebind.
+    if is_loaded_label(label) {
+        bootout_label(label, Some(path))?;
+    }
+
+    // Bounded wait for the old instance to release the ports it held.
+    wait_for_ports_free(&owned, PORT_RELEASE_TIMEOUT);
+
+    // Our instance is stopped, so anything still bound on a guarded port is a
+    // foreign process (or a stubborn orphan). Report it instead of bootstrapping
+    // into a crash loop.
+    let blockers = tcp_listener_holders(&guard);
+    if !blockers.is_empty() {
+        return Err(format_port_conflict(label, &blockers));
+    }
+
+    // Start fresh. bootstrap honours RunAtLoad; when autostart is off the job
+    // loads but stays idle, so kickstart it to actually run the restart.
+    bootstrap(path)?;
+    if !is_running_label(label) {
+        kickstart_label(label)?;
+    }
+    Ok("restarted")
+}
+
+/// Cheap restart for services with no ports to protect.
+fn restart_native(label: &str, path: &PathBuf) -> Result<&'static str, String> {
     if is_loaded_label(label) {
         kickstart_label(label)?;
         Ok("restarted")
@@ -823,9 +887,173 @@ fn kickstart_label(label: &str) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
+// ── Port-safe restart ──────────────────────────────────────────────────────────
+//
+// Bounded waits (Tiger Style: no unbounded loops). A restart must never leave two
+// listeners or a service that failed to rebind; a port held by a foreign process
+// must produce a clear error rather than a launchd crash loop.
+
+const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+const PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortHolder {
+    pub port: u16,
+    pub pid: u32,
+    pub name: String,
+}
+
+/// The pid of the running instance behind `label`, if any.
+fn pid_for_label(label: &str) -> Option<u32> {
+    let out = Command::new("launchctl")
+        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("pid = ") {
+            if let Ok(pid) = rest.trim().parse::<u32>() {
+                if pid != 0 {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// TCP ports held by `pid` and its descendants.
+fn runtime_ports_for_pid(pid: u32) -> Vec<u16> {
+    listening_ports_for_pids(&[pid])
+        .into_values()
+        .flatten()
+        .collect()
+}
+
+/// Every distinct TCP listener currently bound to one of `ports`.
+fn tcp_listener_holders(ports: &[u16]) -> Vec<PortHolder> {
+    if ports.is_empty() {
+        return Vec::new();
+    }
+    let wanted: HashSet<u16> = ports.iter().copied().collect();
+    let listeners = match listeners::get_all() {
+        Ok(l) => l,
+        Err(_) => return Vec::new(),
+    };
+    let mut holders = Vec::new();
+    let mut seen = HashSet::new();
+    for l in &listeners {
+        if l.protocol != listeners::Protocol::TCP {
+            continue;
+        }
+        let port = l.socket.port();
+        if port == 0 || !wanted.contains(&port) || !seen.insert(port) {
+            continue;
+        }
+        holders.push(PortHolder {
+            port,
+            pid: l.process.pid,
+            name: l.process.name.clone(),
+        });
+    }
+    holders
+}
+
+/// The subset of `ports` that still has a TCP listener.
+fn ports_in_use(ports: &[u16]) -> Vec<u16> {
+    tcp_listener_holders(ports)
+        .into_iter()
+        .map(|h| h.port)
+        .collect()
+}
+
+/// Poll until every port in `ports` is free or `timeout` elapses. Returns the
+/// ports still in use when it gives up (bounded).
+fn wait_for_ports_free(ports: &[u16], timeout: Duration) -> Vec<u16> {
+    if ports.is_empty() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        let still = ports_in_use(ports);
+        if still.is_empty() {
+            return Vec::new();
+        }
+        if Instant::now() >= deadline {
+            return still;
+        }
+        std::thread::sleep(PORT_POLL_INTERVAL);
+    }
+}
+
+/// A clear, actionable error for a restart blocked by a held port.
+fn format_port_conflict(label: &str, blockers: &[PortHolder]) -> String {
+    let project = label.strip_prefix(KAGAYA_PREFIX).unwrap_or(label);
+    let mut parts: Vec<String> = blockers
+        .iter()
+        .map(|h| format!("port {} held by pid {} ({})", h.port, h.pid, h.name))
+        .collect();
+    parts.sort();
+    format!(
+        "cannot restart {}: {}; free the port or stop that process, then retry",
+        project,
+        parts.join(", ")
+    )
+}
+
+/// Configured `ports = [...]` for a process, read out of a services.toml body.
+/// `proc_opt` is the process/section name; `None` is the single collapsed
+/// process (resolvable only when there is exactly one entry).
+fn parse_service_ports(toml_body: &str, proc_opt: Option<&str>) -> Vec<u16> {
+    let root = match toml::from_str::<toml::Value>(toml_body) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let read_ports = |v: &toml::Value| -> Vec<u16> {
+        v.get("ports")
+            .and_then(|p| p.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_integer())
+                    .filter_map(|n| u16::try_from(n).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    match proc_opt {
+        Some(name) => table.get(name).map(read_ports).unwrap_or_default(),
+        None if table.len() == 1 => table.values().next().map(read_ports).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Configured ports for the process behind `path`'s plist, via its
+/// WorkingDirectory's services.toml. Empty when none are declared.
+fn expected_ports_for(path: &PathBuf, proc_opt: Option<&str>) -> Vec<u16> {
+    let dir = match read_plist_at(path).and_then(|i| i.working_dir) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let body = match std::fs::read_to_string(dir.join("services.toml")) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    parse_service_ports(&body, proc_opt)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{filtered_project_plists, parse_etime};
+    use super::{
+        filtered_project_plists, format_port_conflict, parse_etime, parse_service_ports,
+        tcp_listener_holders, wait_for_ports_free, PortHolder,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -886,5 +1114,87 @@ mod tests {
             filtered_project_plists("jobs", plist_set(), &["worker".to_string()]).unwrap_err();
 
         assert_eq!(err, "jobs: process target not found: worker");
+    }
+
+    // ── port-safe restart ──────────────────────────────────────────────────
+
+    #[test]
+    fn service_ports_read_from_full_form() {
+        let body = "[api]\nrun = \"python s.py\"\nports = [8080, 9090]\n";
+        assert_eq!(parse_service_ports(body, Some("api")), vec![8080, 9090]);
+    }
+
+    #[test]
+    fn service_ports_simple_form_has_none() {
+        let body = "web = \"npm run dev\"\n";
+        assert_eq!(parse_service_ports(body, Some("web")), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn service_ports_single_collapsed_process_resolves_sole_entry() {
+        // A one-process service collapses to proc=None but ports still resolve.
+        let body = "[api]\nrun = \"python s.py\"\nports = [8080]\n";
+        assert_eq!(parse_service_ports(body, None), vec![8080]);
+    }
+
+    #[test]
+    fn service_ports_multi_process_selects_named_and_rejects_none() {
+        let body = "[api]\nrun = \"a\"\nports = [8080]\n\n[web]\nrun = \"b\"\nports = [3000]\n";
+        assert_eq!(parse_service_ports(body, Some("web")), vec![3000]);
+        // proc=None is ambiguous when there are several processes.
+        assert_eq!(parse_service_ports(body, None), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn service_ports_missing_process_is_empty() {
+        let body = "[api]\nrun = \"a\"\nports = [8080]\n";
+        assert_eq!(parse_service_ports(body, Some("worker")), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn port_conflict_message_names_project_port_and_holder() {
+        let blockers = vec![PortHolder {
+            port: 8080,
+            pid: 4321,
+            name: "node".to_string(),
+        }];
+        let msg = format_port_conflict("com.kagaya.drover", &blockers);
+        assert!(msg.contains("drover"), "{}", msg);
+        assert!(msg.contains("8080"), "{}", msg);
+        assert!(msg.contains("4321"), "{}", msg);
+        assert!(msg.contains("node"), "{}", msg);
+    }
+
+    #[test]
+    fn free_port_reports_free_without_burning_the_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let start = std::time::Instant::now();
+        let stuck = wait_for_ports_free(&[port], std::time::Duration::from_secs(5));
+        assert!(
+            stuck.is_empty(),
+            "expected port {} free, got {:?}",
+            port,
+            stuck
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn held_port_is_detected_and_reported_stuck() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let holders = tcp_listener_holders(&[port]);
+        assert_eq!(
+            holders.iter().map(|h| h.port).collect::<Vec<_>>(),
+            vec![port]
+        );
+        assert_eq!(holders[0].pid, std::process::id());
+
+        let stuck = wait_for_ports_free(&[port], std::time::Duration::from_millis(300));
+        assert_eq!(stuck, vec![port]);
+        drop(listener);
     }
 }
