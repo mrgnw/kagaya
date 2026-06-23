@@ -3,7 +3,6 @@
 //! Process supervisor toolkit for Rust CLIs.
 //!
 //! Spawn, monitor, restart, and capture output from child processes.
-//! Pairs with [`muzan`](https://crates.io/crates/muzan) for daemon lifecycle.
 //!
 //! ## Quick start
 //!
