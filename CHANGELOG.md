@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Port-safe restart**: restarting a service that binds ports now fully stops the running instance, waits (bounded, 5s) for it to release its ports, and only then starts a fresh instance — removing the rapid-restart race that could leave two listeners or a service that failed to rebind. If a port is held by an unrelated process, `ky restart` now fails with a clear error (`port N held by pid P (name)`) instead of letting launchd crash-loop. Portless services keep the cheap `kickstart` path, so they don't raise a macOS "Login Items" notification on every restart.
+
 ## [0.14.1] - 2026-05-15
 
 ### Fixed
