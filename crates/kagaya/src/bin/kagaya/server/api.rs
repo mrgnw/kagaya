@@ -2,6 +2,59 @@ use crate::plist_sync::{OpResult, ProcessFilters};
 use axum::Json;
 use serde::Serialize;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::Response as AxumResponse;
+use std::io::SeekFrom;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+pub async fn ws_echo(ws: WebSocketUpgrade, Path(name): Path<String>) -> AxumResponse {
+    ws.on_upgrade(move |socket| stream_log(socket, name))
+}
+
+async fn stream_log(mut socket: WebSocket, name: String) {
+    let Some((stdout_path, _stderr)) = plist_sync::log_paths(&name) else {
+        let _ = socket
+            .send(Message::Text(format!("no log for '{}'", name).into()))
+            .await;
+        return;
+    };
+    let mut file = match tokio::fs::File::open(&stdout_path).await {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = socket
+                .send(Message::Text(
+                    format!("log not found: {}", stdout_path.display()).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(64 * 1024);
+    let mut pos = start;
+    let _ = file.seek(SeekFrom::Start(start)).await;
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = match file.read(&mut buf).await {
+            Ok(0) => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let _ = file.seek(SeekFrom::Start(pos)).await;
+                continue;
+            }
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        pos += n as u64;
+        let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+        if socket.send(Message::Text(chunk.into())).await.is_err() {
+            return;
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct VersionResponse {
     pub version: String,

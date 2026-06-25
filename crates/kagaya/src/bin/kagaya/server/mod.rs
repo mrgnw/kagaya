@@ -31,6 +31,7 @@ pub fn router() -> Router {
             "/api/services/{name}/processes/{process}/kill",
             post(api::kill_process),
         )
+        .route("/ws/echo/{name}", get(api::ws_echo))
         .fallback(static_handler)
 }
 
