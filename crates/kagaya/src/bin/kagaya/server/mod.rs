@@ -18,6 +18,8 @@ struct UiAssets;
 pub fn router() -> Router {
     Router::new()
         .route("/api/version", get(api::version))
+        .route("/api/services", get(api::list_services))
+        .route("/api/services/{name}", get(api::service_detail))
         .fallback(static_handler)
 }
 
@@ -71,5 +73,19 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn unknown_service_detail_is_404() {
+        let res = router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/services/__nope__")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
