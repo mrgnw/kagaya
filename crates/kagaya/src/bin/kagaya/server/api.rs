@@ -34,6 +34,8 @@ pub struct ServiceInfo {
     pub urls: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ports: Option<Vec<u16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_tail: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -80,6 +82,21 @@ fn to_process_info(p: &ProcessStatus) -> ProcessInfo {
     }
 }
 
+fn error_tail_for(name: &str) -> Option<Vec<String>> {
+    let (_stdout, stderr) = plist_sync::log_paths(name)?;
+    let content = std::fs::read_to_string(&stderr).ok()?;
+    let lines: Vec<String> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(5);
+    Some(lines[start..].to_vec())
+}
+
 fn to_service_info(st: &ServiceStatus, entry: &ServiceEntry) -> ServiceInfo {
     let ports: Vec<u16> = st.processes.iter().flat_map(|p| p.ports.clone()).collect();
     ServiceInfo {
@@ -90,6 +107,7 @@ fn to_service_info(st: &ServiceStatus, entry: &ServiceEntry) -> ServiceInfo {
         autostart: entry.autostart,
         urls: (!entry.urls.is_empty()).then(|| entry.urls.clone()),
         ports: (!ports.is_empty()).then_some(ports),
+        error_tail: error_tail_for(&st.name),
     }
 }
 
