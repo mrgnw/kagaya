@@ -9,6 +9,7 @@ mod logs;
 mod migrate;
 mod plist_sync;
 mod self_update;
+mod server;
 mod utils;
 
 use clap::Parser;
@@ -1963,8 +1964,8 @@ fn cmd_serve(action: Option<ServeAction>) {
         Some(ServeAction::Stop) => serve_stop(),
         Some(ServeAction::Status) => cmd_serve_status(),
         Some(ServeAction::Foreground) => {
-            eprintln!("serve --foreground: HTTP server not implemented yet");
-            std::process::exit(1);
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(server::run());
         }
         Some(ServeAction::Daemon) | None => serve_install_and_start(),
     }
