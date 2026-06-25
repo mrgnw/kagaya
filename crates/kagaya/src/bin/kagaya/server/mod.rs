@@ -32,6 +32,10 @@ pub fn router() -> Router {
             post(api::kill_process),
         )
         .route("/ws/echo/{name}", get(api::ws_echo))
+        .route("/api/host-info", get(api::host_info))
+        .route("/api/autostart", get(api::autostart_status))
+        .route("/api/autostart/on", post(api::autostart_on))
+        .route("/api/autostart/off", post(api::autostart_off))
         .fallback(static_handler)
 }
 
@@ -114,5 +118,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn autostart_status_route_ok() {
+        let res = router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/autostart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

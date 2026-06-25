@@ -1,3 +1,4 @@
+use crate::autostart;
 use crate::plist_sync::{OpResult, ProcessFilters};
 use axum::Json;
 use serde::Serialize;
@@ -276,4 +277,59 @@ pub async fn kill_process(Path((name, process)): Path<(String, String)>) -> Acti
         &[name.clone()],
         &one_filter(&name, &process),
     ))
+}
+
+#[derive(Serialize)]
+pub struct HostInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailscale_hostname: Option<String>,
+}
+
+fn detect_tailscale_hostname() -> Option<String> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let dns_name = json.get("Self")?.get("DNSName")?.as_str()?;
+    Some(dns_name.trim_end_matches('.').to_string())
+}
+
+pub async fn host_info() -> Json<HostInfo> {
+    Json(HostInfo {
+        tailscale_hostname: detect_tailscale_hostname(),
+    })
+}
+
+#[derive(Serialize)]
+pub struct AutostartStatus {
+    pub installed: bool,
+    pub active: bool,
+    pub agent_path: Option<String>,
+    pub projects: Vec<String>,
+}
+
+pub async fn autostart_status() -> Json<AutostartStatus> {
+    let info = autostart::status_info();
+    Json(AutostartStatus {
+        installed: info.installed,
+        active: info.active,
+        agent_path: info.agent_path,
+        projects: info.projects,
+    })
+}
+
+pub async fn autostart_on() -> ActionResult {
+    autostart::enable()
+        .map(|message| Json(ActionResponse { message }))
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+}
+
+pub async fn autostart_off() -> ActionResult {
+    autostart::disable()
+        .map(|message| Json(ActionResponse { message }))
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
 }

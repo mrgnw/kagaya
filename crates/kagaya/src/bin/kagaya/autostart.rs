@@ -2,6 +2,70 @@ use crate::config;
 use crate::plist_sync;
 use owo_colors::OwoColorize;
 
+pub struct AutostartInfo {
+    pub installed: bool,
+    pub active: bool,
+    pub agent_path: Option<String>,
+    pub projects: Vec<String>,
+}
+
+pub fn status_info() -> AutostartInfo {
+    let entries = config::load_service_entries();
+    let projects: Vec<String> = entries
+        .keys()
+        .filter(|name| {
+            plist_sync::read_plist(name)
+                .map(|i| i.run_at_load)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    let active = !projects.is_empty();
+    AutostartInfo {
+        installed: active,
+        active,
+        agent_path: None,
+        projects,
+    }
+}
+
+pub fn enable() -> Result<String, String> {
+    set_all_result(true)
+}
+
+pub fn disable() -> Result<String, String> {
+    set_all_result(false)
+}
+
+fn set_all_result(value: bool) -> Result<String, String> {
+    let entries = config::load_service_entries();
+    if entries.is_empty() {
+        return Err("no services registered".to_string());
+    }
+    let mut lines = Vec::new();
+    let mut errs = Vec::new();
+    for name in entries.keys() {
+        if !plist_sync::plist_exists(name) {
+            if let Some(svc) = entries.get(name) {
+                let _ = plist_sync::sync_service(svc);
+            }
+        }
+        match plist_sync::set_run_at_load(name, value) {
+            Ok(()) => lines.push(format!(
+                "{}: autostart {}",
+                name,
+                if value { "enabled" } else { "disabled" }
+            )),
+            Err(e) => errs.push(format!("{}: {}", name, e)),
+        }
+    }
+    if errs.is_empty() {
+        Ok(lines.join("\n"))
+    } else {
+        Err(errs.join("\n"))
+    }
+}
+
 // ── CLI entry point ──────────────────────────────────────────────────────────
 
 pub fn cmd_autostart(args: &[String]) {
