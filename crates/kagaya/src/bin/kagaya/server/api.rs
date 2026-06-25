@@ -1,3 +1,4 @@
+use crate::plist_sync::{OpResult, ProcessFilters};
 use axum::Json;
 use serde::Serialize;
 
@@ -111,6 +112,38 @@ fn to_service_info(st: &ServiceStatus, entry: &ServiceEntry) -> ServiceInfo {
     }
 }
 
+#[derive(Serialize)]
+pub struct ActionResponse {
+    pub message: String,
+}
+
+fn op_response(
+    results: Vec<OpResult>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let any_err = results.iter().any(|r| !r.ok);
+    let message = results
+        .iter()
+        .map(|r| r.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if any_err {
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: message }),
+        ))
+    } else {
+        Ok(Json(ActionResponse { message }))
+    }
+}
+
+fn require_service(name: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if config::load_service_entries().contains_key(name) {
+        Ok(())
+    } else {
+        Err(not_found(name))
+    }
+}
+
 pub fn not_found(name: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_FOUND,
@@ -142,4 +175,52 @@ pub async fn service_detail(
         state: st.aggregate_state(),
         processes: st.processes.iter().map(to_process_info).collect(),
     }))
+}
+
+type ActionResult = Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)>;
+
+pub async fn start(Path(name): Path<String>) -> ActionResult {
+    require_service(&name)?;
+    op_response(plist_sync::start_services(&[name], &ProcessFilters::new()))
+}
+
+pub async fn stop(Path(name): Path<String>) -> ActionResult {
+    require_service(&name)?;
+    op_response(plist_sync::stop_services(&[name], &ProcessFilters::new()))
+}
+
+pub async fn reload(Path(name): Path<String>) -> ActionResult {
+    let entries = config::load_service_entries();
+    let entry = entries.get(&name).ok_or_else(|| not_found(&name))?;
+    match plist_sync::sync_service(entry) {
+        Ok(n) => Ok(Json(ActionResponse {
+            message: format!("{}: synced {} process(es)", name, n),
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )),
+    }
+}
+
+fn one_filter(name: &str, process: &str) -> ProcessFilters {
+    let mut f = ProcessFilters::new();
+    f.insert(name.to_string(), vec![process.to_string()]);
+    f
+}
+
+pub async fn restart_process(Path((name, process)): Path<(String, String)>) -> ActionResult {
+    require_service(&name)?;
+    op_response(plist_sync::restart_services(
+        &[name.clone()],
+        &one_filter(&name, &process),
+    ))
+}
+
+pub async fn kill_process(Path((name, process)): Path<(String, String)>) -> ActionResult {
+    require_service(&name)?;
+    op_response(plist_sync::stop_services(
+        &[name.clone()],
+        &one_filter(&name, &process),
+    ))
 }

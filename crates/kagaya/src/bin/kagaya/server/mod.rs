@@ -5,7 +5,7 @@ use axum::{
     extract::Request,
     http::{header, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use rust_embed::RustEmbed;
@@ -20,6 +20,17 @@ pub fn router() -> Router {
         .route("/api/version", get(api::version))
         .route("/api/services", get(api::list_services))
         .route("/api/services/{name}", get(api::service_detail))
+        .route("/api/services/{name}/start", post(api::start))
+        .route("/api/services/{name}/stop", post(api::stop))
+        .route("/api/services/{name}/reload", post(api::reload))
+        .route(
+            "/api/services/{name}/processes/{process}/restart",
+            post(api::restart_process),
+        )
+        .route(
+            "/api/services/{name}/processes/{process}/kill",
+            post(api::kill_process),
+        )
         .fallback(static_handler)
 }
 
@@ -73,6 +84,21 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn start_unknown_service_is_404() {
+        let res = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/services/__nope__/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
