@@ -138,9 +138,19 @@ fn to_process_info(p: &ProcessStatus) -> ProcessInfo {
 }
 
 fn error_tail_for(name: &str) -> Option<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
     let (_stdout, stderr) = plist_sync::log_paths(name)?;
-    let content = std::fs::read_to_string(&stderr).ok()?;
-    let lines: Vec<String> = content
+    let mut file = std::fs::File::open(&stderr).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let read_size = len.min(8 * 1024);
+    file.seek(SeekFrom::End(-(read_size as i64))).ok()?;
+    let mut buf = vec![0u8; read_size as usize];
+    file.read_exact(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let lines: Vec<String> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.to_string())
@@ -162,7 +172,9 @@ fn to_service_info(st: &ServiceStatus, entry: &ServiceEntry) -> ServiceInfo {
         autostart: entry.autostart,
         urls: (!entry.urls.is_empty()).then(|| entry.urls.clone()),
         ports: (!ports.is_empty()).then_some(ports),
-        error_tail: error_tail_for(&st.name),
+        error_tail: (!st.is_running())
+            .then(|| error_tail_for(&st.name))
+            .flatten(),
     }
 }
 
