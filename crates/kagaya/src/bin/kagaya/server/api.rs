@@ -219,54 +219,82 @@ pub fn not_found(name: &str) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+fn join_error() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "internal task error".to_string(),
+        }),
+    )
+}
+
 pub async fn list_services() -> Json<Vec<ServiceInfo>> {
-    let entries = config::load_service_entries();
-    let infos = entries
-        .values()
-        .map(|e| to_service_info(&plist_sync::status_for(e), e))
-        .collect();
+    let infos = tokio::task::spawn_blocking(|| {
+        config::load_service_entries()
+            .values()
+            .map(|e| to_service_info(&plist_sync::status_for(e), e))
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
     Json(infos)
 }
 
 pub async fn service_detail(
     Path(name): Path<String>,
 ) -> Result<Json<ServiceDetail>, (StatusCode, Json<ErrorResponse>)> {
-    let entries = config::load_service_entries();
-    let entry = entries.get(&name).ok_or_else(|| not_found(&name))?;
-    let st = plist_sync::status_for(entry);
-    Ok(Json(ServiceDetail {
-        name: st.name.clone(),
-        dir: st.dir.to_string_lossy().to_string(),
-        running: st.is_running(),
-        state: st.aggregate_state(),
-        processes: st.processes.iter().map(to_process_info).collect(),
-    }))
+    tokio::task::spawn_blocking(move || {
+        let entries = config::load_service_entries();
+        let entry = entries.get(&name).ok_or_else(|| not_found(&name))?;
+        let st = plist_sync::status_for(entry);
+        Ok(Json(ServiceDetail {
+            name: st.name.clone(),
+            dir: st.dir.to_string_lossy().to_string(),
+            running: st.is_running(),
+            state: st.aggregate_state(),
+            processes: st.processes.iter().map(to_process_info).collect(),
+        }))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 type ActionResult = Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)>;
 
 pub async fn start(Path(name): Path<String>) -> ActionResult {
-    require_service(&name)?;
-    op_response(plist_sync::start_services(&[name], &ProcessFilters::new()))
+    tokio::task::spawn_blocking(move || {
+        require_service(&name)?;
+        op_response(plist_sync::start_services(&[name], &ProcessFilters::new()))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 pub async fn stop(Path(name): Path<String>) -> ActionResult {
-    require_service(&name)?;
-    op_response(plist_sync::stop_services(&[name], &ProcessFilters::new()))
+    tokio::task::spawn_blocking(move || {
+        require_service(&name)?;
+        op_response(plist_sync::stop_services(&[name], &ProcessFilters::new()))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 pub async fn reload(Path(name): Path<String>) -> ActionResult {
-    let entries = config::load_service_entries();
-    let entry = entries.get(&name).ok_or_else(|| not_found(&name))?;
-    match plist_sync::sync_service(entry) {
-        Ok(n) => Ok(Json(ActionResponse {
-            message: format!("{}: synced {} process(es)", name, n),
-        })),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )),
-    }
+    tokio::task::spawn_blocking(move || {
+        let entries = config::load_service_entries();
+        let entry = entries.get(&name).ok_or_else(|| not_found(&name))?;
+        match plist_sync::sync_service(entry) {
+            Ok(n) => Ok(Json(ActionResponse {
+                message: format!("{}: synced {} process(es)", name, n),
+            })),
+            Err(e) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 fn one_filter(name: &str, process: &str) -> ProcessFilters {
@@ -276,19 +304,27 @@ fn one_filter(name: &str, process: &str) -> ProcessFilters {
 }
 
 pub async fn restart_process(Path((name, process)): Path<(String, String)>) -> ActionResult {
-    require_service(&name)?;
-    op_response(plist_sync::restart_services(
-        &[name.clone()],
-        &one_filter(&name, &process),
-    ))
+    tokio::task::spawn_blocking(move || {
+        require_service(&name)?;
+        op_response(plist_sync::restart_services(
+            &[name.clone()],
+            &one_filter(&name, &process),
+        ))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 pub async fn kill_process(Path((name, process)): Path<(String, String)>) -> ActionResult {
-    require_service(&name)?;
-    op_response(plist_sync::stop_services(
-        &[name.clone()],
-        &one_filter(&name, &process),
-    ))
+    tokio::task::spawn_blocking(move || {
+        require_service(&name)?;
+        op_response(plist_sync::stop_services(
+            &[name.clone()],
+            &one_filter(&name, &process),
+        ))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 #[derive(Serialize)]
@@ -311,8 +347,16 @@ fn detect_tailscale_hostname() -> Option<String> {
 }
 
 pub async fn host_info() -> Json<HostInfo> {
-    Json(HostInfo {
-        tailscale_hostname: detect_tailscale_hostname(),
+    tokio::task::spawn_blocking(|| {
+        Json(HostInfo {
+            tailscale_hostname: detect_tailscale_hostname(),
+        })
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Json(HostInfo {
+            tailscale_hostname: None,
+        })
     })
 }
 
@@ -325,23 +369,42 @@ pub struct AutostartStatus {
 }
 
 pub async fn autostart_status() -> Json<AutostartStatus> {
-    let info = autostart::status_info();
-    Json(AutostartStatus {
-        installed: info.installed,
-        active: info.active,
-        agent_path: info.agent_path,
-        projects: info.projects,
+    tokio::task::spawn_blocking(|| {
+        let info = autostart::status_info();
+        Json(AutostartStatus {
+            installed: info.installed,
+            active: info.active,
+            agent_path: info.agent_path,
+            projects: info.projects,
+        })
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Json(AutostartStatus {
+            installed: false,
+            active: false,
+            agent_path: None,
+            projects: vec![],
+        })
     })
 }
 
 pub async fn autostart_on() -> ActionResult {
-    autostart::enable()
-        .map(|message| Json(ActionResponse { message }))
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+    tokio::task::spawn_blocking(|| {
+        autostart::enable()
+            .map(|message| Json(ActionResponse { message }))
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
 
 pub async fn autostart_off() -> ActionResult {
-    autostart::disable()
-        .map(|message| Json(ActionResponse { message }))
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+    tokio::task::spawn_blocking(|| {
+        autostart::disable()
+            .map(|message| Json(ActionResponse { message }))
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
+    })
+    .await
+    .unwrap_or_else(|_| Err(join_error()))
 }
