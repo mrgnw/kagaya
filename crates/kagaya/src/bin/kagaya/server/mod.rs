@@ -41,11 +41,23 @@ pub fn router() -> Router {
 
 pub async fn run() {
     let app = router();
-    let addr = SocketAddr::from(([127, 0, 0, 1], 13369));
-    let listener = tokio::net::TcpListener::bind(addr)
+    // Listen on both loopback stacks (127.0.0.1 and ::1) so a local reverse
+    // proxy reaches us whether it dials localhost via IPv4 or IPv6. Both are
+    // loopback-only — never 0.0.0.0.
+    let v4 = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 13369)))
         .await
         .expect("bind 127.0.0.1:13369");
-    axum::serve(listener, app).await.expect("serve");
+    match tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 13369))).await {
+        Ok(v6) => {
+            let app6 = app.clone();
+            let s4 = tokio::spawn(async move { axum::serve(v4, app).await });
+            let s6 = tokio::spawn(async move { axum::serve(v6, app6).await });
+            let _ = tokio::try_join!(s4, s6);
+        }
+        Err(_) => {
+            axum::serve(v4, app).await.expect("serve");
+        }
+    }
 }
 
 async fn static_handler(uri: Uri) -> Response {
