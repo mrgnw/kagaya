@@ -797,9 +797,12 @@ fn filtered_project_plists(
 }
 
 fn start_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> {
+    if is_running_label(label) {
+        return Ok("already running");
+    }
     if is_loaded_label(label) {
         kickstart_label(label)?;
-        return Ok("restarted");
+        return Ok("started");
     }
     bootstrap(path)?;
     Ok("started")
