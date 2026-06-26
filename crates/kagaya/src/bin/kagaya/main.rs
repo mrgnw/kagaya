@@ -1997,7 +1997,7 @@ fn serve_install_and_start() {
             plist::Value::Array(vec![
                 plist::Value::String(bin),
                 plist::Value::String("serve".into()),
-                plist::Value::String("--foreground".into()),
+                plist::Value::String("foreground".into()),
             ]),
         );
         dict.insert("RunAtLoad".into(), plist::Value::Boolean(true));
