@@ -32,7 +32,7 @@ pub fn output_format() -> OutputFormat {
 #[command(
     name = "ky",
     version,
-    about = "process daemon manager",
+    about = "launchd made easy — manage services with start/stop/restart/status/logs",
     disable_help_flag = true,
     disable_version_flag = true,
     disable_help_subcommand = true,
@@ -50,9 +50,24 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with = "json")]
     pub tsv: bool,
 
-    /// Watch mode (live refresh)
-    #[arg(long, short, global = true)]
-    pub watch: bool,
+    /// Watch status live; optional duration in seconds
+    #[arg(
+        long,
+        short,
+        global = true,
+        value_name = "SECS",
+        num_args = 0..=1,
+        default_missing_value = "0"
+    )]
+    pub watch: Option<u64>,
+
+    /// Skip the post-command status watch
+    #[arg(long, short = 'W', global = true)]
+    pub no_watch: bool,
+
+    /// Watch refresh interval in seconds
+    #[arg(long, global = true, hide = true, value_name = "SECS")]
+    pub watch_interval: Option<u64>,
 
     /// Show help
     #[arg(long, short = 'h', global = true)]
@@ -68,7 +83,7 @@ pub enum Cmd {
     /// Show service status (default command)
     #[command(visible_alias = "st")]
     Status {
-        /// Service names
+        /// Service names (service or service.process)
         names: Vec<String>,
         /// Show all services
         #[arg(long, short)]
@@ -76,15 +91,11 @@ pub enum Cmd {
         /// Show per-process detail
         #[arg(long, short)]
         detailed: bool,
-        #[arg(long, short, hide = true)]
-        watch: bool,
-        #[arg(long, hide = true)]
-        watch_interval: Option<u64>,
     },
 
     /// Start service(s); briefly shows live status after
     Start {
-        /// Service names (use .. for chains: db..api starts db then api)
+        /// Service names (use .. for chains: db..api starts db, waits, then api)
         names: Vec<String>,
         /// Start all services
         #[arg(long, short)]
@@ -101,16 +112,9 @@ pub enum Cmd {
         /// Block until all started processes are ready
         #[arg(long)]
         wait: bool,
-        /// Kill existing processes/port holders before starting
+        /// Kill foreign processes holding configured ports before starting
         #[arg(long, short)]
         force: bool,
-        #[arg(long, short, hide = true)]
-        watch: bool,
-        /// Skip post-command status watch
-        #[arg(long, short = 'W')]
-        no_watch: bool,
-        #[arg(long, hide = true)]
-        watch_interval: Option<u64>,
     },
 
     /// Stop service(s)
@@ -126,19 +130,12 @@ pub enum Cmd {
         /// Stream live output after stopping
         #[arg(long, short = 'e')]
         echo: bool,
-        #[arg(long, short, hide = true)]
-        watch: bool,
-        /// Skip post-command status watch
-        #[arg(long, short = 'W')]
-        no_watch: bool,
-        #[arg(long, hide = true)]
-        watch_interval: Option<u64>,
     },
 
     /// Restart service(s) or a single process
     Restart {
         /// Service or service.process targets
-        target: Vec<String>,
+        names: Vec<String>,
         /// Restart all services
         #[arg(long, short)]
         all: bool,
@@ -148,29 +145,31 @@ pub enum Cmd {
         /// Stream live output after restarting
         #[arg(long, short = 'e')]
         echo: bool,
-        /// Kill existing processes/port holders before starting
+        /// Kill foreign processes holding configured ports before starting
         #[arg(long, short)]
         force: bool,
-        #[arg(long, short, hide = true)]
-        watch: bool,
-        /// Skip post-command status watch
-        #[arg(long, short = 'W')]
-        no_watch: bool,
-        #[arg(long, hide = true)]
-        watch_interval: Option<u64>,
     },
 
     /// Show log file paths
-    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
-    Logs { args: Vec<String> },
+    Logs {
+        /// service or service.process
+        target: Vec<String>,
+    },
 
     /// Tail + stream live output from a service
-    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
-    Echo { args: Vec<String> },
+    Echo {
+        /// service or service.process
+        target: Vec<String>,
+        /// Number of trailing lines to print before streaming
+        #[arg(long, short = 'n', default_value_t = 14, value_name = "LINES")]
+        lines: usize,
+    },
 
     /// Show service config or a single process command
-    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
-    Show { args: Vec<String> },
+    Show {
+        /// service or service.process
+        target: Vec<String>,
+    },
 
     /// Manage cron jobs (via koku)
     #[command(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -186,7 +185,7 @@ pub enum Cmd {
         action: Option<ServeAction>,
     },
 
-    /// Register a project or standalone command
+    /// Register a service (project directory or standalone command)
     Add {
         args: Vec<String>,
         /// Register a standalone command instead of a project directory
@@ -194,7 +193,7 @@ pub enum Cmd {
         run: Option<String>,
     },
 
-    /// Unregister a project
+    /// Unregister a service
     #[command(
         visible_alias = "rm",
         trailing_var_arg = true,
@@ -234,12 +233,12 @@ pub enum Cmd {
 pub enum ServeAction {
     /// Stop the running server
     Stop,
+    /// Restart the running server
+    Restart,
     /// Show server status
     Status,
     /// Run as background daemon (default)
-    #[command(visible_alias = "-d")]
     Daemon,
     /// Run in foreground (blocks terminal)
-    #[command(visible_alias = "-f")]
     Foreground,
 }

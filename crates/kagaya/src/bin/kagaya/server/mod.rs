@@ -1,8 +1,6 @@
 mod api;
 
 use axum::{
-    body::Body,
-    extract::Request,
     http::{header, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -82,6 +80,7 @@ async fn static_handler(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, extract::Request};
     use tower::ServiceExt;
 
     #[tokio::test]

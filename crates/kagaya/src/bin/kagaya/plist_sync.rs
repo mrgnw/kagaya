@@ -703,7 +703,6 @@ pub fn query_all(services: &BTreeMap<String, ServiceEntry>) -> Vec<ServiceStatus
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
 pub struct OpResult {
-    pub name: String,
     pub ok: bool,
     pub message: String,
 }
@@ -760,7 +759,6 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
     let plists = plist_paths_for_project(project);
     if plists.is_empty() {
         return OpResult {
-            name: project.to_string(),
             ok: false,
             message: format!("no plist for '{}'. run `ky add {}` first", project, project),
         };
@@ -769,7 +767,6 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
         Ok(plists) => plists,
         Err(message) => {
             return OpResult {
-                name: project.to_string(),
                 ok: false,
                 message,
             };
@@ -797,7 +794,6 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
         }
     }
     OpResult {
-        name: project.to_string(),
         ok: !any_err,
         message: messages.join("\n"),
     }

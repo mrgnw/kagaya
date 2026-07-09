@@ -49,37 +49,26 @@ fn main() {
                 return;
             }
 
+            let global = GlobalWatch {
+                watch: cli.watch,
+                no_watch: cli.no_watch,
+                interval: cli.watch_interval,
+            };
+
             match cli.command {
                 None => {
-                    if cli.watch {
-                        cmd_status(&["--watch".to_string()]);
+                    let watch = global.opts(None);
+                    if watch.enabled {
+                        cmd_status(&[], false, false, &watch);
                     } else {
-                        render_condensed_status(&[]);
+                        render_condensed_status(&gather_status_data(&[], false, false));
                     }
                 }
                 Some(Cmd::Status {
                     names,
                     all,
                     detailed,
-                    watch,
-                    watch_interval,
-                }) => {
-                    let mut args = names;
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_status(&args);
-                }
+                }) => cmd_status(&names, all, detailed, &global.opts(None)),
                 Some(Cmd::Start {
                     names,
                     all,
@@ -88,37 +77,9 @@ fn main() {
                     echo,
                     wait,
                     force,
-                    watch,
-                    no_watch,
-                    watch_interval,
                 }) => {
-                    let mut args = names.clone();
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if autostart {
-                        args.push("--autostart".to_string());
-                    }
-                    if wait {
-                        args.push("--wait".to_string());
-                    }
-                    if force {
-                        args.push("--force".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if no_watch {
-                        args.push("--no-watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_start(&args);
+                    let mut watch = global.opts(Some(4));
+                    cmd_start(&names, all, autostart, detailed, wait, force, &mut watch);
                     if echo {
                         echo_after_action(&names, None);
                     }
@@ -128,70 +89,29 @@ fn main() {
                     all,
                     detailed,
                     echo,
-                    watch,
-                    no_watch,
-                    watch_interval,
                 }) => {
-                    let mut args = names.clone();
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if no_watch {
-                        args.push("--no-watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_stop(&args);
+                    let mut watch = global.opts(Some(4));
+                    cmd_stop(&names, all, detailed, &mut watch);
                     if echo {
                         echo_after_stop(&names);
                     }
                 }
                 Some(Cmd::Restart {
-                    target,
+                    names,
                     all,
                     detailed,
                     echo,
                     force,
-                    watch,
-                    no_watch,
-                    watch_interval,
                 }) => {
-                    let mut args = target.clone();
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if force {
-                        args.push("--force".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if no_watch {
-                        args.push("--no-watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_restart(&args);
+                    let mut watch = global.opts(Some(6));
+                    cmd_restart(&names, all, detailed, force, &mut watch);
                     if echo {
-                        echo_after_action(&target, None);
+                        echo_after_action(&names, None);
                     }
                 }
-                Some(Cmd::Logs { args }) => cmd_logs(&args),
-                Some(Cmd::Echo { args }) => cmd_echo(&args),
-                Some(Cmd::Show { args }) => cmd_show(&args),
+                Some(Cmd::Logs { target }) => cmd_logs(&target),
+                Some(Cmd::Echo { target, lines }) => cmd_echo(&target, lines),
+                Some(Cmd::Show { target }) => cmd_show(&target),
                 Some(Cmd::Cron { args }) => cmd_cron(&args),
                 Some(Cmd::ReloadConfig) => cmd_reload_config(),
                 Some(Cmd::Serve { action }) => cmd_serve(action),
@@ -206,10 +126,10 @@ fn main() {
                         std::process::exit(1);
                     }
                 },
-                Some(Cmd::All) => cmd_status(&["all".to_string()]),
+                Some(Cmd::All) => cmd_status(&[], true, false, &global.opts(None)),
                 Some(Cmd::Help) => print_usage(),
                 Some(Cmd::Version) => println!("kagaya {}", env!("CARGO_PKG_VERSION")),
-                Some(Cmd::External(args)) => dispatch_external(&args),
+                Some(Cmd::External(args)) => dispatch_external(&args, &global),
             }
         }
         Err(e) => {
@@ -220,7 +140,32 @@ fn main() {
     }
 }
 
-fn dispatch_external(args: &[String]) {
+/// Global watch flags from the CLI, turned into per-command WatchOpts.
+struct GlobalWatch {
+    watch: Option<u64>,
+    no_watch: bool,
+    interval: Option<u64>,
+}
+
+impl GlobalWatch {
+    /// `--watch` with no value falls back to `default_duration`
+    /// (None = watch until quit).
+    fn opts(&self, default_duration: Option<u64>) -> WatchOpts {
+        let duration = match self.watch {
+            Some(0) | None => default_duration,
+            Some(n) => Some(n),
+        };
+        WatchOpts {
+            duration,
+            interval: self.interval.unwrap_or(1).max(1),
+            enabled: self.watch.is_some(),
+            no_watch: self.no_watch,
+            mode: WatchMode::Observe,
+        }
+    }
+}
+
+fn dispatch_external(args: &[String], global: &GlobalWatch) {
     if args.is_empty() {
         print_usage();
         return;
@@ -240,27 +185,25 @@ fn dispatch_external(args: &[String]) {
     let services = config::load_service_entries();
     let base_name = name.split('.').next().unwrap_or(name);
     if services.contains_key(base_name) && args.len() > 1 {
+        // service-first syntax: ky myapp <verb> [args]
+        let target: Vec<String> = std::iter::once(args[0].clone())
+            .chain(args[2..].iter().cloned())
+            .collect();
         match args[1].as_str() {
-            "start" => cmd_start(&[args[0].clone()]),
-            "stop" => cmd_stop(&[args[0].clone()]),
-            "status" | "st" => cmd_status(&[args[0].clone()]),
-            "logs" => cmd_logs(args),
-            "echo" => cmd_echo(args),
-            "show" => cmd_show(args),
-            "restart" => {
-                let mut restart_args = vec![args[0].clone()];
-                if args.len() > 2 {
-                    restart_args.push(args[2].clone());
-                }
-                cmd_restart(&restart_args);
-            }
+            "start" => cmd_start(&[args[0].clone()], false, false, false, false, false, &mut global.opts(Some(4))),
+            "stop" => cmd_stop(&[args[0].clone()], false, false, &mut global.opts(Some(4))),
+            "status" | "st" => cmd_status(&[args[0].clone()], false, false, &global.opts(None)),
+            "logs" => cmd_logs(&target),
+            "echo" => cmd_echo(&target, DEFAULT_ECHO_TAIL),
+            "show" => cmd_show(&target),
+            "restart" => cmd_restart(&target, false, false, false, &mut global.opts(Some(6))),
             _ => {
                 eprintln!("unknown command: {}", args[1]);
                 std::process::exit(1);
             }
         }
     } else if services.contains_key(base_name) {
-        cmd_status(&[args[0].clone()]);
+        cmd_status(&[args[0].clone()], false, false, &global.opts(None));
     } else {
         eprintln!("unknown command or service: {}", name);
         eprintln!();
@@ -790,16 +733,15 @@ fn remove_project_entry(content: &str, name: &str) -> Option<String> {
 
 // --- Commands ---
 
-fn cmd_status(args: &[String]) {
-    let (watch, rest) = parse_watch_opts(args, None);
+fn cmd_status(names: &[String], all: bool, detailed: bool, watch: &WatchOpts) {
     if watch.enabled && !output_format().is_plain() && io::stdout().is_terminal() {
-        watch_status(&rest, &watch);
+        watch_status(names, all, detailed, watch);
     } else {
-        let data = gather_status_data(&rest);
+        let data = gather_status_data(names, all, detailed);
         if data.detailed {
-            render_detailed_status(&rest);
+            render_detailed_status(&data);
         } else {
-            render_condensed_status(&rest);
+            render_condensed_status(&data);
         }
     }
 }
@@ -1155,31 +1097,23 @@ fn handle_action_response(response: &Response) {
                 std::process::exit(1);
             }
         }
-        _ => {}
     }
 }
 
-fn cmd_start(args: &[String]) {
-    let (mut watch, rest) = parse_watch_opts(args, Some(4));
+fn cmd_start(
+    names: &[String],
+    all: bool,
+    autostart_only: bool,
+    detailed: bool,
+    wait_for_ready: bool,
+    force: bool,
+    watch: &mut WatchOpts,
+) {
     let entries = config::load_service_entries();
     let plain = output_format().is_plain();
 
-    let autostart_only = rest.iter().any(|a| a == "--autostart");
-    let start_all = rest.iter().any(|a| is_all_flag(a));
-    let detailed = rest.iter().any(|a| is_detailed_flag(a));
-    let wait_for_ready = rest.iter().any(|a| a == "--wait");
-    let force = rest.iter().any(|a| a == "--force" || a == "-f");
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|a| {
-            !is_all_flag(a)
-                && !is_detailed_flag(a)
-                && a != "--autostart"
-                && a != "--wait"
-                && a != "--force"
-                && a != "-f"
-        })
-        .collect();
+    let mut rest = names.to_vec();
+    let start_all = all || take_all_alias(&mut rest, &entries);
 
     if autostart_only {
         let (names, _chains) = config::autostart_sorted();
@@ -1216,16 +1150,14 @@ fn cmd_start(args: &[String]) {
         chains.push(chain);
     }
 
-    let combined_args: Vec<String> = if start_all && plain_args.is_empty() && chain_names.is_empty()
-    {
-        vec!["--all".to_string()]
-    } else {
-        let mut args = plain_args.clone();
-        args.extend(chain_names);
-        args
-    };
-
-    let (resolved, target_processes) = resolve_service_targets(&combined_args, &entries);
+    let (resolved, target_processes) =
+        if start_all && plain_args.is_empty() && chain_names.is_empty() {
+            resolve_service_targets(&[], true, &entries)
+        } else {
+            let mut combined = plain_args.clone();
+            combined.extend(chain_names);
+            resolve_service_targets(&combined, false, &entries)
+        };
 
     if resolved.is_empty() {
         eprintln!("no services to start");
@@ -1255,11 +1187,7 @@ fn cmd_start(args: &[String]) {
             }
             watch.mode = WatchMode::Start;
             if watch.enabled {
-                let mut status_args = resolved.clone();
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
-                let success = watch_status(&status_args, &watch);
+                let success = watch_status(&resolved, false, detailed, watch);
                 if !success {
                     std::process::exit(1);
                 }
@@ -1269,28 +1197,17 @@ fn cmd_start(args: &[String]) {
             eprintln!("error: {}", message);
             std::process::exit(1);
         }
-        _ => {}
     }
 }
 
-fn cmd_stop(args: &[String]) {
-    let (mut watch, rest) = parse_watch_opts(args, Some(4));
+fn cmd_stop(names: &[String], all: bool, detailed: bool, watch: &mut WatchOpts) {
     let entries = config::load_service_entries();
     let plain = output_format().is_plain();
 
-    let stop_all = rest.iter().any(|a| is_all_flag(a));
-    let detailed = rest.iter().any(|a| is_detailed_flag(a));
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a))
-        .collect();
+    let mut rest = names.to_vec();
+    let stop_all = all || take_all_alias(&mut rest, &entries);
 
-    let args_for_resolve: Vec<String> = if stop_all && rest.is_empty() {
-        vec!["--all".to_string()]
-    } else {
-        rest.clone()
-    };
-    let (names, target_processes) = resolve_service_targets(&args_for_resolve, &entries);
+    let (names, target_processes) = resolve_service_targets(&rest, stop_all && rest.is_empty(), &entries);
 
     if names.is_empty() {
         eprintln!("no services to stop");
@@ -1319,11 +1236,7 @@ fn cmd_stop(args: &[String]) {
             }
             watch.mode = WatchMode::Stop;
             if watch.enabled {
-                let mut status_args = names.clone();
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
-                let success = watch_status(&status_args, &watch);
+                let success = watch_status(&names, false, detailed, watch);
                 if !success {
                     std::process::exit(1);
                 }
@@ -1333,22 +1246,15 @@ fn cmd_stop(args: &[String]) {
             eprintln!("error: {}", message);
             std::process::exit(1);
         }
-        _ => {}
     }
 }
 
-fn cmd_restart(args: &[String]) {
-    let (mut watch, rest) = parse_watch_opts(args, Some(4));
+fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: &mut WatchOpts) {
     let entries = config::load_service_entries();
     let plain = output_format().is_plain();
 
-    let restart_all = rest.iter().any(|a| is_all_flag(a));
-    let detailed = rest.iter().any(|a| is_detailed_flag(a));
-    let force = rest.iter().any(|a| a == "--force" || a == "-f");
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--force" && a != "-f")
-        .collect();
+    let mut rest = names.to_vec();
+    let restart_all = all || take_all_alias(&mut rest, &entries);
 
     if !watch.enabled && !plain && !watch.no_watch && io::stdout().is_terminal() {
         watch.enabled = true;
@@ -1358,7 +1264,7 @@ fn cmd_restart(args: &[String]) {
 
     // If --all or multiple services, do a full reload (stop+start all processes)
     if restart_all || rest.is_empty() || rest.len() > 1 {
-        let (names, target_processes) = resolve_service_targets(&rest, &entries);
+        let (names, target_processes) = resolve_service_targets(&rest, restart_all && rest.is_empty(), &entries);
         if names.is_empty() {
             eprintln!("no services to restart");
             std::process::exit(1);
@@ -1380,12 +1286,8 @@ fn cmd_restart(args: &[String]) {
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let mut status_args: Vec<String> = names.clone();
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
                 if watch.enabled {
-                    let success = watch_status(&status_args, &watch);
+                    let success = watch_status(&names, false, detailed, watch);
                     if !success {
                         std::process::exit(1);
                     }
@@ -1423,12 +1325,8 @@ fn cmd_restart(args: &[String]) {
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let mut status_args = vec![service.clone()];
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
                 if watch.enabled {
-                    let success = watch_status(&status_args, &watch);
+                    let success = watch_status(&[service.clone()], false, detailed, watch);
                     if !success {
                         std::process::exit(1);
                     }
@@ -1462,12 +1360,8 @@ fn cmd_restart(args: &[String]) {
                 println!("{}", msg);
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let mut status_args = vec![service.clone()];
-            if detailed {
-                status_args.push("--detailed".to_string());
-            }
             if watch.enabled {
-                let success = watch_status(&status_args, &watch);
+                let success = watch_status(&[service.clone()], false, detailed, watch);
                 if !success {
                     std::process::exit(1);
                 }
@@ -1519,11 +1413,11 @@ fn tail_log_lines_string(service: &str, process: &Option<String>, n: usize) -> V
     lines[start..].iter().map(|l| l.to_string()).collect()
 }
 
-fn cmd_logs(args: &[String]) {
+fn cmd_logs(target: &[String]) {
     let svc_entries = config::load_service_entries();
     let json = output_format() == OutputFormat::Json;
 
-    let (service, process) = resolve_single_target(args, &svc_entries);
+    let (service, process) = resolve_single_target(target, &svc_entries);
 
     let plist_paths = plist_sync::log_paths(&service);
     let files = find_log_files(&service, &process);
@@ -1552,33 +1446,11 @@ fn cmd_logs(args: &[String]) {
 
 const DEFAULT_ECHO_TAIL: usize = 14;
 
-fn parse_echo_opts(args: &[String]) -> (usize, Vec<String>) {
-    let mut tail_lines = DEFAULT_ECHO_TAIL;
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-n" | "--lines" => {
-                if i + 1 < args.len() {
-                    if let Ok(n) = args[i + 1].parse::<usize>() {
-                        tail_lines = n;
-                        i += 1;
-                    }
-                }
-            }
-            _ => rest.push(args[i].clone()),
-        }
-        i += 1;
-    }
-    (tail_lines, rest)
-}
-
-fn cmd_echo(args: &[String]) {
+fn cmd_echo(target: &[String], tail_lines: usize) {
     let svc_entries = config::load_service_entries();
     let json = output_format() == OutputFormat::Json;
 
-    let (tail_lines, rest) = parse_echo_opts(args);
-    let (service, process) = resolve_single_target(&rest, &svc_entries);
+    let (service, process) = resolve_single_target(target, &svc_entries);
 
     tail_log_lines(&service, &process, tail_lines);
     tail_files_forever(&service, &process, json);
@@ -1664,19 +1536,11 @@ fn echo_after_stop(names: &[String]) {
     tail_log_lines(&service, &None, DEFAULT_ECHO_TAIL);
 }
 
-fn cmd_show(args: &[String]) {
+fn cmd_show(target: &[String]) {
     let entries = config::load_service_entries();
     let json = output_format() == OutputFormat::Json;
 
-    let filtered_args: Vec<String> = if args.len() >= 2 && args[1] == "show" {
-        let mut new_args = vec![args[0].clone()];
-        new_args.extend_from_slice(&args[2..]);
-        new_args
-    } else {
-        args.to_vec()
-    };
-
-    let (service_name, process_name) = if filtered_args.is_empty() {
+    let (service_name, process_name) = if target.is_empty() {
         if let Some(current) = get_current_project(&entries) {
             (current, None)
         } else {
@@ -1694,7 +1558,7 @@ fn cmd_show(args: &[String]) {
             std::process::exit(0);
         }
     } else {
-        resolve_single_target(&filtered_args, &entries)
+        resolve_single_target(target, &entries)
     };
 
     let service_entry = match entries.get(&service_name) {
@@ -1953,13 +1817,14 @@ fn cmd_serve(action: Option<ServeAction>) {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(server::run());
         }
-        Some(ServeAction::Daemon) | None => serve_install_and_start(),
+        Some(ServeAction::Restart) => serve_install_and_start(true),
+        Some(ServeAction::Daemon) | None => serve_install_and_start(false),
     }
 }
 
 const SERVE_LABEL: &str = "serve";
 
-fn serve_install_and_start() {
+fn serve_install_and_start(restart: bool) {
     let agents_dir = plist_sync::user_agents_dir();
     let _ = std::fs::create_dir_all(&agents_dir);
     let plist_path = agents_dir.join(format!("com.kagaya.{}.plist", SERVE_LABEL));
@@ -2004,6 +1869,10 @@ fn serve_install_and_start() {
     }
 
     if plist_sync::is_loaded(SERVE_LABEL) {
+        if !restart {
+            eprintln!("serve: already running (ky serve restart to restart)");
+            return;
+        }
         let uid = plist_sync::get_uid();
         let target = format!("gui/{}/com.kagaya.{}", uid, SERVE_LABEL);
         let _ = std::process::Command::new("launchctl")
@@ -2065,48 +1934,6 @@ struct WatchOpts {
     mode: WatchMode,
 }
 
-fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpts, Vec<String>) {
-    let mut opts = WatchOpts {
-        duration: None,
-        interval: 1,
-        enabled: false,
-        no_watch: false,
-        mode: WatchMode::Observe,
-    };
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--watch" | "-w" => {
-                opts.enabled = true;
-                if i + 1 < args.len() {
-                    if let Ok(n) = args[i + 1].parse::<u64>() {
-                        opts.duration = Some(n);
-                        i += 1;
-                    }
-                }
-                if opts.duration.is_none() {
-                    opts.duration = default_duration;
-                }
-            }
-            "--no-watch" | "-W" => {
-                opts.no_watch = true;
-            }
-            "--watch-interval" => {
-                if i + 1 < args.len() {
-                    if let Ok(n) = args[i + 1].parse::<u64>() {
-                        opts.interval = n.max(1);
-                        i += 1;
-                    }
-                }
-            }
-            _ => rest.push(args[i].clone()),
-        }
-        i += 1;
-    }
-    (opts, rest)
-}
-
 fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
     let entries = config::load_service_entries();
     let services = plist_sync::query_all(&entries);
@@ -2126,27 +1953,17 @@ struct StatusData {
     cron_jobs: Option<Vec<koku::JobStatus>>,
 }
 
-fn is_detailed_flag(s: &str) -> bool {
-    matches!(s, "--detailed" | "-d")
-}
-
-fn gather_status_data(args: &[String]) -> StatusData {
+fn gather_status_data(names: &[String], all: bool, detailed: bool) -> StatusData {
     let (services, http_port) = fetch_status();
     let entries = config::load_service_entries();
 
-    let show_all = args.iter().any(|a| is_all_flag(a));
-    let detailed = args.iter().any(|a| is_detailed_flag(a));
+    let mut names = names.to_vec();
+    let show_all = all || take_all_alias(&mut names, &entries);
     let current_project = get_current_project(&entries);
-
-    let filtered_args: Vec<String> = args
-        .iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a))
-        .cloned()
-        .collect();
 
     let (filter, process_filter) = if show_all {
         (entries.keys().cloned().collect(), None)
-    } else if filtered_args.is_empty() {
+    } else if names.is_empty() {
         let svcs = if let Some(ref current) = current_project {
             vec![current.clone()]
         } else {
@@ -2154,7 +1971,7 @@ fn gather_status_data(args: &[String]) -> StatusData {
         };
         (svcs, None)
     } else {
-        let (svcs, procs) = resolve_service_targets(&filtered_args, &entries);
+        let (svcs, procs) = resolve_service_targets(&names, false, &entries);
         let proc_filter = procs.into_values().next().and_then(|mut p| {
             if p.is_empty() {
                 None
@@ -2178,7 +1995,7 @@ fn gather_status_data(args: &[String]) -> StatusData {
             .iter()
             .filter_map(|name| status_map.get(name).cloned())
             .collect();
-        let port = if show_all || (args.is_empty() && current_project.is_none()) {
+        let port = if show_all || (names.is_empty() && current_project.is_none()) {
             http_port
         } else {
             None
@@ -2222,9 +2039,9 @@ fn gather_status_data(args: &[String]) -> StatusData {
         .max()
         .unwrap_or(0);
 
-    let is_single_service = sorted_filter.len() == 1 && !filtered_args.is_empty() && !show_all;
+    let is_single_service = sorted_filter.len() == 1 && !names.is_empty() && !show_all;
     let detailed = detailed || is_single_service;
-    let show_extras = show_all || (filtered_args.is_empty() && current_project.is_none());
+    let show_extras = show_all || (names.is_empty() && current_project.is_none());
     let cron_jobs = if show_extras {
         koku_client::fetch_status()
     } else {
@@ -2245,9 +2062,7 @@ fn gather_status_data(args: &[String]) -> StatusData {
     }
 }
 
-fn render_condensed_status(args: &[String]) -> usize {
-    let data = gather_status_data(args);
-
+fn render_condensed_status(data: &StatusData) -> usize {
     if let Some(ref proc_name) = data.process_filter {
         if let Some(name) = data.sorted_filter.first() {
             if let Some(status) = data.status_map.get(name) {
@@ -2382,9 +2197,7 @@ fn render_condensed_status(args: &[String]) -> usize {
     lines
 }
 
-fn render_detailed_status(args: &[String]) -> usize {
-    let data = gather_status_data(args);
-
+fn render_detailed_status(data: &StatusData) -> usize {
     if let Some(ref proc_name) = data.process_filter {
         if let Some(name) = data.sorted_filter.first() {
             if let Some(status) = data.status_map.get(name) {
@@ -3037,8 +2850,8 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
     lines
 }
 
-fn build_status_lines<'a>(args: &[String]) -> (Vec<RLine<'a>>, StatusData) {
-    let data = gather_status_data(args);
+fn build_status_lines<'a>(names: &[String], all: bool, detailed: bool) -> (Vec<RLine<'a>>, StatusData) {
+    let data = gather_status_data(names, all, detailed);
     let lines = status_data_to_lines(&data);
     (lines, data)
 }
@@ -3184,7 +2997,7 @@ fn snapshot_states(data: &StatusData) -> PrevStates {
     map
 }
 
-fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
+fn watch_status(names: &[String], all: bool, detailed: bool, opts: &WatchOpts) -> bool {
     use crossterm::event::{self, Event, KeyCode, KeyModifiers};
     use crossterm::terminal;
     use ratatui::backend::CrosstermBackend;
@@ -3199,7 +3012,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
     let mut prev_states: PrevStates = PrevStates::new();
     let mut satisfied_since: Option<Instant> = None;
 
-    let (mut initial_lines, initial_data) = build_status_lines(args);
+    let (mut initial_lines, initial_data) = build_status_lines(names, all, detailed);
     let failed = failed_processes(&initial_data);
     if !failed.is_empty() {
         initial_lines.push(RLine::from(""));
@@ -3223,7 +3036,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
     let mut last_data: Option<StatusData> = None;
 
     loop {
-        let (mut lines, data) = build_status_lines(args);
+        let (mut lines, data) = build_status_lines(names, all, detailed);
 
         let transitions = detect_transitions(&data, &prev_states);
         if !transitions.is_empty() {
@@ -3357,8 +3170,15 @@ fn resolve_dot_target(
 
 // --- Target resolution ---
 
-fn is_all_flag(s: &str) -> bool {
-    matches!(s, "--all" | "-a" | "all")
+/// Accept a bare `all` positional as an alias for --all, unless a service is
+/// literally named "all". Removes it from `names` and reports whether it was seen.
+fn take_all_alias(names: &mut Vec<String>, entries: &BTreeMap<String, ServiceEntry>) -> bool {
+    if entries.contains_key("all") {
+        return false;
+    }
+    let before = names.len();
+    names.retain(|n| n != "all");
+    names.len() != before
 }
 
 fn get_current_project(entries: &BTreeMap<String, ServiceEntry>) -> Option<String> {
@@ -3374,14 +3194,22 @@ fn get_current_project(entries: &BTreeMap<String, ServiceEntry>) -> Option<Strin
     None
 }
 
-/// Resolve a list of CLI args into service names and per-service process filters.
-/// Handles: dot notation, known service names, bare process names via CWD, --all.
-/// If args is empty, falls back to CWD project or errors.
+/// Resolve service names and per-service process filters.
+/// Handles: dot notation, known service names, bare process names via CWD, all.
+/// If names is empty and all is false, falls back to CWD project or errors.
 fn resolve_service_targets(
-    args: &[String],
+    names: &[String],
+    all: bool,
     entries: &BTreeMap<String, ServiceEntry>,
 ) -> (Vec<String>, plist_sync::ProcessFilters) {
-    if args.is_empty() {
+    if all {
+        return (
+            entries.keys().cloned().collect(),
+            plist_sync::ProcessFilters::new(),
+        );
+    }
+
+    if names.is_empty() {
         if let Some(current) = get_current_project(entries) {
             return (vec![current], plist_sync::ProcessFilters::new());
         }
@@ -3394,20 +3222,10 @@ fn resolve_service_targets(
         std::process::exit(1);
     }
 
-    if args.len() == 1 && is_all_flag(&args[0]) {
-        return (
-            entries.keys().cloned().collect(),
-            plist_sync::ProcessFilters::new(),
-        );
-    }
-
     let mut service_names: Vec<String> = Vec::new();
     let mut process_filters = plist_sync::ProcessFilters::new();
 
-    for arg in args {
-        if is_all_flag(arg) {
-            continue;
-        }
+    for arg in names {
         let (svc, proc) = resolve_dot_target(arg, entries);
         if let Some(p) = proc {
             if !service_names.contains(&svc) {
@@ -3567,7 +3385,8 @@ mod tests {
     #[test]
     fn resolve_dot_target_scopes_process_to_service() {
         let entries = test_entries(&["jobs"]);
-        let (services, processes) = resolve_service_targets(&["jobs.ui".to_string()], &entries);
+        let (services, processes) =
+            resolve_service_targets(&["jobs.ui".to_string()], false, &entries);
 
         assert_eq!(services, vec!["jobs"]);
         assert_eq!(processes.get("jobs"), Some(&vec!["ui".to_string()]));
@@ -3577,7 +3396,7 @@ mod tests {
     fn resolve_process_filters_do_not_cross_services() {
         let entries = test_entries(&["jobs", "admin"]);
         let args = vec!["jobs.ui".to_string(), "admin.worker".to_string()];
-        let (services, processes) = resolve_service_targets(&args, &entries);
+        let (services, processes) = resolve_service_targets(&args, false, &entries);
 
         assert_eq!(services, vec!["jobs", "admin"]);
         assert_eq!(processes.get("jobs"), Some(&vec!["ui".to_string()]));
