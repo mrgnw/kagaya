@@ -1,89 +1,68 @@
 #compdef ky kagaya
 
-_ky() {
-	local -a commands projects flags
-	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects"
+_ky_services() {
+	local config="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects.toml"
+	[[ -f $config ]] || return
+	awk -F'[]=[]' '/^[a-zA-Z0-9_-]+[ \t]*=/ {gsub(/[ \t]/,"",$1); print $1} /^\[[a-zA-Z0-9_-]+\]/ {print $2}' "$config"
+}
 
+_ky() {
+	local -a commands services
 	commands=(
-		'status:show project status'
-		'st:show project status (alias)'
-		'start:start project(s)'
-		'stop:stop project(s)'
-		'reload:restart project(s)'
-		'kill:kill process(es)'
-		'echo:view logs'
-		'connect:connect to process'
-		'restart:restart process(es)'
-		'quit:quit daemon'
-		'run:run command'
-		'init:create config file'
-		'add:add a project'
-		'serve:start web UI'
-		'ui:start web UI (alias)'
-		'self:self-management commands'
+		'status:show service status'
+		'st:show service status (alias)'
+		'start:start service(s)'
+		'stop:stop service(s)'
+		'restart:restart service(s) or a process'
+		'logs:show log file paths'
+		'echo:tail + stream live output'
+		'show:show service config'
+		'add:register a service'
+		'remove:unregister a service'
+		'rm:unregister a service (alias)'
+		'init:create config files'
+		'autostart:start service(s) on login'
+		'reload-config:re-sync plists from config'
+		'rc:re-sync plists (alias)'
+		'serve:web UI daemon'
+		'cron:koku cron jobs'
+		'self:self-management (update)'
+		'all:status for all services'
 		'help:show help'
 		'version:show version'
 	)
 
-	flags=(
-		'--all:target all projects'
-		'-a:target all projects'
-		'--no-watch:skip post-command status watch'
-		'-W:skip post-command status watch'
-		'--daemon:run in background'
-		'-d:run in background'
-		'--stop:stop daemon'
-		'--echo:view daemon logs'
-		'--restart:restart daemon'
-		'--status:show daemon status'
-		'-h:show help'
-		'--help:show help'
-		'-V:show version'
-		'--version:show version'
-	)
-
-	if [[ -f "$config_path" ]]; then
-		projects=("${(@f)$(grep -v '^#' "$config_path" 2>/dev/null | grep -v '^[[:space:]]*$' | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')}")
+	if (( CURRENT == 2 )); then
+		services=(${(f)"$(_ky_services)"})
+		_describe -t commands 'command' commands
+		(( ${#services} )) && _describe -t services 'service' services
+		return
 	fi
 
-	local state
-	_arguments -C \
-		'1: :->command' \
-		'*:: :->args' && return 0
-
-	case $state in
-		command)
-			_describe -t commands 'command' commands
-			_describe -t projects 'project' projects
+	case $words[2] in
+		start)
+			_arguments '--all[start all]' '--wait[block until ready]' '--force[kill port holders]' \
+				'--autostart[only autostart services]' '--echo[stream output after]' \
+				'--detailed[per-process detail]' '--no-watch[skip status watch]'
+			services=(${(f)"$(_ky_services)"})
+			(( ${#services} )) && _describe -t services 'service' services
 			;;
-		args)
-			case $words[1] in
-				status|st|start|stop|reload|kill|echo|connect|restart|quit|run)
-					_describe -t projects 'project' projects
-					_describe -t flags 'flag' flags
-					;;
-			add)
-				if [[ ${words[(i)--run]} -le $CURRENT ]]; then
-					return
-				fi
-				_arguments '*--run[register a standalone command]:command:' && return
-				if [[ $CURRENT -eq 3 ]]; then
-					_path_files -/
-				fi
-				;;
-			serve|ui)
-				_describe -t flags 'flag' flags
-				;;
-			self)
-				local -a self_commands
-				self_commands=('update:update kagaya to the latest version')
-				_describe -t self_commands 'self command' self_commands
-				;;
-				*)
-					_describe -t projects 'project' projects
-					_describe -t commands 'command' commands
-					;;
-			esac
+		stop|restart|status|st|logs|echo|show|remove|rm)
+			services=(${(f)"$(_ky_services)"})
+			(( ${#services} )) && _describe -t services 'service' services
+			;;
+		serve)
+			_values 'action' stop restart status daemon foreground
+			;;
+		cron)
+			_values 'action' status run pause resume reload
+			;;
+		autostart)
+			services=(${(f)"$(_ky_services)"} on off)
+			_describe -t services 'service or on/off' services
+			;;
+		self)
+			_values 'action' update
 			;;
 	esac
 }

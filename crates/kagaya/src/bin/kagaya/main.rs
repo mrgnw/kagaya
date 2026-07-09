@@ -230,7 +230,7 @@ fn hline(cmd: &str, args: &str, desc: &str, cmd_width: usize) {
 
 fn print_usage() {
     eprintln!(
-        "{} {} — launchctl frontend for services",
+        "{} {} — launchd made easy",
         "ky".bold(),
         env!("CARGO_PKG_VERSION")
     );
@@ -260,6 +260,11 @@ fn print_usage() {
         "-W".bold()
     );
     eprintln!(
+        "  {} blocks until ready; {} kills foreign port holders",
+        "--wait".bold(),
+        "--force".bold()
+    );
+    eprintln!(
         "  {} streams live output after action; {} shows per-process detail",
         "-e".bold(),
         "-d".bold()
@@ -278,14 +283,14 @@ fn print_usage() {
         "Show config or process command",
         w,
     );
-    hline("add", "[name] [dir]", "Register a project", w);
+    hline("add", "[name] [dir]", "Register a service", w);
     hline(
         "add",
         "<name> --run <cmd>",
         "Register a standalone command",
         w,
     );
-    hline("remove|rm", "<name>", "Unregister a project", w);
+    hline("remove|rm", "<name>", "Unregister a service", w);
     hline("init", "", "Create config files", w);
     eprintln!();
 
@@ -299,53 +304,55 @@ fn print_usage() {
     hline(
         "autostart",
         "[<name>] [on|off]",
-        "RunAtLoad toggle per service",
+        "Start service(s) on login",
         w,
     );
     hline(
         "reload-config|rc",
         "",
-        "Re-sync plists from projects.toml",
+        "Re-sync all plists from config",
         w,
     );
-    hline("serve", "[stop|status]", "HTTP UI launchd agent", w);
+    hline("serve", "[stop|restart|status]", "Web UI (launchd agent)", w);
     hline("self update", "", "Update to latest version", w);
     eprintln!();
 
     eprintln!("{}", "targeting".cyan().bold());
     eprintln!(
         "  {} dot syntax targets one process: ky start app.web",
-        "name.process".bold()
+        "service.process".bold()
     );
     eprintln!("  Service-first syntax:              ky myapp start");
-    eprintln!("  Context-aware: run from a project dir to auto-target it");
+    eprintln!("  Context-aware: run from a service's directory to auto-target it");
     eprintln!();
 
     eprintln!("{}", "shortcuts".cyan().bold());
-    eprintln!("  ky                  status (current project or all)");
+    eprintln!("  ky                  status (current service or all)");
     eprintln!("  ky all              status --all");
     eprintln!("  ky -w               live watch mode");
     eprintln!("  ky <service>        status for a single service");
     eprintln!();
 
-    eprintln!("{}", "dependencies".cyan().bold());
+    eprintln!("{}", "startup order".cyan().bold());
     eprintln!(
-        "  In services.toml, use {} to order startup:",
+        "  {} in services.toml orders processes; deps start first and",
         "depends_on".bold()
     );
-    eprintln!("    [api]");
-    eprintln!("    run = \"python server.py\"");
-    eprintln!("    depends_on = \"db\"");
+    eprintln!("  must be ready before dependents start. Readiness is, in order:");
     eprintln!(
-        "  {} polls a command until exit 0; {} sets timeout (default 10s)",
+        "  {} exit 0 > {} listening > task exited > running",
         "ready".bold(),
-        "ready_timeout".bold()
+        "ports".bold()
+    );
+    eprintln!(
+        "  {} chains services ad hoc: ky start db..api",
+        "..".bold()
     );
     eprintln!();
 
     eprintln!("{}", "files".cyan().bold());
     eprintln!(
-        "  {}   registered projects",
+        "  {}   registered services",
         "~/.config/kagaya/projects.toml".dimmed()
     );
     eprintln!(
@@ -353,8 +360,8 @@ fn print_usage() {
         "~/.config/kagaya/config.toml".dimmed()
     );
     eprintln!(
-        "  {}          per-project services",
-        "<project>/services.toml".dimmed()
+        "  {}              per-service processes",
+        "<dir>/services.toml".dimmed()
     );
     eprintln!();
 
@@ -409,7 +416,7 @@ fn cmd_init() {
 
     eprintln!();
     eprintln!("getting started:");
-    eprintln!("  1. add projects: ky add (from a project dir)");
+    eprintln!("  1. register a service: ky add (from its directory)");
     eprintln!("  2. start: ky start [name|--all]");
     eprintln!("  3. check: ky status");
 }
@@ -1190,9 +1197,9 @@ fn cmd_start(
         let (names, chains) = config::autostart_sorted();
         if names.is_empty() {
             if plain {
-                format::json_error("no projects with autostart = true");
+                format::json_error("no services with autostart = true");
             } else {
-                eprintln!("no projects with autostart = true");
+                eprintln!("no services with autostart = true");
             }
             return;
         }
@@ -1640,16 +1647,16 @@ fn cmd_show(target: &[String]) {
         if let Some(current) = get_current_project(&entries) {
             (current, None)
         } else {
-            let projects_path = utils::config_dir().join("projects");
+            let projects_path = utils::config_dir().join("projects.toml");
             if json {
                 let map: BTreeMap<&String, &PathBuf> =
                     entries.iter().map(|(n, e)| (n, &e.dir)).collect();
                 format::json_value(&map);
                 std::process::exit(0);
             }
-            eprintln!("{}", projects_path.display().to_string().dimmed());
+            println!("{}", projects_path.display().to_string().dimmed());
             for (name, entry) in &entries {
-                eprintln!("{}: {}", name.bold(), entry.dir.display());
+                println!("{}: {}", name.bold(), entry.dir.display());
             }
             std::process::exit(0);
         }

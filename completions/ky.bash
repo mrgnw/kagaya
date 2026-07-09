@@ -1,51 +1,41 @@
-_ky_completion() {
-	local cur prev words cword
-	if declare -F _init_completion >/dev/null 2>&1; then
-		_init_completion || return
-	else
-		cur="${COMP_WORDS[COMP_CWORD]}"
-		if [[ $COMP_CWORD -gt 0 ]]; then
-			prev="${COMP_WORDS[COMP_CWORD-1]}"
-		else
-			prev=""
-		fi
-		words=("${COMP_WORDS[@]}")
-		cword=$COMP_CWORD
-	fi
-
-	local commands="status st start stop reload kill echo connect restart quit run init add serve ui self help version"
-	local flags="--all -a --no-watch -W --daemon -d --stop --echo --restart --status -h --help -V --version"
-
-	local config_path="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects"
-	local projects=""
-	if [[ -f "$config_path" ]]; then
-		projects=$(grep -v '^#' "$config_path" 2>/dev/null | grep -v '^[[:space:]]*$' | cut -d: -f1 | tr -d ' ')
-	fi
-
-	if [[ $cword -eq 1 ]]; then
-		COMPREPLY=( $(compgen -W "$commands $projects" -- "$cur") )
-	else
-		case "${words[1]}" in
-			status|st|start|stop|reload|kill|echo|connect|restart|quit|run)
-				COMPREPLY=( $(compgen -W "$projects $flags" -- "$cur") )
-				;;
-		add)
-			if [[ $cur == -* ]]; then
-				COMPREPLY=( $(compgen -W "--run" -- "$cur") )
-			elif [[ $cword -eq 3 ]]; then
-				COMPREPLY=( $(compgen -d -- "$cur") )
-			fi
-			;;
-			*)
-				if [[ $cur == -* ]]; then
-					COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
-				else
-					COMPREPLY=( $(compgen -W "$projects $commands" -- "$cur") )
-				fi
-				;;
-		esac
-	fi
+_ky_services() {
+	local config="${XDG_CONFIG_HOME:-$HOME/.config}/kagaya/projects.toml"
+	[[ -f $config ]] || return
+	awk -F'[]=[]' '/^[a-zA-Z0-9_-]+[ \t]*=/ {gsub(/[ \t]/,"",$1); print $1} /^\[[a-zA-Z0-9_-]+\]/ {print $2}' "$config"
 }
 
-complete -F _ky_completion ky
-complete -F _ky_completion kagaya
+_ky() {
+	local cur commands
+	COMPREPLY=()
+	cur="${COMP_WORDS[COMP_CWORD]}"
+	commands="status st start stop restart logs echo show add remove rm init autostart reload-config rc serve cron self all help version"
+
+	if [[ $COMP_CWORD -eq 1 ]]; then
+		COMPREPLY=($(compgen -W "$commands $(_ky_services)" -- "$cur"))
+		return
+	fi
+
+	case "${COMP_WORDS[1]}" in
+		start)
+			COMPREPLY=($(compgen -W "$(_ky_services) --all --wait --force --autostart --echo --detailed --no-watch" -- "$cur"))
+			;;
+		stop | restart | status | st | logs | echo | show | remove | rm)
+			COMPREPLY=($(compgen -W "$(_ky_services) --all" -- "$cur"))
+			;;
+		serve)
+			COMPREPLY=($(compgen -W "stop restart status daemon foreground" -- "$cur"))
+			;;
+		cron)
+			COMPREPLY=($(compgen -W "status run pause resume reload" -- "$cur"))
+			;;
+		autostart)
+			COMPREPLY=($(compgen -W "$(_ky_services) on off" -- "$cur"))
+			;;
+		self)
+			COMPREPLY=($(compgen -W "update" -- "$cur"))
+			;;
+	esac
+}
+
+complete -F _ky ky
+complete -F _ky kagaya
