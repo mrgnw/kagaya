@@ -1,7 +1,7 @@
 use crate::config::ServiceEntry;
 use crate::logs::log_dir;
 use crate::utils::listening_ports_for_pids;
-use kagaya::types::{ProcessState, ProcessStatus, ServiceStatus, ServiceType};
+use kagaya::types::{ProcessDef, ProcessState, ProcessStatus, ServiceStatus, ServiceType};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -23,10 +23,66 @@ pub(crate) fn user_agents_dir() -> PathBuf {
     PathBuf::from(home).join("Library").join("LaunchAgents")
 }
 
+const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Run launchctl with a hard deadline. launchd can park a call indefinitely
+/// (e.g. kickstart on a throttled job); ky must never inherit that hang.
+pub(crate) fn run_launchctl(args: &[&str]) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = Command::new("launchctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("launchctl: {}", e))?;
+
+    let mut stdout_pipe = child.stdout.take().expect("piped stdout");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + LAUNCHCTL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "launchctl {} timed out after {}s",
+                        args.first().copied().unwrap_or(""),
+                        LAUNCHCTL_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("launchctl: {}", e)),
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
 /// Parse `launchctl list` into label -> (pid, last exit code).
 fn parse_launchctl_list() -> BTreeMap<String, (Option<u32>, Option<i32>)> {
     let mut map = BTreeMap::new();
-    let output = match Command::new("launchctl").arg("list").output() {
+    let output = match run_launchctl(&["list"]) {
         Ok(o) => o,
         Err(_) => return map,
     };
@@ -289,7 +345,10 @@ fn build_plist_value(svc: &ServiceEntry, spec: &ProcessSpec) -> plist::Value {
         let mut ka = plist::Dictionary::new();
         ka.insert("SuccessfulExit".into(), plist::Value::Boolean(false));
         dict.insert("KeepAlive".into(), plist::Value::Dictionary(ka));
-        dict.insert("ThrottleInterval".into(), plist::Value::Integer(30.into()));
+        // Keep this short: launchd blocks kickstart/respawn for the full
+        // throttle window after a kill, which is also what a deliberate
+        // `ky restart` looks like. 5s still damps crash loops.
+        dict.insert("ThrottleInterval".into(), plist::Value::Integer(5.into()));
     }
     dict.insert("RunAtLoad".into(), plist::Value::Boolean(svc.autostart));
     dict.insert(
@@ -323,17 +382,13 @@ fn build_plist_value(svc: &ServiceEntry, spec: &ProcessSpec) -> plist::Value {
 // ── launchctl primitives ──────────────────────────────────────────────────────
 
 pub fn is_loaded_label(label: &str) -> bool {
-    Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
-        .output()
+    run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)])
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 pub fn is_running_label(label: &str) -> bool {
-    let out = Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
-        .output();
+    let out = run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)]);
     match out {
         Ok(o) if o.status.success() => {
             let text = String::from_utf8_lossy(&o.stdout);
@@ -354,17 +409,11 @@ pub fn is_loaded(project: &str) -> bool {
 
 pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
     let target = format!("gui/{}", get_uid());
-    let out = Command::new("launchctl")
-        .args(["bootstrap", &target, &path.to_string_lossy()])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_launchctl(&["bootstrap", &target, &path.to_string_lossy()])?;
     if out.status.success() {
         return Ok(());
     }
-    let legacy = Command::new("launchctl")
-        .args(["load", &path.to_string_lossy()])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let legacy = run_launchctl(&["load", &path.to_string_lossy()])?;
     if legacy.status.success() {
         return Ok(());
     }
@@ -373,10 +422,7 @@ pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
 
 fn bootout_label(label: &str, fallback_plist: Option<&PathBuf>) -> Result<(), String> {
     let target = format!("gui/{}/{}", get_uid(), label);
-    let out = Command::new("launchctl")
-        .args(["bootout", &target])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_launchctl(&["bootout", &target])?;
     if out.status.success() {
         return Ok(());
     }
@@ -385,10 +431,7 @@ fn bootout_label(label: &str, fallback_plist: Option<&PathBuf>) -> Result<(), St
         return Ok(());
     }
     if let Some(p) = fallback_plist {
-        let legacy = Command::new("launchctl")
-            .args(["unload", &p.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let legacy = run_launchctl(&["unload", &p.to_string_lossy()])?;
         if legacy.status.success() {
             return Ok(());
         }
@@ -709,14 +752,28 @@ pub struct OpResult {
 
 pub type ProcessFilters = BTreeMap<String, Vec<String>>;
 
-pub fn start_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+#[derive(Clone, Copy, Default)]
+pub struct StartOpts {
+    /// Block until every started process is ready before returning.
+    pub wait: bool,
+    /// Kill foreign processes holding configured ports before starting.
+    pub force: bool,
+}
+
+pub fn start_services(
+    entries: &BTreeMap<String, ServiceEntry>,
+    names: &[String],
+    proc_filters: &ProcessFilters,
+    opts: StartOpts,
+) -> Vec<OpResult> {
     names
         .iter()
         .map(|n| {
-            fan_op(
+            start_one_service(
+                entries,
                 n,
-                Op::Start,
                 proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+                opts,
             )
         })
         .collect()
@@ -725,37 +782,219 @@ pub fn start_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<Op
 pub fn stop_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
     names
         .iter()
-        .map(|n| {
-            fan_op(
-                n,
-                Op::Stop,
-                proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
-            )
-        })
+        .map(|n| stop_one_service(n, proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[])))
         .collect()
 }
 
-pub fn restart_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+pub fn restart_services(
+    entries: &BTreeMap<String, ServiceEntry>,
+    names: &[String],
+    proc_filters: &ProcessFilters,
+    force: bool,
+) -> Vec<OpResult> {
     names
         .iter()
         .map(|n| {
-            fan_op(
+            restart_one_service(
+                entries,
                 n,
-                Op::Restart,
                 proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+                force,
             )
         })
         .collect()
 }
 
-#[derive(Clone, Copy)]
-enum Op {
-    Start,
-    Stop,
-    Restart,
+/// One startable unit of a service: a plist, plus its config definition when
+/// services.toml has one (auto-detected projects have plists but no defs).
+struct Unit {
+    proc_name: Option<String>,
+    path: PathBuf,
+    def: Option<ProcessDef>,
 }
 
-fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
+impl Unit {
+    fn display(&self, project: &str) -> String {
+        self.proc_name
+            .clone()
+            .unwrap_or_else(|| project.to_string())
+    }
+}
+
+/// Re-sync plists from config, then resolve the requested units in
+/// depends_on order (dependencies are pulled in transitively).
+fn prepare_units(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+) -> Result<Vec<Unit>, String> {
+    // Sync so edits to services.toml/projects.toml take effect on start —
+    // plists are a compiled cache of the config, never the source of truth.
+    if let Some(entry) = entries.get(project) {
+        sync_service(entry).map_err(|e| format!("{}: {}", project, e))?;
+    }
+
+    let plists = plist_paths_for_project(project);
+    if plists.is_empty() {
+        return Err(format!(
+            "no plist for '{}'. run `ky add {}` first",
+            project, project
+        ));
+    }
+
+    let defs = entries.get(project).map_or_else(Vec::new, |e| {
+        crate::config::load_service(e, &crate::config::load_global_config().defaults).processes
+    });
+
+    // Single-plist service: one unit, its def is the only one (if any).
+    if plists.len() == 1 && plists[0].0.is_none() {
+        let (proc_name, path) = plists.into_iter().next().unwrap();
+        return Ok(vec![Unit {
+            proc_name,
+            path,
+            def: defs.into_iter().next(),
+        }]);
+    }
+
+    let requested: Vec<&str> = if proc_filter.is_empty() {
+        plists.iter().filter_map(|(p, _)| p.as_deref()).collect()
+    } else {
+        let known: HashSet<&str> = plists.iter().filter_map(|(p, _)| p.as_deref()).collect();
+        let missing: Vec<&String> = proc_filter
+            .iter()
+            .filter(|p| !known.contains(p.as_str()))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{}: process target not found: {}",
+                project,
+                proc_filter.join(", ")
+            ));
+        }
+        proc_filter.iter().map(|s| s.as_str()).collect()
+    };
+
+    // depends_on order; requested processes pull their dependencies in.
+    let ordered: Vec<String> = if defs.is_empty() {
+        requested.iter().map(|s| s.to_string()).collect()
+    } else {
+        kagaya::toposort_processes(&defs, &requested).map_err(|e| format!("{}: {}", project, e))?
+    };
+
+    let mut by_name: HashMap<String, PathBuf> = plists
+        .into_iter()
+        .filter_map(|(p, path)| p.map(|n| (n, path)))
+        .collect();
+    let mut def_by_name: HashMap<String, ProcessDef> =
+        defs.into_iter().map(|d| (d.name.clone(), d)).collect();
+
+    Ok(ordered
+        .into_iter()
+        .filter_map(|name| {
+            by_name.remove(&name).map(|path| Unit {
+                def: def_by_name.remove(&name),
+                proc_name: Some(name),
+                path,
+            })
+        })
+        .collect())
+}
+
+fn start_one_service(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+    opts: StartOpts,
+) -> OpResult {
+    let units = match prepare_units(entries, project, proc_filter) {
+        Ok(u) => u,
+        Err(message) => return OpResult { ok: false, message },
+    };
+    let entry = entries.get(project);
+
+    let mut messages = Vec::new();
+    let mut any_err = false;
+    let mut ready_done: HashSet<&str> = HashSet::new();
+
+    for unit in &units {
+        let label = label_for(project, unit.proc_name.as_deref());
+
+        // Readiness barrier: dependencies started earlier in the topo order
+        // must be ready before this one starts; an unready dependency means
+        // the dependent is not started at all.
+        let mut deps_ready = true;
+        if let (Some(def), Some(entry)) = (&unit.def, entry) {
+            for dep in &def.depends_on {
+                if ready_done.contains(dep.as_str()) {
+                    continue;
+                }
+                let dep_unit = units
+                    .iter()
+                    .find(|u| u.proc_name.as_deref() == Some(dep.as_str()));
+                let Some(dep_unit) = dep_unit else { continue };
+                let dep_label = label_for(project, dep_unit.proc_name.as_deref());
+                match wait_unit_ready(entry, dep_unit, &dep_label) {
+                    Ok(()) => {
+                        ready_done.insert(dep.as_str());
+                    }
+                    Err(e) => {
+                        deps_ready = false;
+                        any_err = true;
+                        messages.push(format!(
+                            "{}: skipped — {} {}",
+                            unit.display(project),
+                            dep,
+                            e
+                        ));
+                    }
+                }
+            }
+            if opts.force && !def.ports.is_empty() {
+                messages.extend(force_free_ports(&label, &def.ports));
+            }
+        }
+        if !deps_ready {
+            continue;
+        }
+
+        match start_one_label(&label, &unit.path) {
+            Ok(verb) => messages.push(format!("{}: {}", unit.display(project), verb)),
+            Err(e) => {
+                any_err = true;
+                messages.push(format!("{}: {}", unit.display(project), e));
+            }
+        }
+    }
+
+    if opts.wait {
+        if let Some(entry) = entry {
+            for unit in &units {
+                let name = unit.display(project);
+                if unit
+                    .proc_name
+                    .as_deref()
+                    .is_some_and(|n| ready_done.contains(n))
+                {
+                    continue;
+                }
+                let label = label_for(project, unit.proc_name.as_deref());
+                if let Err(e) = wait_unit_ready(entry, unit, &label) {
+                    any_err = true;
+                    messages.push(format!("{}: {}", name, e));
+                } else {
+                    messages.push(format!("{}: ready", name));
+                }
+            }
+        }
+    }
+
+    OpResult {
+        ok: !any_err,
+        message: messages.join("\n"),
+    }
+}
+
+fn stop_one_service(project: &str, proc_filter: &[String]) -> OpResult {
     let plists = plist_paths_for_project(project);
     if plists.is_empty() {
         return OpResult {
@@ -765,27 +1004,14 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
     }
     let plists = match filtered_project_plists(project, plists, proc_filter) {
         Ok(plists) => plists,
-        Err(message) => {
-            return OpResult {
-                ok: false,
-                message,
-            };
-        }
+        Err(message) => return OpResult { ok: false, message },
     };
     let mut messages = Vec::new();
     let mut any_err = false;
     for (proc_opt, path) in plists {
         let label = label_for(project, proc_opt.as_deref());
         let display = proc_opt.clone().unwrap_or_else(|| project.to_string());
-        let result = match op {
-            Op::Start => start_one_label(&label, &path),
-            Op::Stop => stop_one_label(&label, &path),
-            Op::Restart => {
-                let expected = expected_ports_for(&path, proc_opt.as_deref());
-                restart_one_label(&label, &path, &expected)
-            }
-        };
-        match result {
+        match stop_one_label(&label, &path) {
             Ok(verb) => messages.push(format!("{}: {}", display, verb)),
             Err(e) => {
                 any_err = true;
@@ -797,6 +1023,136 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
         ok: !any_err,
         message: messages.join("\n"),
     }
+}
+
+fn restart_one_service(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+    force: bool,
+) -> OpResult {
+    let units = match prepare_units(entries, project, proc_filter) {
+        Ok(u) => u,
+        Err(message) => return OpResult { ok: false, message },
+    };
+
+    let mut messages = Vec::new();
+    let mut any_err = false;
+    for unit in &units {
+        let label = label_for(project, unit.proc_name.as_deref());
+        let expected = unit
+            .def
+            .as_ref()
+            .map(|d| d.ports.clone())
+            .unwrap_or_else(|| expected_ports_for(&unit.path, unit.proc_name.as_deref()));
+        match restart_one_label(&label, &unit.path, &expected, force) {
+            Ok(verb) => messages.push(format!("{}: {}", unit.display(project), verb)),
+            Err(e) => {
+                any_err = true;
+                messages.push(format!("{}: {}", unit.display(project), e));
+            }
+        }
+    }
+    OpResult {
+        ok: !any_err,
+        message: messages.join("\n"),
+    }
+}
+
+// ── Readiness ─────────────────────────────────────────────────────────────────
+
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Wait (bounded by ready_timeout) until a unit is ready:
+/// `ready` command exit 0 > all `ports` listening > task finished > running.
+fn wait_unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> Result<(), String> {
+    let timeout = unit
+        .def
+        .as_ref()
+        .map(|d| d.ready_timeout)
+        .unwrap_or(10)
+        .max(1);
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    loop {
+        if unit_ready(entry, unit, label) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("not ready after {}s", timeout));
+        }
+        std::thread::sleep(READY_POLL_INTERVAL);
+    }
+}
+
+fn unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> bool {
+    let Some(def) = &unit.def else {
+        return is_running_label(label);
+    };
+    if let Some(cmd) = &def.ready {
+        return Command::new("/bin/sh")
+            .args(["-c", cmd])
+            .current_dir(&entry.dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    if !def.ports.is_empty() {
+        return ports_in_use(&def.ports).len() == def.ports.len();
+    }
+    if def.service_type == ServiceType::Task {
+        // ponytail: task = done when no longer running; exit code not checked
+        return !is_running_label(label);
+    }
+    is_running_label(label)
+}
+
+/// Public readiness barrier for chain sequencing (`ky start db..api`).
+pub fn wait_service_ready(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+) -> Result<(), String> {
+    let entry = entries
+        .get(project)
+        .ok_or_else(|| format!("unknown service: {}", project))?;
+    let units = prepare_units(entries, project, proc_filter)?;
+    for unit in &units {
+        let label = label_for(project, unit.proc_name.as_deref());
+        wait_unit_ready(entry, unit, &label)
+            .map_err(|e| format!("{}: {}", unit.display(project), e))?;
+    }
+    Ok(())
+}
+
+/// Kill foreign processes listening on `ports` (bounded SIGTERM → SIGKILL).
+fn force_free_ports(our_label: &str, ports: &[u16]) -> Vec<String> {
+    let ours = pid_for_label(our_label);
+    let holders: Vec<PortHolder> = tcp_listener_holders(ports)
+        .into_iter()
+        .filter(|h| Some(h.pid) != ours)
+        .collect();
+    if holders.is_empty() {
+        return Vec::new();
+    }
+    let mut messages = Vec::new();
+    for h in &holders {
+        let _ = Command::new("kill").arg(h.pid.to_string()).output();
+        messages.push(format!(
+            "killed pid {} ({}) holding port {}",
+            h.pid, h.name, h.port
+        ));
+    }
+    let held: Vec<u16> = holders.iter().map(|h| h.port).collect();
+    let survivors = wait_for_ports_free(&held, Duration::from_secs(3));
+    for h in holders.iter().filter(|h| survivors.contains(&h.port)) {
+        let _ = Command::new("kill")
+            .args(["-9", &h.pid.to_string()])
+            .output();
+    }
+    wait_for_ports_free(&survivors, Duration::from_secs(2));
+    messages
 }
 
 fn filtered_project_plists(
@@ -857,6 +1213,7 @@ fn restart_one_label(
     label: &str,
     path: &PathBuf,
     expected_ports: &[u16],
+    force: bool,
 ) -> Result<&'static str, String> {
     let old_pid = pid_for_label(label);
     let owned: Vec<u16> = old_pid.map(runtime_ports_for_pid).unwrap_or_default();
@@ -884,10 +1241,13 @@ fn restart_one_label(
 
     // Our instance is stopped, so anything still bound on a guarded port is a
     // foreign process (or a stubborn orphan). Report it instead of bootstrapping
-    // into a crash loop.
+    // into a crash loop — unless --force, which kills the holders.
     let blockers = tcp_listener_holders(&guard);
     if !blockers.is_empty() {
-        return Err(format_port_conflict(label, &blockers));
+        if !force {
+            return Err(format_port_conflict(label, &blockers));
+        }
+        force_free_ports(label, &guard);
     }
 
     // Start fresh. bootstrap honours RunAtLoad; when autostart is off the job
@@ -912,10 +1272,9 @@ fn restart_native(label: &str, path: &PathBuf) -> Result<&'static str, String> {
 
 fn kickstart_label(label: &str) -> Result<(), String> {
     let target = format!("gui/{}/{}", get_uid(), label);
-    let out = Command::new("launchctl")
-        .args(["kickstart", "-kp", &target])
-        .output()
-        .map_err(|e| e.to_string())?;
+    // No -p (print pid): it blocks until launchd actually spawns the job,
+    // which stalls for the ThrottleInterval after a recent kill.
+    let out = run_launchctl(&["kickstart", "-k", &target])?;
     if out.status.success() {
         return Ok(());
     }
@@ -940,10 +1299,7 @@ pub struct PortHolder {
 
 /// The pid of the running instance behind `label`, if any.
 fn pid_for_label(label: &str) -> Option<u32> {
-    let out = Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
-        .output()
-        .ok()?;
+    let out = run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)]).ok()?;
     if !out.status.success() {
         return None;
     }

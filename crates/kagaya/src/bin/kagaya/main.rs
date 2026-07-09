@@ -1074,6 +1074,14 @@ fn response_from_ops(results: Vec<plist_sync::OpResult>) -> Response {
     }
 }
 
+/// Per-unit operation output already names what failed line by line;
+/// print it verbatim (the exit code carries the failure).
+fn print_op_error(message: &str) {
+    for line in message.lines() {
+        eprintln!("{}", line);
+    }
+}
+
 fn handle_action_response(response: &Response) {
     let fmt = output_format();
     match response {
@@ -1093,11 +1101,69 @@ fn handle_action_response(response: &Response) {
                 format::json_error(message);
                 std::process::exit(1);
             } else {
-                eprintln!("error: {}", message);
+                print_op_error(&message);
                 std::process::exit(1);
             }
         }
     }
+}
+
+/// Start chain elements link-by-link — each link must be ready before the
+/// next starts — then start `batch` in one pass. A failed or unready link
+/// stops its chain; other chains and the batch still run.
+fn start_with_chains(
+    entries: &BTreeMap<String, config::ServiceEntry>,
+    batch: &[String],
+    chains: &[Vec<String>],
+    filters: &plist_sync::ProcessFilters,
+    opts: plist_sync::StartOpts,
+) -> Response {
+    let mut results: Vec<plist_sync::OpResult> = Vec::new();
+
+    for chain in chains {
+        for (i, element) in chain.iter().enumerate() {
+            let (svc, proc) = resolve_dot_target(element, entries);
+            let procs: Vec<String> = proc.clone().into_iter().collect();
+            let mut chain_filters = plist_sync::ProcessFilters::new();
+            if let Some(p) = proc {
+                chain_filters.insert(svc.clone(), vec![p]);
+            }
+            let link = plist_sync::start_services(
+                entries,
+                &[svc.clone()],
+                &chain_filters,
+                plist_sync::StartOpts {
+                    wait: false,
+                    force: opts.force,
+                },
+            );
+            let failed = link.iter().any(|r| !r.ok);
+            results.extend(link);
+            if failed {
+                results.push(plist_sync::OpResult {
+                    ok: false,
+                    message: format!("chain stopped at {}", element),
+                });
+                break;
+            }
+            let is_last = i + 1 == chain.len();
+            if !is_last || opts.wait {
+                if let Err(e) = plist_sync::wait_service_ready(entries, &svc, &procs) {
+                    results.push(plist_sync::OpResult {
+                        ok: false,
+                        message: format!("chain stopped: {}", e),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    if !batch.is_empty() {
+        results.extend(plist_sync::start_services(entries, batch, filters, opts));
+    }
+
+    response_from_ops(results)
 }
 
 fn cmd_start(
@@ -1115,8 +1181,13 @@ fn cmd_start(
     let mut rest = names.to_vec();
     let start_all = all || take_all_alias(&mut rest, &entries);
 
+    let opts = plist_sync::StartOpts {
+        wait: wait_for_ready,
+        force,
+    };
+
     if autostart_only {
-        let (names, _chains) = config::autostart_sorted();
+        let (names, chains) = config::autostart_sorted();
         if names.is_empty() {
             if plain {
                 format::json_error("no projects with autostart = true");
@@ -1125,11 +1196,19 @@ fn cmd_start(
             }
             return;
         }
-        let _ = force;
-        let response = response_from_ops(plist_sync::start_services(
-            &names,
+        let chain_services: std::collections::HashSet<&String> = chains.iter().flatten().collect();
+        let batch: Vec<String> = names
+            .iter()
+            .filter(|n| !chain_services.contains(n))
+            .cloned()
+            .collect();
+        let response = start_with_chains(
+            &entries,
+            &batch,
+            &chains,
             &plist_sync::ProcessFilters::new(),
-        ));
+            opts,
+        );
         handle_action_response(&response);
         return;
     }
@@ -1164,8 +1243,18 @@ fn cmd_start(
         std::process::exit(1);
     }
 
-    let _ = (chains, wait_for_ready, force, start_all);
-    let response = response_from_ops(plist_sync::start_services(&resolved, &target_processes));
+    // Chain members start link-by-link with readiness barriers; the rest batch.
+    let chain_services: std::collections::HashSet<String> = chains
+        .iter()
+        .flatten()
+        .map(|el| resolve_dot_target(el, &entries).0)
+        .collect();
+    let batch: Vec<String> = resolved
+        .iter()
+        .filter(|n| !chain_services.contains(*n))
+        .cloned()
+        .collect();
+    let response = start_with_chains(&entries, &batch, &chains, &target_processes, opts);
 
     if plain {
         handle_action_response(&response);
@@ -1194,7 +1283,7 @@ fn cmd_start(
             }
         }
         Response::Error { message } => {
-            eprintln!("error: {}", message);
+            print_op_error(&message);
             std::process::exit(1);
         }
     }
@@ -1243,7 +1332,7 @@ fn cmd_stop(names: &[String], all: bool, detailed: bool, watch: &mut WatchOpts) 
             }
         }
         Response::Error { message } => {
-            eprintln!("error: {}", message);
+            print_op_error(&message);
             std::process::exit(1);
         }
     }
@@ -1270,8 +1359,12 @@ fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: 
             std::process::exit(1);
         }
 
-        let _ = (restart_all, force);
-        let response = response_from_ops(plist_sync::restart_services(&names, &target_processes));
+        let response = response_from_ops(plist_sync::restart_services(
+            &entries,
+            &names,
+            &target_processes,
+            force,
+        ));
 
         if plain {
             handle_action_response(&response);
@@ -1294,7 +1387,7 @@ fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: 
                 }
             }
             Response::Error { message } => {
-                eprintln!("error: {}", message);
+                print_op_error(&message);
                 std::process::exit(1);
             }
         }
@@ -1306,10 +1399,11 @@ fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: 
 
     // No process name means restart all processes in the service
     if process.is_none() {
-        let _ = force;
         let response = response_from_ops(plist_sync::restart_services(
+            &entries,
             &[service.clone()],
             &plist_sync::ProcessFilters::new(),
+            force,
         ));
 
         if plain {
@@ -1333,7 +1427,7 @@ fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: 
                 }
             }
             Response::Error { message } => {
-                eprintln!("error: {}", message);
+                print_op_error(&message);
                 std::process::exit(1);
             }
         }
@@ -1345,8 +1439,10 @@ fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: 
         target_processes.insert(service.clone(), vec![process]);
     }
     let response = response_from_ops(plist_sync::restart_services(
+        &entries,
         &[service.clone()],
         &target_processes,
+        force,
     ));
 
     if plain {
@@ -1368,7 +1464,7 @@ fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: 
             }
         }
         Response::Error { message } => {
-            eprintln!("error: {}", message);
+            print_op_error(&message);
             std::process::exit(1);
         }
     }
@@ -1875,9 +1971,7 @@ fn serve_install_and_start(restart: bool) {
         }
         let uid = plist_sync::get_uid();
         let target = format!("gui/{}/com.kagaya.{}", uid, SERVE_LABEL);
-        let _ = std::process::Command::new("launchctl")
-            .args(["kickstart", "-kp", &target])
-            .output();
+        let _ = plist_sync::run_launchctl(&["kickstart", "-k", &target]);
         eprintln!("serve: restarted");
     } else {
         match plist_sync::bootstrap(&plist_path) {
