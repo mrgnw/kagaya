@@ -27,7 +27,6 @@ pub struct DaemonConfig {
     #[allow(dead_code)]
     pub release_dir: Option<String>,
     #[serde(default = "default_port")]
-    #[allow(dead_code)]
     pub port: u16,
 }
 

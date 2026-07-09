@@ -2031,7 +2031,12 @@ struct WatchOpts {
 fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
     let entries = config::load_service_entries();
     let services = plist_sync::query_all(&entries);
-    (services, None)
+    let port = if plist_sync::is_loaded(SERVE_LABEL) {
+        Some(config::load_global_config().daemon.port)
+    } else {
+        None
+    };
+    (services, port)
 }
 
 struct StatusData {
