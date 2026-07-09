@@ -12,8 +12,6 @@ pub struct GlobalConfig {
     #[allow(dead_code)]
     pub daemon: DaemonConfig,
     #[serde(default)]
-    pub logs: LogsConfig,
-    #[serde(default)]
     pub defaults: DefaultsConfig,
 }
 
@@ -53,43 +51,9 @@ fn default_port() -> u16 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct LogsConfig {
-    #[serde(default = "default_max_size")]
-    pub max_size_bytes: u64,
-    #[serde(default = "default_max_age_days")]
-    pub max_age_days: u32,
-    #[serde(default = "default_max_files")]
-    pub max_files: u32,
-}
-
-impl Default for LogsConfig {
-    fn default() -> Self {
-        Self {
-            max_size_bytes: default_max_size(),
-            max_age_days: default_max_age_days(),
-            max_files: default_max_files(),
-        }
-    }
-}
-
-fn default_max_size() -> u64 {
-    10 * 1024 * 1024
-}
-fn default_max_age_days() -> u32 {
-    7
-}
-fn default_max_files() -> u32 {
-    5
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct DefaultsConfig {
     #[serde(default = "default_true")]
     pub restart: bool,
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
-    #[serde(default = "default_restart_delay")]
-    pub restart_delay: u64,
     #[serde(default = "default_env")]
     pub env: HashMap<String, String>,
 }
@@ -98,8 +62,6 @@ impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
             restart: true,
-            max_retries: default_max_retries(),
-            restart_delay: default_restart_delay(),
             env: default_env(),
         }
     }
@@ -107,12 +69,6 @@ impl Default for DefaultsConfig {
 
 fn default_true() -> bool {
     true
-}
-fn default_max_retries() -> u32 {
-    3
-}
-fn default_restart_delay() -> u64 {
-    1
 }
 fn default_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -164,18 +120,54 @@ enum ServiceDef {
         #[serde(default, rename = "type")]
         service_type: ServiceType,
         restart: Option<bool>,
-        max_retries: Option<u32>,
-        restart_delay: Option<u64>,
         #[serde(default)]
         env: HashMap<String, String>,
         autostart: Option<bool>,
-        pre_start: Option<String>,
         #[serde(default)]
         ports: Vec<u16>,
         depends_on: Option<StringOrVec>,
         ready: Option<String>,
         ready_timeout: Option<u64>,
     },
+}
+
+/// Every key the launchd backend honours in a services.toml entry.
+const SUPPORTED_SERVICE_KEYS: &[&str] = &[
+    "run",
+    "type",
+    "restart",
+    "env",
+    "autostart",
+    "ports",
+    "depends_on",
+    "ready",
+    "ready_timeout",
+];
+
+fn unsupported_keys(value: &toml::Value) -> Vec<String> {
+    value
+        .as_table()
+        .map(|table| {
+            table
+                .keys()
+                .filter(|k| !SUPPORTED_SERVICE_KEYS.contains(&k.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Silently-ignored config is worse than an error: say exactly what we skip.
+fn warn_unsupported_keys(source: &str, name: &str, value: &toml::Value) {
+    for key in unsupported_keys(value) {
+        eprintln!(
+            "warning: {}: '{}' has unsupported key '{}' (ignored; supported: {})",
+            source,
+            name,
+            key,
+            SUPPORTED_SERVICE_KEYS.join(", ")
+        );
+    }
 }
 
 impl ServiceDef {
@@ -186,11 +178,8 @@ impl ServiceDef {
                 command: cmd,
                 service_type: ServiceType::Service,
                 restart: defaults.restart,
-                max_retries: defaults.max_retries,
-                restart_delay_secs: defaults.restart_delay,
                 env: defaults.env.clone(),
                 autostart: true,
-                pre_start: None,
                 ports: Vec::new(),
                 depends_on: Vec::new(),
                 ready: None,
@@ -200,11 +189,8 @@ impl ServiceDef {
                 run,
                 service_type,
                 restart,
-                max_retries,
-                restart_delay,
                 env,
                 autostart,
-                pre_start,
                 ports,
                 depends_on,
                 ready,
@@ -218,11 +204,8 @@ impl ServiceDef {
                     command: run,
                     service_type,
                     restart: restart.unwrap_or(if is_task { false } else { defaults.restart }),
-                    max_retries: max_retries.unwrap_or(defaults.max_retries),
-                    restart_delay_secs: restart_delay.unwrap_or(defaults.restart_delay),
                     env: merged_env,
                     autostart: autostart.unwrap_or(!is_task),
-                    pre_start,
                     ports,
                     depends_on: depends_on.map(|d| d.into_vec()).unwrap_or_default(),
                     ready,
@@ -257,8 +240,6 @@ enum ProjectDef {
         #[serde(default, rename = "type")]
         service_type: ServiceType,
         restart: Option<bool>,
-        max_retries: Option<u32>,
-        restart_delay: Option<u64>,
         #[serde(default)]
         env: HashMap<String, String>,
         #[serde(default)]
@@ -287,8 +268,6 @@ pub struct InlineCommand {
     pub run: String,
     pub service_type: ServiceType,
     pub restart: Option<bool>,
-    pub max_retries: Option<u32>,
-    pub restart_delay: Option<u64>,
     pub env: HashMap<String, String>,
 }
 
@@ -364,8 +343,6 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                     run: r,
                     service_type: ServiceType::default(),
                     restart: None,
-                    max_retries: None,
-                    restart_delay: None,
                     env,
                 });
                 services.insert(
@@ -384,8 +361,6 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                 run,
                 service_type,
                 restart,
-                max_retries,
-                restart_delay,
                 env,
                 autostart,
                 depends_on,
@@ -403,8 +378,6 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
                             run,
                             service_type,
                             restart,
-                            max_retries,
-                            restart_delay,
                             env,
                         }),
                         autostart,
@@ -421,14 +394,6 @@ pub fn load_projects() -> BTreeMap<String, ServiceEntry> {
 
 pub fn load_service_entries() -> BTreeMap<String, ServiceEntry> {
     load_projects()
-}
-
-pub fn autostart_project_names() -> Vec<String> {
-    load_projects()
-        .into_iter()
-        .filter(|(_, entry)| entry.autostart)
-        .map(|(name, _)| name)
-        .collect()
 }
 
 /// Returns autostart project names topologically sorted by depends_on,
@@ -484,11 +449,8 @@ pub fn load_service(entry: &ServiceEntry, defaults: &DefaultsConfig) -> Service 
             restart: cmd
                 .restart
                 .unwrap_or(if is_task { false } else { defaults.restart }),
-            max_retries: cmd.max_retries.unwrap_or(defaults.max_retries),
-            restart_delay_secs: cmd.restart_delay.unwrap_or(defaults.restart_delay),
             env,
             autostart: !is_task,
-            pre_start: None,
             ports: Vec::new(),
             depends_on: Vec::new(),
             ready: None,
@@ -533,6 +495,7 @@ pub fn load_service(entry: &ServiceEntry, defaults: &DefaultsConfig) -> Service 
     let processes = raw
         .into_iter()
         .filter_map(|(name, value)| {
+            warn_unsupported_keys("services.toml", &name, &value);
             let def: ServiceDef = match value.try_into() {
                 Ok(d) => d,
                 Err(e) => {
@@ -567,8 +530,6 @@ mod tests {
     fn test_defaults() -> DefaultsConfig {
         DefaultsConfig {
             restart: true,
-            max_retries: 3,
-            restart_delay: 1,
             env: HashMap::new(),
         }
     }
@@ -617,8 +578,6 @@ autostart = true"#;
 run = "my-daemon"
 type = "task"
 restart = false
-max_retries = 5
-restart_delay = 10
 autostart = true
 env = { FOO = "bar" }
 "#;
@@ -629,8 +588,6 @@ env = { FOO = "bar" }
                 run,
                 service_type,
                 restart,
-                max_retries,
-                restart_delay,
                 env,
                 autostart,
                 ..
@@ -638,8 +595,6 @@ env = { FOO = "bar" }
                 assert_eq!(run, "my-daemon");
                 assert_eq!(service_type, ServiceType::Task);
                 assert_eq!(restart, Some(false));
-                assert_eq!(max_retries, Some(5));
-                assert_eq!(restart_delay, Some(10));
                 assert!(autostart);
                 assert_eq!(env.get("FOO").unwrap(), "bar");
             }
@@ -666,7 +621,6 @@ run = "python worker.py"
 type = "task"
 restart = false
 ports = [8080, 9090]
-pre_start = "python migrate.py"
 env = { PYTHONPATH = "/app" }
 "#;
         let val: toml::Value = toml::from_str(toml_str).unwrap();
@@ -677,7 +631,6 @@ env = { PYTHONPATH = "/app" }
                 service_type,
                 restart,
                 ports,
-                pre_start,
                 env,
                 ..
             } => {
@@ -685,11 +638,24 @@ env = { PYTHONPATH = "/app" }
                 assert_eq!(service_type, ServiceType::Task);
                 assert_eq!(restart, Some(false));
                 assert_eq!(ports, vec![8080, 9090]);
-                assert_eq!(pre_start.unwrap(), "python migrate.py");
                 assert_eq!(env.get("PYTHONPATH").unwrap(), "/app");
             }
             _ => panic!("expected Full variant"),
         }
+    }
+
+    #[test]
+    fn unsupported_keys_are_reported() {
+        let toml_str = r#"
+run = "worker"
+max_retries = 10
+pre_start = "setup.sh"
+"#;
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
+        assert_eq!(unsupported_keys(&val), vec!["max_retries", "pre_start"]);
+
+        let ok: toml::Value = toml::from_str(r#"run = "worker""#).unwrap();
+        assert!(unsupported_keys(&ok).is_empty());
     }
 
     // ── ServiceDef::into_process_def ─────────────────────────────────────
@@ -703,7 +669,6 @@ env = { PYTHONPATH = "/app" }
         assert_eq!(proc.command, "echo hi");
         assert_eq!(proc.service_type, ServiceType::Service);
         assert!(proc.restart);
-        assert_eq!(proc.max_retries, 3);
         assert!(proc.autostart);
     }
 
@@ -724,15 +689,11 @@ type = "task""#;
         let toml_str = r#"
 run = "worker"
 restart = false
-max_retries = 10
-restart_delay = 5
 "#;
         let val: toml::Value = toml::from_str(toml_str).unwrap();
         let def: ServiceDef = val.try_into().unwrap();
         let proc = def.into_process_def("worker".into(), &test_defaults());
         assert!(!proc.restart);
-        assert_eq!(proc.max_retries, 10);
-        assert_eq!(proc.restart_delay_secs, 5);
     }
 
     #[test]
@@ -762,8 +723,6 @@ env = { LOCAL = "2" }
                 run: "ssh -N server".into(),
                 service_type: ServiceType::Service,
                 restart: None,
-                max_retries: None,
-                restart_delay: None,
                 env: HashMap::new(),
             }),
             autostart: false,
@@ -787,8 +746,6 @@ env = { LOCAL = "2" }
                 run: "python migrate.py".into(),
                 service_type: ServiceType::Task,
                 restart: None,
-                max_retries: None,
-                restart_delay: None,
                 env: HashMap::new(),
             }),
             autostart: false,
@@ -811,8 +768,6 @@ env = { LOCAL = "2" }
                 run: "my-daemon".into(),
                 service_type: ServiceType::Service,
                 restart: Some(false),
-                max_retries: Some(10),
-                restart_delay: Some(5),
                 env: [("MY_VAR".into(), "hello".into())].into(),
             }),
             autostart: false,
@@ -822,8 +777,6 @@ env = { LOCAL = "2" }
         let svc = load_service(&entry, &test_defaults());
         let proc = &svc.processes[0];
         assert!(!proc.restart);
-        assert_eq!(proc.max_retries, 10);
-        assert_eq!(proc.restart_delay_secs, 5);
         assert_eq!(proc.env.get("MY_VAR").unwrap(), "hello");
     }
 
