@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0-alpha.2] - 2026-07-09
+
+### Removed
+
+- `ky cron` and the koku/muzan dependencies — cron management belongs to koku's own CLI; kagaya now has zero path dependencies.
+- Unused dependencies: `nix`, `tower-http`, `tracing`, `tracing-subscriber`.
+
+### Changed
+
+- All dependencies bumped to latest (`toml` 1, `listeners` 0.6, and a full `cargo update`).
+
 ## [0.15.0-alpha.1] - 2026-07-09
 
 Pre-release of the launchd API overhaul — published as a GitHub prerelease, so
