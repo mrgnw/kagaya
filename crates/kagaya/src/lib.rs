@@ -1,52 +1,9 @@
 //! # kagaya
 //!
-//! Process supervisor toolkit for Rust CLIs.
-//!
-//! Spawn, monitor, restart, and capture output from child processes.
-//!
-//! ## Quick start
-//!
-//! ```rust,no_run
-//! use kagaya::{Supervisor, SupervisorConfig, ProcessDef, ServiceType};
-//! use std::collections::HashMap;
-//!
-//! # #[tokio::main]
-//! # async fn main() {
-//! let sup = Supervisor::new(SupervisorConfig {
-//!     log_dir: "/tmp/myapp/logs".into(),
-//!     max_log_size: 10 * 1024 * 1024,
-//! });
-//!
-//! let procs = vec![ProcessDef {
-//!     name: "web".into(),
-//!     command: "echo hello".into(),
-//!     service_type: ServiceType::Service,
-//!     restart: false,
-//!     max_retries: 0,
-//!     restart_delay_secs: 0,
-//!     env: HashMap::new(),
-//!     autostart: true,
-//!     pre_start: None,
-//!     ports: vec![],
-//!     depends_on: vec![],
-//!     ready: None,
-//!     ready_timeout: 10,
-//! }];
-//!
-//! sup.start_service("myapp", "/tmp".as_ref(), &procs, true, &[], false)
-//!     .await
-//!     .unwrap();
-//! # }
-//! ```
+//! Shared types for the `ky` CLI — a launchd-backed service manager for macOS.
 
-pub mod logs;
-pub mod output;
-pub mod supervisor;
+pub mod toposort;
 pub mod types;
 
-pub use output::OutputCapture;
-pub use supervisor::{
-    kill_port_holders, kill_process_tree, toposort_processes, ManagedProcess, ManagedService,
-    Supervisor, SupervisorConfig,
-};
+pub use toposort::toposort_processes;
 pub use types::*;

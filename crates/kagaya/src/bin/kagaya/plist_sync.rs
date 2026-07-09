@@ -1,5 +1,4 @@
 use crate::config::ServiceEntry;
-use crate::launchd::{get_uid, parse_launchctl_list, user_agents_dir, KAGAYA_PREFIX};
 use crate::logs::log_dir;
 use crate::utils::listening_ports_for_pids;
 use kagaya::types::{ProcessState, ProcessStatus, ServiceStatus, ServiceType};
@@ -7,6 +6,43 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+pub(crate) const KAGAYA_PREFIX: &str = "com.kagaya.";
+
+pub(crate) fn get_uid() -> u32 {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(501)
+}
+
+pub(crate) fn user_agents_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join("Library").join("LaunchAgents")
+}
+
+/// Parse `launchctl list` into label -> (pid, last exit code).
+fn parse_launchctl_list() -> BTreeMap<String, (Option<u32>, Option<i32>)> {
+    let mut map = BTreeMap::new();
+    let output = match Command::new("launchctl").arg("list").output() {
+        Ok(o) => o,
+        Err(_) => return map,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().skip(1) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let pid = parts[0].trim().parse::<u32>().ok();
+        let exit_code = parts[1].trim().parse::<i32>().ok();
+        let label = parts[2].trim().to_string();
+        map.insert(label, (pid, exit_code));
+    }
+    map
+}
 
 // ── Labels + paths ────────────────────────────────────────────────────────────
 //

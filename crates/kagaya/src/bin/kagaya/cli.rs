@@ -164,10 +164,6 @@ pub enum Cmd {
     #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Logs { args: Vec<String> },
 
-    /// Deprecated: use echo instead
-    #[command(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    Tail { args: Vec<String> },
-
     /// Tail + stream live output from a service
     #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Echo { args: Vec<String> },
@@ -209,23 +205,9 @@ pub enum Cmd {
     /// Create config files
     Init,
 
-    /// Migrate Procfiles to kagaya TOML
-    Migrate {
-        #[arg(long, short)]
-        force: bool,
-    },
-
     /// Manage boot autostart (on/off/status)
     #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Autostart { args: Vec<String> },
-
-    /// macOS launchd agents (run `ky launchd help` for details)
-    #[command(
-        visible_alias = "lctl",
-        trailing_var_arg = true,
-        allow_hyphen_values = true
-    )]
-    Launchd { args: Vec<String> },
 
     /// Self-management (update)
     #[command(name = "self", trailing_var_arg = true, allow_hyphen_values = true)]

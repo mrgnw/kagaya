@@ -4,9 +4,7 @@ mod config;
 mod detect;
 mod format;
 mod koku_client;
-mod launchd;
 mod logs;
-mod migrate;
 mod plist_sync;
 mod self_update;
 mod server;
@@ -192,7 +190,6 @@ fn main() {
                     }
                 }
                 Some(Cmd::Logs { args }) => cmd_logs(&args),
-                Some(Cmd::Tail { args }) => cmd_tail(&args),
                 Some(Cmd::Echo { args }) => cmd_echo(&args),
                 Some(Cmd::Show { args }) => cmd_show(&args),
                 Some(Cmd::Cron { args }) => cmd_cron(&args),
@@ -201,9 +198,7 @@ fn main() {
                 Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
                 Some(Cmd::Remove { args }) => cmd_remove(&args),
                 Some(Cmd::Init) => cmd_init(),
-                Some(Cmd::Migrate { force }) => migrate::cmd_migrate(force),
                 Some(Cmd::Autostart { args }) => autostart::cmd_autostart(&args),
-                Some(Cmd::Launchd { args }) => launchd::cmd_launchd(&args),
                 Some(Cmd::SelfCmd { args }) => match args.first().map(|s| s.as_str()) {
                     Some("update") => self_update::cmd_self_update(),
                     _ => {
@@ -250,7 +245,6 @@ fn dispatch_external(args: &[String]) {
             "stop" => cmd_stop(&[args[0].clone()]),
             "status" | "st" => cmd_status(&[args[0].clone()]),
             "logs" => cmd_logs(args),
-            "tail" => cmd_tail(args),
             "echo" => cmd_echo(args),
             "show" => cmd_show(args),
             "restart" => {
@@ -372,7 +366,6 @@ fn print_usage() {
         w,
     );
     hline("serve", "[stop|status]", "HTTP UI launchd agent", w);
-    hline("launchd|lctl", "[command]", "macOS launchd escape hatch", w);
     hline("self update", "", "Update to latest version", w);
     eprintln!();
 
@@ -441,9 +434,7 @@ fn print_subcommand_help(cmd: &Cmd) {
         Cmd::Add { .. } => "add",
         Cmd::Remove { .. } => "remove",
         Cmd::Init => "init",
-        Cmd::Migrate { .. } => "migrate",
         Cmd::Autostart { .. } => "autostart",
-        Cmd::Launchd { .. } => "launchd",
         Cmd::SelfCmd { .. } => "self",
         _ => {
             print_usage();
@@ -1559,11 +1550,6 @@ fn cmd_logs(args: &[String]) {
     }
 }
 
-fn cmd_tail(args: &[String]) {
-    eprintln!("{}: use 'ky echo' instead", "tail is deprecated".yellow());
-    cmd_echo(args);
-}
-
 const DEFAULT_ECHO_TAIL: usize = 14;
 
 fn parse_echo_opts(args: &[String]) -> (usize, Vec<String>) {
@@ -1974,7 +1960,7 @@ fn cmd_serve(action: Option<ServeAction>) {
 const SERVE_LABEL: &str = "serve";
 
 fn serve_install_and_start() {
-    let agents_dir = launchd::user_agents_dir();
+    let agents_dir = plist_sync::user_agents_dir();
     let _ = std::fs::create_dir_all(&agents_dir);
     let plist_path = agents_dir.join(format!("com.kagaya.{}.plist", SERVE_LABEL));
     let log_root = logs::log_dir();
@@ -2018,7 +2004,7 @@ fn serve_install_and_start() {
     }
 
     if plist_sync::is_loaded(SERVE_LABEL) {
-        let uid = launchd::get_uid();
+        let uid = plist_sync::get_uid();
         let target = format!("gui/{}/com.kagaya.{}", uid, SERVE_LABEL);
         let _ = std::process::Command::new("launchctl")
             .args(["kickstart", "-kp", &target])
@@ -3491,46 +3477,6 @@ fn resolve_single_target(
         entries.keys().cloned().collect::<Vec<_>>().join(", ")
     );
     std::process::exit(1);
-}
-
-fn check_alias_hint() {
-    if command_exists("lctl") {
-        return;
-    }
-
-    let shell = detect_shell();
-    let rc_file = shell_rc_file(&shell);
-
-    eprintln!();
-    eprintln!("tip: add to {}:", rc_file);
-    eprintln!("  alias lctl='ky launchd'");
-}
-
-fn detect_shell() -> String {
-    if let Ok(shell) = std::env::var("SHELL") {
-        if let Some(name) = shell.rsplit('/').next() {
-            return name.to_string();
-        }
-    }
-    "bash".to_string()
-}
-
-fn shell_rc_file(shell: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
-    match shell {
-        "zsh" => format!("{}/.zshrc", home),
-        "fish" => format!("{}/.config/fish/config.fish", home),
-        "bash" => format!("{}/.bashrc", home),
-        _ => format!("~/.{}rc", shell),
-    }
-}
-
-fn command_exists(name: &str) -> bool {
-    std::process::Command::new("sh")
-        .args(["-c", &format!("command -v {} >/dev/null 2>&1", name)])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
