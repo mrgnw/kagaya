@@ -8,7 +8,7 @@ _ky() {
 	local cur commands
 	COMPREPLY=()
 	cur="${COMP_WORDS[COMP_CWORD]}"
-	commands="status st start stop restart logs echo show add remove rm init autostart reload-config rc serve cron self all help version"
+	commands="status st start stop restart logs echo show add remove rm init autostart reload-config rc serve self all help version"
 
 	if [[ $COMP_CWORD -eq 1 ]]; then
 		COMPREPLY=($(compgen -W "$commands $(_ky_services)" -- "$cur"))
@@ -24,9 +24,6 @@ _ky() {
 			;;
 		serve)
 			COMPREPLY=($(compgen -W "stop restart status daemon foreground" -- "$cur"))
-			;;
-		cron)
-			COMPREPLY=($(compgen -W "status run pause resume reload" -- "$cur"))
 			;;
 		autostart)
 			COMPREPLY=($(compgen -W "$(_ky_services) on off" -- "$cur"))

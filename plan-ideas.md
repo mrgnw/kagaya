@@ -10,7 +10,5 @@ the supervision. See docs/api.md for the full command tree.
 
 ## Ideas / future work
 
-- [ ] Publish kagaya to crates.io (lib is now just types + toposort)
-- [ ] Publish muzan to crates.io (still a path dependency)
-- [ ] Fix the muzan dependency path in workspace Cargo.toml (points outside the repo)
+- [ ] Ship the web UI in the crates.io package (ui/build lives outside crates/kagaya, so cargo-installed builds serve the API but show "ui not built"; GitHub binaries are full-fat)
 - [ ] Linux/systemd backend if ever needed (currently macOS-only by design)

@@ -19,7 +19,6 @@ ratatui = "0.30"
 crossterm = "0.29"
 clap = { version = "4", features = ["derive"] }
 plist = "1"
-muzan = { version = "0.1.0", path = "../muzan" }
 
 [profile.release]
 lto = "thin"

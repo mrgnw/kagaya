@@ -19,8 +19,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 
 # CLI binary dependencies
-muzan = { workspace = true }
-koku = { version = "0.1.0", path = "../../../koku" }
 toml = { workspace = true }
 axum = { workspace = true }
 owo-colors = { workspace = true }

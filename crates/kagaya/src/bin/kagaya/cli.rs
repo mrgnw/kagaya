@@ -171,10 +171,6 @@ pub enum Cmd {
         target: Vec<String>,
     },
 
-    /// Manage cron jobs (via koku)
-    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
-    Cron { args: Vec<String> },
-
     /// Reload projects.toml and re-sync plists
     #[command(visible_alias = "rc")]
     ReloadConfig,

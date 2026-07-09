@@ -44,8 +44,6 @@ ky                                     status of current service (in its dir) or
 │   ├── stop / restart / status
 │   └── foreground                            run in foreground (used by the launchd plist)
 │
-├── cron  [status|run|pause|resume|reload]    koku cron jobs (needs koku daemon)
-│
 └── self update                               update ky to the latest release
 
 global flags:  -w|--watch [SECS]   live status (bare -w = until q)

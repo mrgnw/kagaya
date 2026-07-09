@@ -25,7 +25,6 @@ _ky() {
 		'reload-config:re-sync plists from config'
 		'rc:re-sync plists (alias)'
 		'serve:web UI daemon'
-		'cron:koku cron jobs'
 		'self:self-management (update)'
 		'all:status for all services'
 		'help:show help'
@@ -53,9 +52,6 @@ _ky() {
 			;;
 		serve)
 			_values 'action' stop restart status daemon foreground
-			;;
-		cron)
-			_values 'action' status run pause resume reload
 			;;
 		autostart)
 			services=(${(f)"$(_ky_services)"} on off)

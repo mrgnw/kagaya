@@ -3,7 +3,6 @@ mod cli;
 mod config;
 mod detect;
 mod format;
-mod koku_client;
 mod logs;
 mod plist_sync;
 mod self_update;
@@ -112,7 +111,6 @@ fn main() {
                 Some(Cmd::Logs { target }) => cmd_logs(&target),
                 Some(Cmd::Echo { target, lines }) => cmd_echo(&target, lines),
                 Some(Cmd::Show { target }) => cmd_show(&target),
-                Some(Cmd::Cron { args }) => cmd_cron(&args),
                 Some(Cmd::ReloadConfig) => cmd_reload_config(),
                 Some(Cmd::Serve { action }) => cmd_serve(action),
                 Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
@@ -207,7 +205,7 @@ fn dispatch_external(args: &[String], global: &GlobalWatch) {
     } else {
         eprintln!("unknown command or service: {}", name);
         eprintln!();
-        eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, reload-config, serve, cron, autostart");
+        eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, reload-config, serve, autostart");
         eprintln!();
         let names: Vec<&str> = services.keys().map(|s| s.as_str()).collect();
         if !names.is_empty() {
@@ -294,12 +292,6 @@ fn print_usage() {
     hline("init", "", "Create config files", w);
     eprintln!();
 
-    eprintln!("{}", "cron (via koku)".cyan().bold());
-    hline("cron", "[status]", "Show cron job status", w);
-    hline("cron", "run|pause|resume", "Manage individual jobs", w);
-    hline("cron", "reload", "Reload koku config", w);
-    eprintln!();
-
     eprintln!("{}", "system".cyan().bold());
     hline(
         "autostart",
@@ -378,7 +370,6 @@ fn print_subcommand_help(cmd: &Cmd) {
         Cmd::Logs { .. } => "logs",
         Cmd::Echo { .. } => "echo",
         Cmd::Show { .. } => "show",
-        Cmd::Cron { .. } => "cron",
         Cmd::ReloadConfig => "reload-config",
         Cmd::Serve { .. } => "serve",
         Cmd::Add { .. } => "add",
@@ -1732,140 +1723,6 @@ fn cmd_show(target: &[String]) {
     }
 }
 
-fn cmd_cron(args: &[String]) {
-    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
-    let json = output_format() == OutputFormat::Json || args.iter().any(|a| a == "--json");
-
-    match subcmd {
-        "status" | "st" => match koku_client::fetch_status() {
-            Some(jobs) => {
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&jobs).unwrap());
-                } else if jobs.is_empty() {
-                    eprintln!("no cron jobs configured");
-                } else {
-                    let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
-                    for job in &jobs {
-                        let sym = koku_client::state_symbol(&job.state);
-                        let extra = match (&job.last_exit, &job.next_run) {
-                            (Some(code), Some(next)) => format!("exit {}  next {}", code, next),
-                            (Some(code), None) => format!("exit {}", code),
-                            (None, Some(next)) => format!("next {}", next),
-                            (None, None) => String::new(),
-                        };
-                        println!(
-                            "  {} {:<width$} {}{}",
-                            sym,
-                            job.name,
-                            job.state,
-                            if extra.is_empty() {
-                                String::new()
-                            } else {
-                                format!("  {}", extra)
-                            },
-                            width = max_name
-                        );
-                    }
-                }
-            }
-            None => {
-                eprintln!("koku daemon not running");
-                std::process::exit(1);
-            }
-        },
-        "run" => {
-            let name = args.get(1).unwrap_or_else(|| {
-                eprintln!("usage: ky cron run <name>");
-                std::process::exit(1);
-            });
-            match koku_client::run_job(name) {
-                Ok(msg) => {
-                    if json {
-                        format::json_ok(Some(msg));
-                    } else {
-                        eprintln!("{}", msg);
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&e);
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "pause" => {
-            let name = args.get(1).unwrap_or_else(|| {
-                eprintln!("usage: ky cron pause <name>");
-                std::process::exit(1);
-            });
-            match koku_client::pause_job(name) {
-                Ok(msg) => {
-                    if json {
-                        format::json_ok(Some(msg));
-                    } else {
-                        eprintln!("{}", msg);
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&e);
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "resume" => {
-            let name = args.get(1).unwrap_or_else(|| {
-                eprintln!("usage: ky cron resume <name>");
-                std::process::exit(1);
-            });
-            match koku_client::resume_job(name) {
-                Ok(msg) => {
-                    if json {
-                        format::json_ok(Some(msg));
-                    } else {
-                        eprintln!("{}", msg);
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&e);
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "reload" => match koku_client::reload() {
-            Ok(msg) => {
-                if json {
-                    format::json_ok(Some(msg));
-                } else {
-                    eprintln!("{}", msg);
-                }
-            }
-            Err(e) => {
-                if json {
-                    format::json_error(&e);
-                } else {
-                    eprintln!("error: {}", e);
-                }
-                std::process::exit(1);
-            }
-        },
-        _ => {
-            eprintln!("usage: ky cron [status|run|pause|resume|reload]");
-            std::process::exit(1);
-        }
-    }
-}
-
 fn cmd_reload_config() {
     let entries = config::load_service_entries();
     if entries.is_empty() {
@@ -2056,7 +1913,6 @@ struct StatusData {
     detailed: bool,
     is_single_service: bool,
     http_port: Option<u16>,
-    cron_jobs: Option<Vec<koku::JobStatus>>,
 }
 
 fn gather_status_data(names: &[String], all: bool, detailed: bool) -> StatusData {
@@ -2148,11 +2004,6 @@ fn gather_status_data(names: &[String], all: bool, detailed: bool) -> StatusData
     let is_single_service = sorted_filter.len() == 1 && !names.is_empty() && !show_all;
     let detailed = detailed || is_single_service;
     let show_extras = show_all || (names.is_empty() && current_project.is_none());
-    let cron_jobs = if show_extras {
-        koku_client::fetch_status()
-    } else {
-        None
-    };
 
     StatusData {
         sorted_filter,
@@ -2164,7 +2015,6 @@ fn gather_status_data(names: &[String], all: bool, detailed: bool) -> StatusData
         detailed,
         is_single_service,
         http_port,
-        cron_jobs,
     }
 }
 
@@ -2263,36 +2113,6 @@ fn render_condensed_status(data: &StatusData) -> usize {
             .unwrap();
         }
         lines += 1;
-
-        if let Some(ref jobs) = data.cron_jobs {
-            if !jobs.is_empty() {
-                writeln!(tw).unwrap();
-                lines += 1;
-                for job in jobs {
-                    let sym = koku_client::state_symbol(&job.state);
-                    let state_str = job.state.to_string();
-                    let (sym_colored, state_colored) = match job.state {
-                        koku::JobState::Running => {
-                            (sym.green().to_string(), state_str.green().to_string())
-                        }
-                        koku::JobState::Idle => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Paused => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Failing => {
-                            (sym.yellow().to_string(), state_str.yellow().to_string())
-                        }
-                        koku::JobState::Stopped => {
-                            (sym.red().to_string(), state_str.red().to_string())
-                        }
-                    };
-                    writeln!(tw, "{}\t{}\t{}\t\t\t", sym_colored, job.name, state_colored).unwrap();
-                    lines += 1;
-                }
-            }
-        }
     }
 
     tw.flush().unwrap();
@@ -2453,73 +2273,6 @@ fn render_detailed_status(data: &StatusData) -> usize {
             );
         }
         lines += 1;
-
-        if let Some(ref jobs) = data.cron_jobs {
-            if !jobs.is_empty() {
-                println!();
-                lines += 1;
-
-                let has_running = jobs.iter().any(|j| j.state == koku::JobState::Running);
-                let symbol = if has_running {
-                    "●".green().to_string()
-                } else {
-                    "○".dimmed().to_string()
-                };
-                println!("{} {}", symbol, "cron".bold());
-                lines += 1;
-
-                let max_name = jobs
-                    .iter()
-                    .map(|j| j.name.len())
-                    .max()
-                    .unwrap_or(0)
-                    .max(name_w);
-
-                for job in jobs {
-                    let sym = koku_client::state_symbol(&job.state);
-                    let state_str = job.state.to_string();
-                    let (sym_colored, state_colored) = match job.state {
-                        koku::JobState::Running => {
-                            (sym.green().to_string(), state_str.green().to_string())
-                        }
-                        koku::JobState::Idle => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Paused => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Failing => {
-                            (sym.yellow().to_string(), state_str.yellow().to_string())
-                        }
-                        koku::JobState::Stopped => {
-                            (sym.red().to_string(), state_str.red().to_string())
-                        }
-                    };
-
-                    let extra = match (&job.last_exit, &job.next_run) {
-                        (Some(code), Some(next)) => format!("exit {}  next {}", code, next),
-                        (Some(code), None) => format!("exit {}", code),
-                        (None, Some(next)) => format!("next {}", next),
-                        (None, None) => String::new(),
-                    };
-
-                    let extra_str = if extra.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {}", extra)
-                    };
-                    println!(
-                        "  {} {:<width$} {}{}",
-                        sym_colored,
-                        job.name,
-                        state_colored,
-                        extra_str,
-                        width = max_name
-                    );
-                    lines += 1;
-                }
-            }
-        }
     }
 
     lines
@@ -2893,62 +2646,6 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
                     Span::raw("  "),
                     Span::styled("off", dim),
                 ]));
-            }
-        }
-
-        if let Some(ref jobs) = data.cron_jobs {
-            if !jobs.is_empty() {
-                lines.push(RLine::from(""));
-                let has_running = jobs.iter().any(|j| j.state == koku::JobState::Running);
-                let cron_sym = if has_running {
-                    Span::styled("●", green)
-                } else {
-                    Span::styled("○", dim)
-                };
-                lines.push(RLine::from(vec![
-                    cron_sym,
-                    Span::raw(" "),
-                    Span::styled("cron", bold),
-                ]));
-
-                let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
-                for job in jobs {
-                    let sym = koku_client::state_symbol(&job.state);
-                    let state_str = job.state.to_string();
-                    let (sym_style, state_style) = match job.state {
-                        koku::JobState::Running => (green, green),
-                        koku::JobState::Idle | koku::JobState::Paused => (dim, dim),
-                        koku::JobState::Failing => {
-                            let y = Style::default().fg(Color::Yellow);
-                            (y, y)
-                        }
-                        koku::JobState::Stopped => {
-                            let r = Style::default().fg(Color::Red);
-                            (r, r)
-                        }
-                    };
-                    let extra = match (&job.last_exit, &job.next_run) {
-                        (Some(code), Some(next)) => format!("exit {}  next {}", code, next),
-                        (Some(code), None) => format!("exit {}", code),
-                        (None, Some(next)) => format!("next {}", next),
-                        (None, None) => String::new(),
-                    };
-                    let extra_str = if extra.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {}", extra)
-                    };
-                    let padded_name = format!("{:<width$}", job.name, width = max_name);
-                    lines.push(RLine::from(vec![
-                        Span::raw("  "),
-                        Span::styled(sym.to_string(), sym_style),
-                        Span::raw(" "),
-                        Span::raw(padded_name),
-                        Span::raw(" "),
-                        Span::styled(state_str, state_style),
-                        Span::raw(extra_str),
-                    ]));
-                }
             }
         }
     }
@@ -3454,7 +3151,6 @@ mod tests {
             detailed: false,
             is_single_service: false,
             http_port: None,
-            cron_jobs: None,
         }
     }
 
@@ -3876,69 +3572,6 @@ mod tests {
         let lines = status_data_to_lines(&data);
 
         assert!(lines.is_empty());
-    }
-
-    // --- status_data_to_lines: cron jobs ---
-
-    #[test]
-    fn lines_cron_jobs() {
-        let mut data = test_status_data(vec![]);
-        data.show_extras = true;
-        data.http_port = None;
-        data.cron_jobs = Some(vec![
-            koku::JobStatus {
-                name: "backup".to_string(),
-                state: koku::JobState::Idle,
-                last_run: None,
-                last_exit: None,
-                next_run: Some("2026-03-01T00:00:00".to_string()),
-            },
-            koku::JobStatus {
-                name: "sync".to_string(),
-                state: koku::JobState::Running,
-                last_run: None,
-                last_exit: None,
-                next_run: None,
-            },
-        ]);
-        let lines = status_data_to_lines(&data);
-
-        // "" + serve + "" + cron-header + backup + sync = 6
-        assert_eq!(lines.len(), 6);
-        let cron_header = span_text(&lines[3]);
-        assert!(cron_header.contains("cron"));
-        let dot = find_span(&lines[3], "●").unwrap();
-        assert_eq!(dot.style, Style::default().fg(Color::Green));
-
-        let backup_text = span_text(&lines[4]);
-        assert!(backup_text.contains("backup"));
-        assert!(backup_text.contains("idle"));
-        assert!(backup_text.contains("next 2026-03-01T00:00:00"));
-
-        let sync_text = span_text(&lines[5]);
-        assert!(sync_text.contains("sync"));
-        assert!(sync_text.contains("running"));
-    }
-
-    #[test]
-    fn lines_cron_no_running_jobs() {
-        let mut data = test_status_data(vec![]);
-        data.show_extras = true;
-        data.http_port = None;
-        data.cron_jobs = Some(vec![koku::JobStatus {
-            name: "cleanup".to_string(),
-            state: koku::JobState::Paused,
-            last_run: None,
-            last_exit: Some(0),
-            next_run: None,
-        }]);
-        let lines = status_data_to_lines(&data);
-
-        // "" + serve + "" + cron-header + cleanup = 5
-        assert_eq!(lines.len(), 5);
-        let cron_header = &lines[3];
-        let circle = find_span(cron_header, "○").unwrap();
-        assert_eq!(circle.style, Style::default().add_modifier(Modifier::DIM));
     }
 
     // --- parity: print_process_line text matches process_line_spans text ---
