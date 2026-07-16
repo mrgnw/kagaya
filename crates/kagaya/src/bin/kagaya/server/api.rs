@@ -42,6 +42,13 @@ async fn stream_log(mut socket: WebSocket, name: String) {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // The log may have been rotated (copytruncate) — if it shrank below
+                // our read position, restart from the top so the tail survives.
+                if let Ok(meta) = file.metadata().await {
+                    if meta.len() < pos {
+                        pos = 0;
+                    }
+                }
                 let _ = file.seek(SeekFrom::Start(pos)).await;
                 continue;
             }

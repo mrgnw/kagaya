@@ -241,6 +241,25 @@ ky start db..api..worker   # all three in sequence
 ky start db --wait && echo "db is up"
 ```
 
+### Log rotation
+
+launchd appends each process's stdout/stderr to one file forever, so a chatty service can fill the disk. kagaya bounds this: when a log passes its cap it copies the recent tail to `<name>.log.1` and truncates the live file to zero. It runs on every `ky start`/`ky restart` and every 10 minutes while the web server (`ky serve`) is running. `ky echo` and the web-UI tail keep streaming across a rotation.
+
+The cap defaults to **100 MB per log stream**. Override globally in `~/.config/kagaya/config.toml`:
+
+```toml
+[logs]
+max_mb = 250   # per stream; 0 disables rotation entirely
+```
+
+Or per project, at the root of its `services.toml`:
+
+```toml
+log_max_mb = 500
+
+web = "npm run dev"
+```
+
 ### Autostart
 
 Start services automatically when you log in. Uses LaunchAgent on macOS and systemd on Linux.
@@ -414,9 +433,7 @@ public_base_url = "https://ky.xcc.es"
 release_dir = "/srv/ky/releases"
 
 [logs]
-max_size_bytes = 10485760    # 10MB, triggers rotation
-max_age_days = 7
-max_files = 5
+max_mb = 100                 # per log stream; 0 disables rotation
 
 [defaults]
 restart = true
@@ -430,7 +447,7 @@ env = { FORCE_COLOR = "1", CLICOLOR_FORCE = "1" }
 kagaya uses native Rust process supervision with:
 - Direct PID-based process management
 - Auto-restart on crash with configurable retry limits
-- Log files with rotation (stored in `~/.local/share/kagaya/log/`)
+- Log files with rotation (stored in `~/.local/state/kagaya/logs/`)
 - Live log streaming via ring buffers
 - Unix socket communication for CLI commands
 - HTTP/WebSocket API for the web UI
