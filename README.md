@@ -433,9 +433,7 @@ public_base_url = "https://ky.xcc.es"
 release_dir = "/srv/ky/releases"
 
 [logs]
-max_size_bytes = 10485760    # 10MB, triggers rotation
-max_age_days = 7
-max_files = 5
+max_mb = 100                 # per log stream; 0 disables rotation
 
 [defaults]
 restart = true
@@ -449,7 +447,7 @@ env = { FORCE_COLOR = "1", CLICOLOR_FORCE = "1" }
 kagaya uses native Rust process supervision with:
 - Direct PID-based process management
 - Auto-restart on crash with configurable retry limits
-- Log files with rotation (stored in `~/.local/share/kagaya/log/`)
+- Log files with rotation (stored in `~/.local/state/kagaya/logs/`)
 - Live log streaming via ring buffers
 - Unix socket communication for CLI commands
 - HTTP/WebSocket API for the web UI
