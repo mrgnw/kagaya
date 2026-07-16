@@ -35,14 +35,14 @@ resolution).
 
 ## Tasks (TDD)
 
-- [ ] 1. `logs.rs`: `bound_log_file` + `parse_log_max_mb` + tests (pure, `tempfile`).
-- [ ] 2. `config.rs`: reshape dead `LogsConfig` → `{ max_mb }` (default 100);
+- [x] 1. `logs.rs`: `bound_log_file` + `parse_log_max_mb` + tests (pure, `tempfile`).
+- [x] 2. `config.rs`: reshape dead `LogsConfig` → `{ max_mb }` (default 100);
        skip reserved `log_max_mb` key in `load_service`; tests.
-- [ ] 3. `logs::enforce_log_caps` + wiring: call in `plist_sync::start_services`
+- [x] 3. `logs::enforce_log_caps` + wiring: call in `plist_sync::start_services`
        / `restart_services`; fix `parse_service_ports` to ignore `log_max_mb`
        when collapsing a single-service file; 10-min sweep in `server/mod.rs`;
        `server/api.rs::stream_log` resets read pos on shrink (web tail survives).
-- [ ] 4. Docs: README "Log rotation" note + CHANGELOG entry.
+- [x] 4. Docs: README "Log rotation" note + CHANGELOG entry.
 
 ## Verify
 

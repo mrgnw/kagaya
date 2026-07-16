@@ -241,6 +241,25 @@ ky start db..api..worker   # all three in sequence
 ky start db --wait && echo "db is up"
 ```
 
+### Log rotation
+
+launchd appends each process's stdout/stderr to one file forever, so a chatty service can fill the disk. kagaya bounds this: when a log passes its cap it copies the recent tail to `<name>.log.1` and truncates the live file to zero. It runs on every `ky start`/`ky restart` and every 10 minutes while the web server (`ky serve`) is running. `ky echo` and the web-UI tail keep streaming across a rotation.
+
+The cap defaults to **100 MB per log stream**. Override globally in `~/.config/kagaya/config.toml`:
+
+```toml
+[logs]
+max_mb = 250   # per stream; 0 disables rotation entirely
+```
+
+Or per project, at the root of its `services.toml`:
+
+```toml
+log_max_mb = 500
+
+web = "npm run dev"
+```
+
 ### Autostart
 
 Start services automatically when you log in. Uses LaunchAgent on macOS and systemd on Linux.

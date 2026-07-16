@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Log rotation** (#6): launchd has no log rotation, so per-service logs grew unbounded (they reached 4.3 GB). kagaya now copytruncates any log stream that exceeds its cap — copying the recent tail to `<name>.log.1` and truncating the live file to zero (safe because launchd holds the fd with `O_APPEND`). Enforced on every `ky start`/`ky restart` and every 10 minutes while `ky serve` runs (which also trims existing oversized logs on startup). The cap defaults to **100 MB per stream**; set `[logs] max_mb` in `~/.config/kagaya/config.toml` (`0` disables), or `log_max_mb` at the root of a project's `services.toml`. `ky echo` and the web-UI tail survive rotation. Old `[logs]` keys (`max_size_bytes`, `max_age_days`, `max_files`) are now ignored.
+
 ### Fixed
 
 - **Port-safe restart**: restarting a service that binds ports now fully stops the running instance, waits (bounded, 5s) for it to release its ports, and only then starts a fresh instance — removing the rapid-restart race that could leave two listeners or a service that failed to rebind. If a port is held by an unrelated process, `ky restart` now fails with a clear error (`port N held by pid P (name)`) instead of letting launchd crash-loop. Portless services keep the cheap `kickstart` path, so they don't raise a macOS "Login Items" notification on every restart.
