@@ -54,6 +54,48 @@ pub fn parse_log_max_mb(services_toml_body: &str) -> Option<u64> {
         .and_then(|n| u64::try_from(n).ok())
 }
 
+/// Sweep every kagaya launchd log and truncate any that exceed its cap.
+///
+/// The cap is the project's `log_max_mb` (from its `services.toml`) or the global
+/// `[logs] max_mb` default. We enumerate `com.kagaya.*.plist` — exactly the jobs
+/// launchd can grow — and read each plist's stdout/stderr paths. Only files under
+/// `log_dir()` are touched; a hand-edited plist pointing elsewhere is left alone
+/// (safety invariant). Best-effort: unreadable plists and I/O errors are skipped.
+pub fn enforce_log_caps() {
+    let default_cap = crate::config::load_global_config()
+        .logs
+        .max_mb
+        .saturating_mul(MB);
+    let agents_dir = crate::launchd::user_agents_dir();
+    let entries = match fs::read_dir(&agents_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let log_root = log_dir();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(crate::launchd::KAGAYA_PREFIX) || !name.ends_with(".plist") {
+            continue;
+        }
+        let path = entry.path();
+        let Some(info) = crate::plist_sync::read_plist_at(&path) else {
+            continue;
+        };
+        let cap = info
+            .working_dir
+            .as_ref()
+            .and_then(|d| fs::read_to_string(d.join("services.toml")).ok())
+            .and_then(|body| parse_log_max_mb(&body))
+            .map(|mb| mb.saturating_mul(MB))
+            .unwrap_or(default_cap);
+        for p in [info.stdout_path, info.stderr_path].into_iter().flatten() {
+            if p.starts_with(&log_root) {
+                let _ = bound_log_file(&p, cap);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
