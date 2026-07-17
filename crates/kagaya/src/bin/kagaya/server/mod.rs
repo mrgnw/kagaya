@@ -40,6 +40,18 @@ pub fn router() -> Router {
 pub async fn run() {
     let app = router();
     let port = crate::config::load_global_config().daemon.port;
+
+    // Bound per-service log growth (issue #6): launchd has no native rotation, so
+    // the daemon copytruncates oversized logs. `interval` fires once immediately,
+    // so this also trims on startup, then every 10 minutes.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+        loop {
+            tick.tick().await;
+            let _ = tokio::task::spawn_blocking(crate::logs::enforce_log_caps).await;
+        }
+    });
+
     // Listen on both loopback stacks (127.0.0.1 and ::1) so a local reverse
     // proxy reaches us whether it dials localhost via IPv4 or IPv6. Both are
     // loopback-only — never 0.0.0.0.

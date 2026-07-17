@@ -12,6 +12,8 @@ pub struct GlobalConfig {
     #[allow(dead_code)]
     pub daemon: DaemonConfig,
     #[serde(default)]
+    pub logs: LogsConfig,
+    #[serde(default)]
     pub defaults: DefaultsConfig,
 }
 
@@ -47,6 +49,25 @@ fn default_idle_timeout() -> u64 {
 }
 fn default_port() -> u16 {
     13369
+}
+
+/// `[logs]` in `~/.config/kagaya/config.toml`. `max_mb = 0` disables the cap.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogsConfig {
+    #[serde(default = "default_max_mb")]
+    pub max_mb: u64,
+}
+
+impl Default for LogsConfig {
+    fn default() -> Self {
+        Self {
+            max_mb: default_max_mb(),
+        }
+    }
+}
+
+fn default_max_mb() -> u64 {
+    100
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -494,6 +515,10 @@ pub fn load_service(entry: &ServiceEntry, defaults: &DefaultsConfig) -> Service 
     let processes = raw
         .into_iter()
         .filter_map(|(name, value)| {
+            // Reserved root-level knob, not a service (see logs::parse_log_max_mb).
+            if name == "log_max_mb" {
+                return None;
+            }
             warn_unsupported_keys("services.toml", &name, &value);
             let def: ServiceDef = match value.try_into() {
                 Ok(d) => d,
@@ -972,5 +997,59 @@ ready_timeout = 30
         assert!(proc.depends_on.is_empty());
         assert!(proc.ready.is_none());
         assert_eq!(proc.ready_timeout, 10);
+    }
+
+    // ── LogsConfig ───────────────────────────────────────────────────────
+
+    #[test]
+    fn logs_config_default_is_100mb() {
+        let cfg: GlobalConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.logs.max_mb, 100);
+    }
+
+    #[test]
+    fn logs_config_parses_max_mb() {
+        let cfg: GlobalConfig = toml::from_str("[logs]\nmax_mb = 5\n").unwrap();
+        assert_eq!(cfg.logs.max_mb, 5);
+    }
+
+    #[test]
+    fn logs_config_zero_disables() {
+        let cfg: GlobalConfig = toml::from_str("[logs]\nmax_mb = 0\n").unwrap();
+        assert_eq!(cfg.logs.max_mb, 0);
+    }
+
+    #[test]
+    fn logs_config_ignores_stale_keys() {
+        // Old schema keys must not break parsing of existing configs.
+        let cfg: GlobalConfig =
+            toml::from_str("[logs]\nmax_size_bytes = 999\nmax_age_days = 7\n").unwrap();
+        assert_eq!(cfg.logs.max_mb, 100);
+    }
+
+    #[test]
+    fn load_service_skips_reserved_log_max_mb_key() {
+        let dir = std::env::temp_dir().join("kagaya-test-logmaxmb");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("services.toml"),
+            "log_max_mb = 5\nweb = \"npm run dev\"\n",
+        )
+        .unwrap();
+
+        let entry = ServiceEntry {
+            name: "myapp".into(),
+            dir: dir.clone(),
+            inline_command: None,
+            autostart: false,
+            depends_on: vec![],
+            urls: vec![],
+        };
+        let svc = load_service(&entry, &test_defaults());
+        // `log_max_mb` is a knob, not a process.
+        assert_eq!(svc.processes.len(), 1);
+        assert_eq!(svc.processes[0].name, "web");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

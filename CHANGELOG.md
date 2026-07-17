@@ -31,6 +31,10 @@ Pre-release of the launchd API overhaul — published as a GitHub prerelease, so
 - **Unsupported-key warnings**: unknown keys in services.toml entries now warn loudly instead of being silently ignored.
 - `ky serve restart`; `ky serve` itself is now idempotent and reports `already running`.
 
+### Added
+
+- **Log rotation** (#6): launchd has no log rotation, so per-service logs grew unbounded (they reached 4.3 GB). kagaya now copytruncates any log stream that exceeds its cap — copying the recent tail to `<name>.log.1` and truncating the live file to zero (safe because launchd holds the fd with `O_APPEND`). Enforced on every `ky start`/`ky restart` and every 10 minutes while `ky serve` runs (which also trims existing oversized logs on startup). The cap defaults to **100 MB per stream**; set `[logs] max_mb` in `~/.config/kagaya/config.toml` (`0` disables), or `log_max_mb` at the root of a project's `services.toml`. `ky echo` and the web-UI tail survive rotation. Old `[logs]` keys (`max_size_bytes`, `max_age_days`, `max_files`) are now ignored.
+
 ### Fixed
 
 - `ky status --watch 10` parses (previously: `unknown service: 10`).

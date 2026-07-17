@@ -120,6 +120,25 @@ ky status --watch 10       # watch for 10 seconds
 ky start myapp -W          # skip the post-start watch
 ```
 
+### Log rotation
+
+launchd appends each process's stdout/stderr to one file forever, so a chatty service can fill the disk. kagaya bounds this: when a log passes its cap it copies the recent tail to `<name>.log.1` and truncates the live file to zero. It runs on every `ky start`/`ky restart` and every 10 minutes while the web server (`ky serve`) is running. `ky echo` and the web-UI tail keep streaming across a rotation.
+
+The cap defaults to **100 MB per log stream**. Override globally in `~/.config/kagaya/config.toml`:
+
+```toml
+[logs]
+max_mb = 250   # per stream; 0 disables rotation entirely
+```
+
+Or per project, at the root of its `services.toml`:
+
+```toml
+log_max_mb = 500
+
+web = "npm run dev"
+```
+
 ### Autostart
 
 ```sh
@@ -178,6 +197,9 @@ Unsupported keys warn loudly and are ignored — restart pacing is launchd's job
 [daemon]
 port = 13369                         # web UI port
 
+[logs]
+max_mb = 100                         # per log stream; 0 disables rotation
+
 [defaults]
 restart = true
 env = { FORCE_COLOR = "1", CLICOLOR_FORCE = "1" }
@@ -208,6 +230,7 @@ ln -s ~/.local/share/kagaya/completions/ky.fish ~/.config/fish/completions/
   every call under a hard 15s deadline
 - restarts of port-binding services are port-safe: stop, wait for release,
   refuse (or `--force`) foreign holders, start fresh
+- oversized logs are copytruncated to `<name>.log.1` (see [Log rotation](#log-rotation))
 - logs go to `~/.local/state/kagaya/logs/<service>[.<process>].log` (+ `.err.log`)
 - `ky serve` runs a local HTTP/WebSocket API + web UI (see [docs/api.md](docs/api.md))
 

@@ -766,6 +766,7 @@ pub fn start_services(
     proc_filters: &ProcessFilters,
     opts: StartOpts,
 ) -> Vec<OpResult> {
+    crate::logs::enforce_log_caps();
     names
         .iter()
         .map(|n| {
@@ -792,6 +793,7 @@ pub fn restart_services(
     proc_filters: &ProcessFilters,
     force: bool,
 ) -> Vec<OpResult> {
+    crate::logs::enforce_log_caps();
     names
         .iter()
         .map(|n| {
@@ -1420,8 +1422,15 @@ fn parse_service_ports(toml_body: &str, proc_opt: Option<&str>) -> Vec<u16> {
     };
     match proc_opt {
         Some(name) => table.get(name).map(read_ports).unwrap_or_default(),
-        None if table.len() == 1 => table.values().next().map(read_ports).unwrap_or_default(),
-        None => Vec::new(),
+        None => {
+            // The sole real service resolves even alongside the reserved
+            // `log_max_mb` knob; several real services stay ambiguous.
+            let mut services = table.iter().filter(|(k, _)| k.as_str() != "log_max_mb");
+            match (services.next(), services.next()) {
+                (Some((_, v)), None) => read_ports(v),
+                _ => Vec::new(),
+            }
+        }
     }
 }
 
@@ -1540,6 +1549,16 @@ mod tests {
     fn service_ports_missing_process_is_empty() {
         let body = "[api]\nrun = \"a\"\nports = [8080]\n";
         assert_eq!(parse_service_ports(body, Some("worker")), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn service_ports_ignores_log_max_mb_when_collapsing() {
+        // A single-service file plus the reserved knob still resolves proc=None.
+        let body = "log_max_mb = 50\n[api]\nrun = \"python s.py\"\nports = [8080]\n";
+        assert_eq!(parse_service_ports(body, None), vec![8080]);
+        // Two real services remain ambiguous even with the knob present.
+        let body = "log_max_mb = 50\n[api]\nrun = \"a\"\nports = [8080]\n[web]\nrun = \"b\"\nports = [3000]\n";
+        assert_eq!(parse_service_ports(body, None), Vec::<u16>::new());
     }
 
     #[test]
