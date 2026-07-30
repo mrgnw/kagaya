@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ky autostart <svc> on|off` is durable.** It edited only the launchd plist and left `projects.toml` alone. Since the plist's `RunAtLoad` is compiled from the config's `autostart`, the next `ky start` or `ky restart` silently reverted the change — a plain reboot honoured it, so the setting looked like it had worked. `ky autostart` now writes `projects.toml` first, then the plist. A simple entry (`name = "~/dir"`) has nowhere to hold the key, so it is promoted to table form, appended at the end of the file; every other line keeps its formatting, comments and order.
+
 ## [0.15.0-alpha.3] - 2026-07-30
 
 Prerelease, like alpha.1 and alpha.2 — `releases/latest` stays on 0.14.1, so the
