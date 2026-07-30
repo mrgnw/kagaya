@@ -1320,6 +1320,17 @@ fn start_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> 
         return Ok("started");
     }
     bootstrap(path)?;
+    // `bootstrap` only *runs* the job when RunAtLoad is set; with autostart off
+    // it loads it idle. Reporting "started" then would be a lie, and any
+    // dependent waiting on this unit would block until its ready_timeout.
+    //
+    // Decided by the plist rather than by `!is_running_label`: launchd takes
+    // ~250ms to spawn, so a RunAtLoad job still reads "not running" right here
+    // and `kickstart -k` would kill the instance it just spawned and run a
+    // task twice.
+    if !read_plist_at(path).is_some_and(|i| i.run_at_load) {
+        kickstart_label(label)?;
+    }
     Ok("started")
 }
 

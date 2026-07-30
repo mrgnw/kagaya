@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ky restart` honours `depends_on`.** The restart path walked the topo-ordered units and restarted each back to back with no readiness barrier, so dependencies and dependents restarted concurrently. A service whose process depended on a `type = "task"` build could come back up against a half-written build directory and stay broken until restarted a second time.
+- **A `type = "task"` no longer reads ready before launchd has spawned it.** Readiness was `!is_running_label(label)`, true both when a task had finished and when it had not started yet; launchd takes ~250ms to spawn after `kickstart`, well under the 500ms readiness poll. Readiness now tracks launchd's `runs` counter from a baseline captured before the unit is kicked, tolerating both counter jumps greater than one and the reset to 0 across `bootout`/`bootstrap`. This affected `ky start` too, where it was masked by `RunAtLoad` usually spawning the task in time.
+- **`ky start` no longer reports "started" without starting anything.** With autostart off, `bootstrap` loads a job idle rather than running it, so `ky start` on such a service reported success while starting nothing — and any dependent waiting on it blocked until its `ready_timeout`.
+
 ## [0.15.0-alpha.2] - 2026-07-09
 
 ### Removed
