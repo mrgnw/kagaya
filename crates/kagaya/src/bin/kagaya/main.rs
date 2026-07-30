@@ -613,23 +613,23 @@ fn cmd_remove(args: &[String]) {
     let config_dir = utils::config_dir();
     let projects_file = config_dir.join("projects.toml");
 
-    let content = match std::fs::read_to_string(&projects_file) {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("no projects.toml found");
-            std::process::exit(1);
-        }
-    };
+    let content = std::fs::read_to_string(&projects_file).ok();
+    let new_content = content
+        .as_deref()
+        .and_then(|c| remove_project_entry(c, &name));
 
-    let new_content = match remove_project_entry(&content, &name) {
-        Some(c) => c,
-        None => {
+    match plan_remove(new_content.is_some(), plist_sync::plist_exists(&name)) {
+        RemovePlan::NotFound => {
             eprintln!("{}: not found in projects.toml", name);
             std::process::exit(1);
         }
-    };
-
-    std::fs::write(&projects_file, new_content).unwrap();
+        RemovePlan::OrphanPlist => {
+            eprintln!("{}: no config entry — removing orphaned plist", name);
+        }
+        RemovePlan::ConfigEntry => {
+            std::fs::write(&projects_file, new_content.unwrap()).unwrap();
+        }
+    }
 
     // Clean up _commands/ dir for standalone commands
     let commands_dir = config_dir.join("_commands").join(&name);
@@ -642,6 +642,21 @@ fn cmd_remove(args: &[String]) {
     }
 
     eprintln!("{}: removed", name);
+}
+
+#[derive(Debug, PartialEq)]
+enum RemovePlan {
+    ConfigEntry,
+    OrphanPlist,
+    NotFound,
+}
+
+fn plan_remove(has_config_entry: bool, has_plist: bool) -> RemovePlan {
+    match (has_config_entry, has_plist) {
+        (true, _) => RemovePlan::ConfigEntry,
+        (false, true) => RemovePlan::OrphanPlist,
+        (false, false) => RemovePlan::NotFound,
+    }
 }
 
 /// Remove a project entry from projects.toml content, preserving formatting.
@@ -3792,6 +3807,24 @@ mod tests {
             ],
         );
         assert_eq!(aggregate_state(&svc), AggregateState::Degraded);
+    }
+
+    // ── plan_remove tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn plan_remove_config_entry() {
+        assert_eq!(plan_remove(true, true), RemovePlan::ConfigEntry);
+        assert_eq!(plan_remove(true, false), RemovePlan::ConfigEntry);
+    }
+
+    #[test]
+    fn plan_remove_orphaned_plist() {
+        assert_eq!(plan_remove(false, true), RemovePlan::OrphanPlist);
+    }
+
+    #[test]
+    fn plan_remove_unknown_name() {
+        assert_eq!(plan_remove(false, false), RemovePlan::NotFound);
     }
 
     // ── remove_project_entry tests ───────────────────────────────────────────

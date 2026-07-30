@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`ky autostart <svc> on|off` is durable.** It edited only the launchd plist and left `projects.toml` alone. Since the plist's `RunAtLoad` is compiled from the config's `autostart`, the next `ky start` or `ky restart` silently reverted the change — a plain reboot honoured it, so the setting looked like it had worked. `ky autostart` now writes `projects.toml` first, then the plist. A simple entry (`name = "~/dir"`) has nowhere to hold the key, so it is promoted to table form, appended at the end of the file; every other line keeps its formatting, comments and order.
+- **`ky remove <name>` can now clean up an orphaned plist.** A `com.kagaya.<name>.plist` with no matching `projects.toml` entry was unreachable from the CLI: `ky status` enumerates `projects.toml` so it never listed the job, and `ky remove` exited 1 with `<name>: not found in projects.toml` before ever reaching plist cleanup. A crash-looping orphan could respawn indefinitely with no `ky` command able to stop it. `ky remove` now boots out and deletes the plists — including every per-process `com.kagaya.<name>.<proc>.plist` — reports the name as an orphan, and exits 0. A name with neither a config entry nor a plist is still an error and still exits 1.
 
 ## [0.15.0-alpha.3] - 2026-07-30
 
