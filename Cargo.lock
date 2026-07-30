@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "kagaya"
-version = "0.15.0-alpha.3"
+version = "0.15.0-alpha.4"
 dependencies = [
  "axum",
  "clap",
