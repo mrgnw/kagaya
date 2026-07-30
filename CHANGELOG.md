@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ky remove <name>` can now clean up an orphaned plist.** A `com.kagaya.<name>.plist` with no matching `projects.toml` entry was unreachable from the CLI: `ky status` enumerates `projects.toml` so it never listed the job, and `ky remove` exited 1 with `<name>: not found in projects.toml` before ever reaching plist cleanup. A crash-looping orphan could respawn indefinitely with no `ky` command able to stop it. `ky remove` now boots out and deletes the plists — including every per-process `com.kagaya.<name>.<proc>.plist` — reports the name as an orphan, and exits 0. A name with neither a config entry nor a plist is still an error and still exits 1.
+
 ## [0.15.0-alpha.3] - 2026-07-30
 
 Prerelease, like alpha.1 and alpha.2 — `releases/latest` stays on 0.14.1, so the
