@@ -189,7 +189,7 @@ autostart=off    after     ok both skipped        +1.30
   plan predicted: `RunAtLoad` spawns the task fast enough that the old
   `!is_running_label` check usually caught it mid-run.
 
-### Follow-up found while testing (NOT fixed here, separate defect)
+### Third defect found while testing — also fixed (`146d100`)
 
 `start_one_label` (`plist_sync.rs`) bootstraps and reports `"started"` without
 kickstarting:
@@ -200,7 +200,28 @@ Ok("started")
 ```
 
 With `RunAtLoad = false` the job loads idle and never runs, so `ky start` on an
-autostart-off service reports success while starting nothing. `restart_one_label`
-already guards this (`bootstrap(path)?; if !is_running_label(label) { kickstart_label(label)?; }`).
-This is why the `autostart=off` rows above show the task never running. Out of
-scope for this todo; worth its own fix.
+autostart-off service reports success while starting nothing, and any dependent
+waiting on that unit blocks until its `ready_timeout`. This is why the
+`autostart=off` rows above show the task never running.
+
+Fixed by kickstarting when the plist's `RunAtLoad` is false. Deliberately *not*
+done the way `restart_one_label` does it
+(`bootstrap(path)?; if !is_running_label(label) { kickstart_label(label)?; }`):
+the Step 0 measurement shows launchd takes ~250ms to spawn, so a RunAtLoad job
+still reads "not running" at that point and `kickstart -k` would kill the
+instance it had just spawned — running a `type = "task"` twice.
+
+Re-measured after the fix, with both binaries carrying the `depends_on` fix so
+the run isolates this change:
+
+```
+                                ky start     ky restart
+autostart=on     before            +0.22          +1.28
+autostart=on     after             +0.75          +0.77
+autostart=off    before   ok both skipped         +0.43
+autostart=off    after             +5.44          +0.71
+```
+
+`autostart=off` / `ky start` goes from "task never ran, dependent correctly
+withheld" to the dependent starting 5.44s after the task finishes — the barrier
+now has a task that actually runs to wait on.
