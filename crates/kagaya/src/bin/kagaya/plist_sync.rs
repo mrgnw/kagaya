@@ -1,12 +1,104 @@
 use crate::config::ServiceEntry;
-use crate::launchd::{get_uid, parse_launchctl_list, user_agents_dir, KAGAYA_PREFIX};
 use crate::logs::log_dir;
 use crate::utils::listening_ports_for_pids;
-use kagaya::types::{ProcessState, ProcessStatus, ServiceStatus, ServiceType};
+use kagaya::types::{ProcessDef, ProcessState, ProcessStatus, ServiceStatus, ServiceType};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+pub(crate) const KAGAYA_PREFIX: &str = "com.kagaya.";
+
+pub(crate) fn get_uid() -> u32 {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(501)
+}
+
+pub(crate) fn user_agents_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join("Library").join("LaunchAgents")
+}
+
+const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Run launchctl with a hard deadline. launchd can park a call indefinitely
+/// (e.g. kickstart on a throttled job); ky must never inherit that hang.
+pub(crate) fn run_launchctl(args: &[&str]) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = Command::new("launchctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("launchctl: {}", e))?;
+
+    let mut stdout_pipe = child.stdout.take().expect("piped stdout");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + LAUNCHCTL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "launchctl {} timed out after {}s",
+                        args.first().copied().unwrap_or(""),
+                        LAUNCHCTL_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("launchctl: {}", e)),
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
+/// Parse `launchctl list` into label -> (pid, last exit code).
+fn parse_launchctl_list() -> BTreeMap<String, (Option<u32>, Option<i32>)> {
+    let mut map = BTreeMap::new();
+    let output = match run_launchctl(&["list"]) {
+        Ok(o) => o,
+        Err(_) => return map,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().skip(1) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let pid = parts[0].trim().parse::<u32>().ok();
+        let exit_code = parts[1].trim().parse::<i32>().ok();
+        let label = parts[2].trim().to_string();
+        map.insert(label, (pid, exit_code));
+    }
+    map
+}
 
 // ── Labels + paths ────────────────────────────────────────────────────────────
 //
@@ -253,7 +345,10 @@ fn build_plist_value(svc: &ServiceEntry, spec: &ProcessSpec) -> plist::Value {
         let mut ka = plist::Dictionary::new();
         ka.insert("SuccessfulExit".into(), plist::Value::Boolean(false));
         dict.insert("KeepAlive".into(), plist::Value::Dictionary(ka));
-        dict.insert("ThrottleInterval".into(), plist::Value::Integer(30.into()));
+        // Keep this short: launchd blocks kickstart/respawn for the full
+        // throttle window after a kill, which is also what a deliberate
+        // `ky restart` looks like. 5s still damps crash loops.
+        dict.insert("ThrottleInterval".into(), plist::Value::Integer(5.into()));
     }
     dict.insert("RunAtLoad".into(), plist::Value::Boolean(svc.autostart));
     dict.insert(
@@ -287,29 +382,50 @@ fn build_plist_value(svc: &ServiceEntry, spec: &ProcessSpec) -> plist::Value {
 // ── launchctl primitives ──────────────────────────────────────────────────────
 
 pub fn is_loaded_label(label: &str) -> bool {
-    Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
-        .output()
+    run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)])
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-pub fn is_running_label(label: &str) -> bool {
-    let out = Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            text.lines().any(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("pid = ")
-                    && !trimmed.starts_with("pid = 0")
-                    && !trimmed.contains("(none)")
-            })
-        }
-        _ => false,
+/// What `launchctl print` says about a label right now: launchd's lifetime
+/// spawn counter, and whether an instance is live.
+///
+/// `runs` is None when the job is not loaded (or the field is absent), which is
+/// distinct from `Some(0)` — "loaded but never spawned".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TaskRunState {
+    runs: Option<u64>,
+    running: bool,
+}
+
+/// Pull `runs = N` and a live `pid = N` out of a `launchctl print` block.
+fn parse_task_run_state(text: &str) -> TaskRunState {
+    TaskRunState {
+        runs: text.lines().find_map(|line| {
+            line.trim_start()
+                .strip_prefix("runs = ")?
+                .trim()
+                .parse()
+                .ok()
+        }),
+        running: text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("pid = ")
+                && !trimmed.starts_with("pid = 0")
+                && !trimmed.contains("(none)")
+        }),
     }
+}
+
+fn task_run_state(label: &str) -> TaskRunState {
+    match run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)]) {
+        Ok(o) if o.status.success() => parse_task_run_state(&String::from_utf8_lossy(&o.stdout)),
+        _ => TaskRunState::default(),
+    }
+}
+
+pub fn is_running_label(label: &str) -> bool {
+    task_run_state(label).running
 }
 
 pub fn is_loaded(project: &str) -> bool {
@@ -318,17 +434,11 @@ pub fn is_loaded(project: &str) -> bool {
 
 pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
     let target = format!("gui/{}", get_uid());
-    let out = Command::new("launchctl")
-        .args(["bootstrap", &target, &path.to_string_lossy()])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_launchctl(&["bootstrap", &target, &path.to_string_lossy()])?;
     if out.status.success() {
         return Ok(());
     }
-    let legacy = Command::new("launchctl")
-        .args(["load", &path.to_string_lossy()])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let legacy = run_launchctl(&["load", &path.to_string_lossy()])?;
     if legacy.status.success() {
         return Ok(());
     }
@@ -337,10 +447,7 @@ pub fn bootstrap(path: &PathBuf) -> Result<(), String> {
 
 fn bootout_label(label: &str, fallback_plist: Option<&PathBuf>) -> Result<(), String> {
     let target = format!("gui/{}/{}", get_uid(), label);
-    let out = Command::new("launchctl")
-        .args(["bootout", &target])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_launchctl(&["bootout", &target])?;
     if out.status.success() {
         return Ok(());
     }
@@ -349,10 +456,7 @@ fn bootout_label(label: &str, fallback_plist: Option<&PathBuf>) -> Result<(), St
         return Ok(());
     }
     if let Some(p) = fallback_plist {
-        let legacy = Command::new("launchctl")
-            .args(["unload", &p.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let legacy = run_launchctl(&["unload", &p.to_string_lossy()])?;
         if legacy.status.success() {
             return Ok(());
         }
@@ -667,22 +771,35 @@ pub fn query_all(services: &BTreeMap<String, ServiceEntry>) -> Vec<ServiceStatus
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
 pub struct OpResult {
-    pub name: String,
     pub ok: bool,
     pub message: String,
 }
 
 pub type ProcessFilters = BTreeMap<String, Vec<String>>;
 
-pub fn start_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+#[derive(Clone, Copy, Default)]
+pub struct StartOpts {
+    /// Block until every started process is ready before returning.
+    pub wait: bool,
+    /// Kill foreign processes holding configured ports before starting.
+    pub force: bool,
+}
+
+pub fn start_services(
+    entries: &BTreeMap<String, ServiceEntry>,
+    names: &[String],
+    proc_filters: &ProcessFilters,
+    opts: StartOpts,
+) -> Vec<OpResult> {
     crate::logs::enforce_log_caps();
     names
         .iter()
         .map(|n| {
-            fan_op(
+            start_one_service(
+                entries,
                 n,
-                Op::Start,
                 proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+                opts,
             )
         })
         .collect()
@@ -691,70 +808,280 @@ pub fn start_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<Op
 pub fn stop_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
     names
         .iter()
-        .map(|n| {
-            fan_op(
-                n,
-                Op::Stop,
-                proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
-            )
-        })
+        .map(|n| stop_one_service(n, proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[])))
         .collect()
 }
 
-pub fn restart_services(names: &[String], proc_filters: &ProcessFilters) -> Vec<OpResult> {
+pub fn restart_services(
+    entries: &BTreeMap<String, ServiceEntry>,
+    names: &[String],
+    proc_filters: &ProcessFilters,
+    force: bool,
+) -> Vec<OpResult> {
     crate::logs::enforce_log_caps();
     names
         .iter()
         .map(|n| {
-            fan_op(
+            restart_one_service(
+                entries,
                 n,
-                Op::Restart,
                 proc_filters.get(n).map(Vec::as_slice).unwrap_or(&[]),
+                force,
             )
         })
         .collect()
 }
 
-#[derive(Clone, Copy)]
-enum Op {
-    Start,
-    Stop,
-    Restart,
+/// One startable unit of a service: a plist, plus its config definition when
+/// services.toml has one (auto-detected projects have plists but no defs).
+struct Unit {
+    proc_name: Option<String>,
+    path: PathBuf,
+    def: Option<ProcessDef>,
 }
 
-fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
+impl Unit {
+    fn display(&self, project: &str) -> String {
+        self.proc_name
+            .clone()
+            .unwrap_or_else(|| project.to_string())
+    }
+}
+
+/// Re-sync plists from config, then resolve the requested units in
+/// depends_on order (dependencies are pulled in transitively).
+fn prepare_units(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+) -> Result<Vec<Unit>, String> {
+    // Sync so edits to services.toml/projects.toml take effect on start —
+    // plists are a compiled cache of the config, never the source of truth.
+    if let Some(entry) = entries.get(project) {
+        sync_service(entry).map_err(|e| format!("{}: {}", project, e))?;
+    }
+
+    let plists = plist_paths_for_project(project);
+    if plists.is_empty() {
+        return Err(format!(
+            "no plist for '{}'. run `ky add {}` first",
+            project, project
+        ));
+    }
+
+    let defs = entries.get(project).map_or_else(Vec::new, |e| {
+        crate::config::load_service(e, &crate::config::load_global_config().defaults).processes
+    });
+
+    // Single-plist service: one unit, its def is the only one (if any).
+    if plists.len() == 1 && plists[0].0.is_none() {
+        let (proc_name, path) = plists.into_iter().next().unwrap();
+        return Ok(vec![Unit {
+            proc_name,
+            path,
+            def: defs.into_iter().next(),
+        }]);
+    }
+
+    let requested: Vec<&str> = if proc_filter.is_empty() {
+        plists.iter().filter_map(|(p, _)| p.as_deref()).collect()
+    } else {
+        let known: HashSet<&str> = plists.iter().filter_map(|(p, _)| p.as_deref()).collect();
+        let missing: Vec<&String> = proc_filter
+            .iter()
+            .filter(|p| !known.contains(p.as_str()))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{}: process target not found: {}",
+                project,
+                proc_filter.join(", ")
+            ));
+        }
+        proc_filter.iter().map(|s| s.as_str()).collect()
+    };
+
+    // depends_on order; requested processes pull their dependencies in.
+    let ordered: Vec<String> = if defs.is_empty() {
+        requested.iter().map(|s| s.to_string()).collect()
+    } else {
+        kagaya::toposort_processes(&defs, &requested).map_err(|e| format!("{}: {}", project, e))?
+    };
+
+    let mut by_name: HashMap<String, PathBuf> = plists
+        .into_iter()
+        .filter_map(|(p, path)| p.map(|n| (n, path)))
+        .collect();
+    let mut def_by_name: HashMap<String, ProcessDef> =
+        defs.into_iter().map(|d| (d.name.clone(), d)).collect();
+
+    Ok(ordered
+        .into_iter()
+        .filter_map(|name| {
+            by_name.remove(&name).map(|path| Unit {
+                def: def_by_name.remove(&name),
+                proc_name: Some(name),
+                path,
+            })
+        })
+        .collect())
+}
+
+/// Per-label `runs`/pid state captured immediately before we start or restart
+/// a task, so readiness can mean "finished *this* invocation" rather than
+/// "no process right now". Only tasks are recorded; nothing else consults it.
+type TaskBaselines = HashMap<String, TaskRunState>;
+
+/// Snapshot a task's counter before we kick it. Non-tasks are skipped so a
+/// service without dependencies pays no extra `launchctl print`.
+fn record_task_baseline(unit: &Unit, label: &str, baselines: &mut TaskBaselines) {
+    let is_task = unit
+        .def
+        .as_ref()
+        .is_some_and(|d| d.service_type == ServiceType::Task);
+    if is_task {
+        baselines.insert(label.to_string(), task_run_state(label));
+    }
+}
+
+/// Readiness barrier shared by start and restart: every `depends_on` entry of
+/// `unit` must be ready before `unit` itself is touched.
+///
+/// Returns one message per unready dependency; empty means the caller may
+/// proceed. Dependencies already confirmed ready this pass are not re-waited,
+/// and a dependency with no plist of its own is not something we can wait on.
+fn wait_for_deps(
+    entry: &ServiceEntry,
+    project: &str,
+    unit: &Unit,
+    units: &[Unit],
+    baselines: &TaskBaselines,
+    ready_done: &mut HashSet<String>,
+) -> Vec<String> {
+    let Some(def) = &unit.def else {
+        return Vec::new();
+    };
+    let mut unready = Vec::new();
+    for dep in &def.depends_on {
+        if ready_done.contains(dep.as_str()) {
+            continue;
+        }
+        let dep_unit = units
+            .iter()
+            .find(|u| u.proc_name.as_deref() == Some(dep.as_str()));
+        let Some(dep_unit) = dep_unit else { continue };
+        let dep_label = label_for(project, dep_unit.proc_name.as_deref());
+        let baseline = baselines.get(&dep_label).copied().unwrap_or_default();
+        match wait_unit_ready(entry, dep_unit, &dep_label, baseline) {
+            Ok(()) => {
+                ready_done.insert(dep.clone());
+            }
+            Err(e) => unready.push(format!(
+                "{}: skipped — {} {}",
+                unit.display(project),
+                dep,
+                e
+            )),
+        }
+    }
+    unready
+}
+
+fn start_one_service(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+    opts: StartOpts,
+) -> OpResult {
+    let units = match prepare_units(entries, project, proc_filter) {
+        Ok(u) => u,
+        Err(message) => return OpResult { ok: false, message },
+    };
+    let entry = entries.get(project);
+
+    let mut messages = Vec::new();
+    let mut any_err = false;
+    let mut ready_done: HashSet<String> = HashSet::new();
+    let mut baselines: TaskBaselines = HashMap::new();
+
+    for unit in &units {
+        let label = label_for(project, unit.proc_name.as_deref());
+
+        let mut deps_ready = true;
+        if let Some(entry) = entry {
+            let unready = wait_for_deps(entry, project, unit, &units, &baselines, &mut ready_done);
+            if !unready.is_empty() {
+                deps_ready = false;
+                any_err = true;
+                messages.extend(unready);
+            }
+        }
+        if let (Some(def), true) = (&unit.def, opts.force) {
+            if !def.ports.is_empty() {
+                messages.extend(force_free_ports(&label, &def.ports));
+            }
+        }
+        if !deps_ready {
+            continue;
+        }
+
+        record_task_baseline(unit, &label, &mut baselines);
+        match start_one_label(&label, &unit.path) {
+            Ok(verb) => messages.push(format!("{}: {}", unit.display(project), verb)),
+            Err(e) => {
+                any_err = true;
+                messages.push(format!("{}: {}", unit.display(project), e));
+            }
+        }
+    }
+
+    if opts.wait {
+        if let Some(entry) = entry {
+            for unit in &units {
+                let name = unit.display(project);
+                if unit
+                    .proc_name
+                    .as_deref()
+                    .is_some_and(|n| ready_done.contains(n))
+                {
+                    continue;
+                }
+                let label = label_for(project, unit.proc_name.as_deref());
+                let baseline = baselines.get(&label).copied().unwrap_or_default();
+                if let Err(e) = wait_unit_ready(entry, unit, &label, baseline) {
+                    any_err = true;
+                    messages.push(format!("{}: {}", name, e));
+                } else {
+                    messages.push(format!("{}: ready", name));
+                }
+            }
+        }
+    }
+
+    OpResult {
+        ok: !any_err,
+        message: messages.join("\n"),
+    }
+}
+
+fn stop_one_service(project: &str, proc_filter: &[String]) -> OpResult {
     let plists = plist_paths_for_project(project);
     if plists.is_empty() {
         return OpResult {
-            name: project.to_string(),
             ok: false,
             message: format!("no plist for '{}'. run `ky add {}` first", project, project),
         };
     }
     let plists = match filtered_project_plists(project, plists, proc_filter) {
         Ok(plists) => plists,
-        Err(message) => {
-            return OpResult {
-                name: project.to_string(),
-                ok: false,
-                message,
-            };
-        }
+        Err(message) => return OpResult { ok: false, message },
     };
     let mut messages = Vec::new();
     let mut any_err = false;
     for (proc_opt, path) in plists {
         let label = label_for(project, proc_opt.as_deref());
         let display = proc_opt.clone().unwrap_or_else(|| project.to_string());
-        let result = match op {
-            Op::Start => start_one_label(&label, &path),
-            Op::Stop => stop_one_label(&label, &path),
-            Op::Restart => {
-                let expected = expected_ports_for(&path, proc_opt.as_deref());
-                restart_one_label(&label, &path, &expected)
-            }
-        };
-        match result {
+        match stop_one_label(&label, &path) {
             Ok(verb) => messages.push(format!("{}: {}", display, verb)),
             Err(e) => {
                 any_err = true;
@@ -763,10 +1090,196 @@ fn fan_op(project: &str, op: Op, proc_filter: &[String]) -> OpResult {
         }
     }
     OpResult {
-        name: project.to_string(),
         ok: !any_err,
         message: messages.join("\n"),
     }
+}
+
+fn restart_one_service(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+    force: bool,
+) -> OpResult {
+    let units = match prepare_units(entries, project, proc_filter) {
+        Ok(u) => u,
+        Err(message) => return OpResult { ok: false, message },
+    };
+
+    let entry = entries.get(project);
+
+    let mut messages = Vec::new();
+    let mut any_err = false;
+    let mut ready_done: HashSet<String> = HashSet::new();
+    let mut baselines: TaskBaselines = HashMap::new();
+
+    for unit in &units {
+        let label = label_for(project, unit.proc_name.as_deref());
+
+        // Same barrier as the start path: units are topo-ordered, so a
+        // dependency was restarted on an earlier iteration and must be ready
+        // before its dependent is torn down and brought back.
+        if let Some(entry) = entry {
+            let unready = wait_for_deps(entry, project, unit, &units, &baselines, &mut ready_done);
+            if !unready.is_empty() {
+                any_err = true;
+                messages.extend(unready);
+                continue;
+            }
+        }
+
+        let expected = unit
+            .def
+            .as_ref()
+            .map(|d| d.ports.clone())
+            .unwrap_or_else(|| expected_ports_for(&unit.path, unit.proc_name.as_deref()));
+        record_task_baseline(unit, &label, &mut baselines);
+        match restart_one_label(&label, &unit.path, &expected, force) {
+            Ok(verb) => messages.push(format!("{}: {}", unit.display(project), verb)),
+            Err(e) => {
+                any_err = true;
+                messages.push(format!("{}: {}", unit.display(project), e));
+            }
+        }
+    }
+    OpResult {
+        ok: !any_err,
+        message: messages.join("\n"),
+    }
+}
+
+// ── Readiness ─────────────────────────────────────────────────────────────────
+
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Has this task finished an invocation since `baseline` was captured?
+///
+/// "Not running" alone is not enough: launchd takes ~250ms to spawn a job after
+/// `kickstart`, well under `READY_POLL_INTERVAL`, so a just-kicked task reads
+/// "not running" simply because it has not started yet. The `runs` counter
+/// distinguishes the two, with two tolerances measured on macOS 25.5:
+///
+/// - `runs` can jump by more than one between samples (observed 1 -> 3), so
+///   only the direction of travel is meaningful, never the delta.
+/// - `bootout` + `bootstrap` resets it to 0 (observed 3 -> 0), and
+///   `restart_one_label` does exactly that for port-holding units. A count
+///   *below* the baseline is therefore a fresh epoch we created, in which any
+///   run at all is ours.
+///
+/// A task already running when the baseline was taken needs no counter at all:
+/// it has completed once it is no longer running.
+fn task_completed_since(baseline: TaskRunState, now: TaskRunState) -> bool {
+    if now.running {
+        return false;
+    }
+    if baseline.running {
+        return true;
+    }
+    match (baseline.runs, now.runs) {
+        (_, None) => false,
+        (Some(base), Some(n)) if n < base => n >= 1,
+        (Some(base), Some(n)) => n > base,
+        (None, Some(n)) => n >= 1,
+    }
+}
+
+/// Wait (bounded by ready_timeout) until a unit is ready:
+/// `ready` command exit 0 > all `ports` listening > task finished > running.
+fn wait_unit_ready(
+    entry: &ServiceEntry,
+    unit: &Unit,
+    label: &str,
+    task_baseline: TaskRunState,
+) -> Result<(), String> {
+    let timeout = unit
+        .def
+        .as_ref()
+        .map(|d| d.ready_timeout)
+        .unwrap_or(10)
+        .max(1);
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    loop {
+        if unit_ready(entry, unit, label, task_baseline) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("not ready after {}s", timeout));
+        }
+        std::thread::sleep(READY_POLL_INTERVAL);
+    }
+}
+
+fn unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str, task_baseline: TaskRunState) -> bool {
+    let Some(def) = &unit.def else {
+        return is_running_label(label);
+    };
+    if let Some(cmd) = &def.ready {
+        return Command::new("/bin/sh")
+            .args(["-c", cmd])
+            .current_dir(&entry.dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    if !def.ports.is_empty() {
+        return ports_in_use(&def.ports).len() == def.ports.len();
+    }
+    if def.service_type == ServiceType::Task {
+        // ponytail: done when this invocation has finished; exit code not checked
+        return task_completed_since(task_baseline, task_run_state(label));
+    }
+    is_running_label(label)
+}
+
+/// Public readiness barrier for chain sequencing (`ky start db..api`).
+pub fn wait_service_ready(
+    entries: &BTreeMap<String, ServiceEntry>,
+    project: &str,
+    proc_filter: &[String],
+) -> Result<(), String> {
+    let entry = entries
+        .get(project)
+        .ok_or_else(|| format!("unknown service: {}", project))?;
+    let units = prepare_units(entries, project, proc_filter)?;
+    for unit in &units {
+        let label = label_for(project, unit.proc_name.as_deref());
+        // No baseline: this barrier observes units someone else started, so
+        // "has ever completed a run" is the strongest claim available.
+        wait_unit_ready(entry, unit, &label, TaskRunState::default())
+            .map_err(|e| format!("{}: {}", unit.display(project), e))?;
+    }
+    Ok(())
+}
+
+/// Kill foreign processes listening on `ports` (bounded SIGTERM → SIGKILL).
+fn force_free_ports(our_label: &str, ports: &[u16]) -> Vec<String> {
+    let ours = pid_for_label(our_label);
+    let holders: Vec<PortHolder> = tcp_listener_holders(ports)
+        .into_iter()
+        .filter(|h| Some(h.pid) != ours)
+        .collect();
+    if holders.is_empty() {
+        return Vec::new();
+    }
+    let mut messages = Vec::new();
+    for h in &holders {
+        let _ = Command::new("kill").arg(h.pid.to_string()).output();
+        messages.push(format!(
+            "killed pid {} ({}) holding port {}",
+            h.pid, h.name, h.port
+        ));
+    }
+    let held: Vec<u16> = holders.iter().map(|h| h.port).collect();
+    let survivors = wait_for_ports_free(&held, Duration::from_secs(3));
+    for h in holders.iter().filter(|h| survivors.contains(&h.port)) {
+        let _ = Command::new("kill")
+            .args(["-9", &h.pid.to_string()])
+            .output();
+    }
+    wait_for_ports_free(&survivors, Duration::from_secs(2));
+    messages
 }
 
 fn filtered_project_plists(
@@ -807,6 +1320,17 @@ fn start_one_label(label: &str, path: &PathBuf) -> Result<&'static str, String> 
         return Ok("started");
     }
     bootstrap(path)?;
+    // `bootstrap` only *runs* the job when RunAtLoad is set; with autostart off
+    // it loads it idle. Reporting "started" then would be a lie, and any
+    // dependent waiting on this unit would block until its ready_timeout.
+    //
+    // Decided by the plist rather than by `!is_running_label`: launchd takes
+    // ~250ms to spawn, so a RunAtLoad job still reads "not running" right here
+    // and `kickstart -k` would kill the instance it just spawned and run a
+    // task twice.
+    if !read_plist_at(path).is_some_and(|i| i.run_at_load) {
+        kickstart_label(label)?;
+    }
     Ok("started")
 }
 
@@ -827,6 +1351,7 @@ fn restart_one_label(
     label: &str,
     path: &PathBuf,
     expected_ports: &[u16],
+    force: bool,
 ) -> Result<&'static str, String> {
     let old_pid = pid_for_label(label);
     let owned: Vec<u16> = old_pid.map(runtime_ports_for_pid).unwrap_or_default();
@@ -854,10 +1379,13 @@ fn restart_one_label(
 
     // Our instance is stopped, so anything still bound on a guarded port is a
     // foreign process (or a stubborn orphan). Report it instead of bootstrapping
-    // into a crash loop.
+    // into a crash loop — unless --force, which kills the holders.
     let blockers = tcp_listener_holders(&guard);
     if !blockers.is_empty() {
-        return Err(format_port_conflict(label, &blockers));
+        if !force {
+            return Err(format_port_conflict(label, &blockers));
+        }
+        force_free_ports(label, &guard);
     }
 
     // Start fresh. bootstrap honours RunAtLoad; when autostart is off the job
@@ -882,10 +1410,9 @@ fn restart_native(label: &str, path: &PathBuf) -> Result<&'static str, String> {
 
 fn kickstart_label(label: &str) -> Result<(), String> {
     let target = format!("gui/{}/{}", get_uid(), label);
-    let out = Command::new("launchctl")
-        .args(["kickstart", "-kp", &target])
-        .output()
-        .map_err(|e| e.to_string())?;
+    // No -p (print pid): it blocks until launchd actually spawns the job,
+    // which stalls for the ThrottleInterval after a recent kill.
+    let out = run_launchctl(&["kickstart", "-k", &target])?;
     if out.status.success() {
         return Ok(());
     }
@@ -910,10 +1437,7 @@ pub struct PortHolder {
 
 /// The pid of the running instance behind `label`, if any.
 fn pid_for_label(label: &str) -> Option<u32> {
-    let out = Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", get_uid(), label)])
-        .output()
-        .ok()?;
+    let out = run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)]).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1064,7 +1588,8 @@ fn expected_ports_for(path: &PathBuf, proc_opt: Option<&str>) -> Vec<u16> {
 mod tests {
     use super::{
         filtered_project_plists, format_port_conflict, parse_etime, parse_service_ports,
-        tcp_listener_holders, wait_for_ports_free, PortHolder,
+        parse_task_run_state, task_completed_since, tcp_listener_holders, wait_for_ports_free,
+        PortHolder, TaskRunState,
     };
     use std::path::PathBuf;
 
@@ -1126,6 +1651,142 @@ mod tests {
             filtered_project_plists("jobs", plist_set(), &["worker".to_string()]).unwrap_err();
 
         assert_eq!(err, "jobs: process target not found: worker");
+    }
+
+    // ── task readiness ─────────────────────────────────────────────────────
+    //
+    // Fixtures are trimmed from real `launchctl print gui/501/<label>` output
+    // on macOS 25.5; the nested `state = active` lines are why the parser
+    // anchors on the field name rather than searching the whole block.
+
+    const PRINT_NEVER_RUN: &str = "\
+com.kagaya.demo.build = {
+\tactive count = 0
+\tstate = not running
+\truns = 0
+\tlast exit code = (never exited)
+}";
+
+    const PRINT_RUNNING: &str = "\
+com.kagaya.demo.build = {
+\tactive count = 1
+\tstate = running
+\truns = 1
+\tpid = 12567
+\tendpoints = {
+\t\t\"com.kagaya.demo\" = {
+\t\t\tstate = active
+\t\t}
+\t}
+}";
+
+    const PRINT_FINISHED: &str = "\
+com.kagaya.demo.build = {
+\tstate = not running
+\truns = 1
+\tlast exit code = 0
+}";
+
+    fn stopped(runs: u64) -> TaskRunState {
+        parse_task_run_state(&format!("\tstate = not running\n\truns = {}\n", runs))
+    }
+
+    fn running(runs: u64) -> TaskRunState {
+        parse_task_run_state(&format!("\truns = {}\n\tpid = 999\n", runs))
+    }
+
+    #[test]
+    fn never_run_task_reports_runs_zero_not_absent() {
+        // Q1 from the plan: launchd emits `runs = 0` for a bootstrapped job
+        // that has never spawned. Absent `runs` must stay distinguishable.
+        let state = parse_task_run_state(PRINT_NEVER_RUN);
+        assert_eq!(state.runs, Some(0));
+        assert!(!state.running);
+    }
+
+    #[test]
+    fn running_task_reports_pid_and_counter() {
+        let state = parse_task_run_state(PRINT_RUNNING);
+        assert_eq!(state.runs, Some(1));
+        assert!(state.running);
+    }
+
+    #[test]
+    fn finished_task_reports_counter_without_pid() {
+        let state = parse_task_run_state(PRINT_FINISHED);
+        assert_eq!(state.runs, Some(1));
+        assert!(!state.running);
+    }
+
+    #[test]
+    fn unloaded_job_has_no_counter() {
+        assert_eq!(parse_task_run_state(""), TaskRunState::default());
+        assert_eq!(parse_task_run_state("").runs, None);
+    }
+
+    #[test]
+    fn idle_pid_forms_are_not_running() {
+        assert!(!parse_task_run_state("\tpid = 0\n").running);
+        assert!(!parse_task_run_state("\tpid = (none)\n").running);
+    }
+
+    #[test]
+    fn just_kickstarted_task_is_not_ready_before_launchd_spawns_it() {
+        // The original defect: launchd takes ~250ms to spawn, so the task is
+        // "not running" purely because it has not started. It must not read
+        // ready just because no pid exists yet.
+        assert!(!task_completed_since(stopped(1), stopped(1)));
+    }
+
+    #[test]
+    fn task_is_not_ready_while_running() {
+        assert!(!task_completed_since(stopped(1), running(2)));
+    }
+
+    #[test]
+    fn task_is_ready_once_counter_moved_and_process_exited() {
+        assert!(task_completed_since(stopped(1), stopped(2)));
+    }
+
+    #[test]
+    fn counter_jumping_more_than_one_still_counts_as_ready() {
+        // Observed on macOS 25.5: consecutive kickstarts took runs 1 -> 3.
+        // Only the direction of travel is meaningful.
+        assert!(task_completed_since(stopped(1), stopped(3)));
+    }
+
+    #[test]
+    fn bootstrapped_but_never_run_task_is_not_ready() {
+        assert!(!task_completed_since(stopped(0), stopped(0)));
+        assert!(!task_completed_since(TaskRunState::default(), stopped(0)));
+    }
+
+    #[test]
+    fn counter_reset_by_bootout_bootstrap_is_a_fresh_epoch() {
+        // `restart_one_label` boots out and bootstraps port-holding units,
+        // which resets runs to 0 (observed 3 -> 0). Mid-reset the task has not
+        // run yet; once it has, that run is ours even though 1 < 3.
+        assert!(!task_completed_since(stopped(3), stopped(0)));
+        assert!(task_completed_since(stopped(3), stopped(1)));
+    }
+
+    #[test]
+    fn task_already_running_at_baseline_is_ready_once_it_exits() {
+        // `start_one_label` reports "already running" without kickstarting, so
+        // the counter never moves; completion is the pid going away.
+        assert!(!task_completed_since(running(1), running(1)));
+        assert!(task_completed_since(running(1), stopped(1)));
+    }
+
+    #[test]
+    fn unreadable_current_state_is_never_ready() {
+        assert!(!task_completed_since(stopped(1), TaskRunState::default()));
+    }
+
+    #[test]
+    fn without_a_baseline_any_completed_run_counts() {
+        // `wait_service_ready` (ky start a..b) has no baseline to capture.
+        assert!(task_completed_since(TaskRunState::default(), stopped(2)));
     }
 
     // ── port-safe restart ──────────────────────────────────────────────────

@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Process supervisor toolkit for Rust CLIs — spawn, monitor, restart, and capture output"
+description = "launchd made easy — register projects as services, manage them with start/stop/restart/status/logs"
 readme = "README.md"
-keywords = ["supervisor", "process-manager", "daemon", "procfile", "cli"]
+keywords = ["launchd", "process-manager", "daemon", "macos", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
@@ -17,16 +17,10 @@ path = "src/bin/kagaya/main.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-nix = { workspace = true }
-tracing = { workspace = true }
 
 # CLI binary dependencies
-muzan = { workspace = true }
-koku = { version = "0.1.0", path = "../../../koku" }
 toml = { workspace = true }
 axum = { workspace = true }
-tower-http = { workspace = true }
-tracing-subscriber = { workspace = true }
 owo-colors = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
@@ -35,15 +29,10 @@ plist = { workspace = true }
 rust-embed = { version = "8", features = ["axum"] }
 mime_guess = "2"
 tabwriter = "1.4.1"
+listeners = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"
-
-[dependencies.listeners]
-version = "0.4"
-
-[dependencies.sysinfo]
-version = "0.38"
 
 [dev-dependencies]
 tempfile = "3"

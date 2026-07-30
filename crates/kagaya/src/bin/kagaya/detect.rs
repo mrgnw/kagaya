@@ -128,7 +128,7 @@ fn detect_python(dir: &Path) -> Option<Vec<SuggestedService>> {
         }
 
         // Check [project.scripts] for entry points
-        if let Ok(parsed) = content.parse::<toml::Value>() {
+        if let Ok(parsed) = toml::from_str::<toml::Value>(&content) {
             if let Some(scripts) = parsed
                 .get("project")
                 .and_then(|p| p.get("scripts"))
@@ -167,7 +167,7 @@ fn detect_python(dir: &Path) -> Option<Vec<SuggestedService>> {
 fn detect_rust(dir: &Path) -> Option<Vec<SuggestedService>> {
     let cargo_path = dir.join("Cargo.toml");
     let content = std::fs::read_to_string(cargo_path).ok()?;
-    let parsed: toml::Value = content.parse().ok()?;
+    let parsed: toml::Value = toml::from_str(&content).ok()?;
 
     // Only suggest for binary crates, not libraries
     let has_bin = parsed.get("bin").is_some()

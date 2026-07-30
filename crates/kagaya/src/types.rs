@@ -19,7 +19,7 @@ pub struct Service {
     pub processes: Vec<ProcessDef>,
 }
 
-/// Definition of a process to supervise.
+/// Definition of a process to run under launchd.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessDef {
     pub name: String,
@@ -28,15 +28,10 @@ pub struct ProcessDef {
     pub service_type: ServiceType,
     #[serde(default = "default_true")]
     pub restart: bool,
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
-    #[serde(default = "default_restart_delay")]
-    pub restart_delay_secs: u64,
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default = "default_true")]
     pub autostart: bool,
-    pub pre_start: Option<String>,
     #[serde(default)]
     pub ports: Vec<u16>,
     #[serde(default)]
@@ -48,12 +43,6 @@ pub struct ProcessDef {
 
 fn default_true() -> bool {
     true
-}
-fn default_max_retries() -> u32 {
-    3
-}
-fn default_restart_delay() -> u64 {
-    1
 }
 fn default_ready_timeout() -> u64 {
     10

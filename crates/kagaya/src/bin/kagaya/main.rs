@@ -3,10 +3,7 @@ mod cli;
 mod config;
 mod detect;
 mod format;
-mod koku_client;
-mod launchd;
 mod logs;
-mod migrate;
 mod plist_sync;
 mod self_update;
 mod server;
@@ -51,37 +48,26 @@ fn main() {
                 return;
             }
 
+            let global = GlobalWatch {
+                watch: cli.watch,
+                no_watch: cli.no_watch,
+                interval: cli.watch_interval,
+            };
+
             match cli.command {
                 None => {
-                    if cli.watch {
-                        cmd_status(&["--watch".to_string()]);
+                    let watch = global.opts(None);
+                    if watch.enabled {
+                        cmd_status(&[], false, false, &watch);
                     } else {
-                        render_condensed_status(&[]);
+                        render_condensed_status(&gather_status_data(&[], false, false));
                     }
                 }
                 Some(Cmd::Status {
                     names,
                     all,
                     detailed,
-                    watch,
-                    watch_interval,
-                }) => {
-                    let mut args = names;
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_status(&args);
-                }
+                }) => cmd_status(&names, all, detailed, &global.opts(None)),
                 Some(Cmd::Start {
                     names,
                     all,
@@ -90,37 +76,9 @@ fn main() {
                     echo,
                     wait,
                     force,
-                    watch,
-                    no_watch,
-                    watch_interval,
                 }) => {
-                    let mut args = names.clone();
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if autostart {
-                        args.push("--autostart".to_string());
-                    }
-                    if wait {
-                        args.push("--wait".to_string());
-                    }
-                    if force {
-                        args.push("--force".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if no_watch {
-                        args.push("--no-watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_start(&args);
+                    let mut watch = global.opts(Some(4));
+                    cmd_start(&names, all, autostart, detailed, wait, force, &mut watch);
                     if echo {
                         echo_after_action(&names, None);
                     }
@@ -130,80 +88,35 @@ fn main() {
                     all,
                     detailed,
                     echo,
-                    watch,
-                    no_watch,
-                    watch_interval,
                 }) => {
-                    let mut args = names.clone();
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if no_watch {
-                        args.push("--no-watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_stop(&args);
+                    let mut watch = global.opts(Some(4));
+                    cmd_stop(&names, all, detailed, &mut watch);
                     if echo {
                         echo_after_stop(&names);
                     }
                 }
                 Some(Cmd::Restart {
-                    target,
+                    names,
                     all,
                     detailed,
                     echo,
                     force,
-                    watch,
-                    no_watch,
-                    watch_interval,
                 }) => {
-                    let mut args = target.clone();
-                    if all {
-                        args.push("--all".to_string());
-                    }
-                    if detailed {
-                        args.push("--detailed".to_string());
-                    }
-                    if force {
-                        args.push("--force".to_string());
-                    }
-                    if watch || cli.watch {
-                        args.push("--watch".to_string());
-                    }
-                    if no_watch {
-                        args.push("--no-watch".to_string());
-                    }
-                    if let Some(iv) = watch_interval {
-                        args.push("--watch-interval".to_string());
-                        args.push(iv.to_string());
-                    }
-                    cmd_restart(&args);
+                    let mut watch = global.opts(Some(6));
+                    cmd_restart(&names, all, detailed, force, &mut watch);
                     if echo {
-                        echo_after_action(&target, None);
+                        echo_after_action(&names, None);
                     }
                 }
-                Some(Cmd::Logs { args }) => cmd_logs(&args),
-                Some(Cmd::Tail { args }) => cmd_tail(&args),
-                Some(Cmd::Echo { args }) => cmd_echo(&args),
-                Some(Cmd::Show { args }) => cmd_show(&args),
-                Some(Cmd::Cron { args }) => cmd_cron(&args),
+                Some(Cmd::Logs { target }) => cmd_logs(&target),
+                Some(Cmd::Echo { target, lines }) => cmd_echo(&target, lines),
+                Some(Cmd::Show { target }) => cmd_show(&target),
                 Some(Cmd::ReloadConfig) => cmd_reload_config(),
                 Some(Cmd::Serve { action }) => cmd_serve(action),
                 Some(Cmd::Add { args, run }) => cmd_add(&args, run.as_deref()),
                 Some(Cmd::Remove { args }) => cmd_remove(&args),
                 Some(Cmd::Init) => cmd_init(),
-                Some(Cmd::Migrate { force }) => migrate::cmd_migrate(force),
                 Some(Cmd::Autostart { args }) => autostart::cmd_autostart(&args),
-                Some(Cmd::Launchd { args }) => launchd::cmd_launchd(&args),
                 Some(Cmd::SelfCmd { args }) => match args.first().map(|s| s.as_str()) {
                     Some("update") => self_update::cmd_self_update(),
                     _ => {
@@ -211,10 +124,10 @@ fn main() {
                         std::process::exit(1);
                     }
                 },
-                Some(Cmd::All) => cmd_status(&["all".to_string()]),
+                Some(Cmd::All) => cmd_status(&[], true, false, &global.opts(None)),
                 Some(Cmd::Help) => print_usage(),
                 Some(Cmd::Version) => println!("kagaya {}", env!("CARGO_PKG_VERSION")),
-                Some(Cmd::External(args)) => dispatch_external(&args),
+                Some(Cmd::External(args)) => dispatch_external(&args, &global),
             }
         }
         Err(e) => {
@@ -225,7 +138,32 @@ fn main() {
     }
 }
 
-fn dispatch_external(args: &[String]) {
+/// Global watch flags from the CLI, turned into per-command WatchOpts.
+struct GlobalWatch {
+    watch: Option<u64>,
+    no_watch: bool,
+    interval: Option<u64>,
+}
+
+impl GlobalWatch {
+    /// `--watch` with no value falls back to `default_duration`
+    /// (None = watch until quit).
+    fn opts(&self, default_duration: Option<u64>) -> WatchOpts {
+        let duration = match self.watch {
+            Some(0) | None => default_duration,
+            Some(n) => Some(n),
+        };
+        WatchOpts {
+            duration,
+            interval: self.interval.unwrap_or(1).max(1),
+            enabled: self.watch.is_some(),
+            no_watch: self.no_watch,
+            mode: WatchMode::Observe,
+        }
+    }
+}
+
+fn dispatch_external(args: &[String], global: &GlobalWatch) {
     if args.is_empty() {
         print_usage();
         return;
@@ -245,32 +183,29 @@ fn dispatch_external(args: &[String]) {
     let services = config::load_service_entries();
     let base_name = name.split('.').next().unwrap_or(name);
     if services.contains_key(base_name) && args.len() > 1 {
+        // service-first syntax: ky myapp <verb> [args]
+        let target: Vec<String> = std::iter::once(args[0].clone())
+            .chain(args[2..].iter().cloned())
+            .collect();
         match args[1].as_str() {
-            "start" => cmd_start(&[args[0].clone()]),
-            "stop" => cmd_stop(&[args[0].clone()]),
-            "status" | "st" => cmd_status(&[args[0].clone()]),
-            "logs" => cmd_logs(args),
-            "tail" => cmd_tail(args),
-            "echo" => cmd_echo(args),
-            "show" => cmd_show(args),
-            "restart" => {
-                let mut restart_args = vec![args[0].clone()];
-                if args.len() > 2 {
-                    restart_args.push(args[2].clone());
-                }
-                cmd_restart(&restart_args);
-            }
+            "start" => cmd_start(&[args[0].clone()], false, false, false, false, false, &mut global.opts(Some(4))),
+            "stop" => cmd_stop(&[args[0].clone()], false, false, &mut global.opts(Some(4))),
+            "status" | "st" => cmd_status(&[args[0].clone()], false, false, &global.opts(None)),
+            "logs" => cmd_logs(&target),
+            "echo" => cmd_echo(&target, DEFAULT_ECHO_TAIL),
+            "show" => cmd_show(&target),
+            "restart" => cmd_restart(&target, false, false, false, &mut global.opts(Some(6))),
             _ => {
                 eprintln!("unknown command: {}", args[1]);
                 std::process::exit(1);
             }
         }
     } else if services.contains_key(base_name) {
-        cmd_status(&[args[0].clone()]);
+        cmd_status(&[args[0].clone()], false, false, &global.opts(None));
     } else {
         eprintln!("unknown command or service: {}", name);
         eprintln!();
-        eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, reload-config, serve, cron, autostart");
+        eprintln!("available commands: status, start, stop, restart, logs, echo, show, add, remove, init, reload-config, serve, autostart");
         eprintln!();
         let names: Vec<&str> = services.keys().map(|s| s.as_str()).collect();
         if !names.is_empty() {
@@ -293,7 +228,7 @@ fn hline(cmd: &str, args: &str, desc: &str, cmd_width: usize) {
 
 fn print_usage() {
     eprintln!(
-        "{} {} — launchctl frontend for services",
+        "{} {} — launchd made easy",
         "ky".bold(),
         env!("CARGO_PKG_VERSION")
     );
@@ -323,6 +258,11 @@ fn print_usage() {
         "-W".bold()
     );
     eprintln!(
+        "  {} blocks until ready; {} kills foreign port holders",
+        "--wait".bold(),
+        "--force".bold()
+    );
+    eprintln!(
         "  {} streams live output after action; {} shows per-process detail",
         "-e".bold(),
         "-d".bold()
@@ -341,75 +281,70 @@ fn print_usage() {
         "Show config or process command",
         w,
     );
-    hline("add", "[name] [dir]", "Register a project", w);
+    hline("add", "[name] [dir]", "Register a service", w);
     hline(
         "add",
         "<name> --run <cmd>",
         "Register a standalone command",
         w,
     );
-    hline("remove|rm", "<name>", "Unregister a project", w);
+    hline("remove|rm", "<name>", "Unregister a service", w);
     hline("init", "", "Create config files", w);
-    eprintln!();
-
-    eprintln!("{}", "cron (via koku)".cyan().bold());
-    hline("cron", "[status]", "Show cron job status", w);
-    hline("cron", "run|pause|resume", "Manage individual jobs", w);
-    hline("cron", "reload", "Reload koku config", w);
     eprintln!();
 
     eprintln!("{}", "system".cyan().bold());
     hline(
         "autostart",
         "[<name>] [on|off]",
-        "RunAtLoad toggle per service",
+        "Start service(s) on login",
         w,
     );
     hline(
         "reload-config|rc",
         "",
-        "Re-sync plists from projects.toml",
+        "Re-sync all plists from config",
         w,
     );
-    hline("serve", "[stop|status]", "HTTP UI launchd agent", w);
-    hline("launchd|lctl", "[command]", "macOS launchd escape hatch", w);
+    hline("serve", "[stop|restart|status]", "Web UI (launchd agent)", w);
     hline("self update", "", "Update to latest version", w);
     eprintln!();
 
     eprintln!("{}", "targeting".cyan().bold());
     eprintln!(
         "  {} dot syntax targets one process: ky start app.web",
-        "name.process".bold()
+        "service.process".bold()
     );
     eprintln!("  Service-first syntax:              ky myapp start");
-    eprintln!("  Context-aware: run from a project dir to auto-target it");
+    eprintln!("  Context-aware: run from a service's directory to auto-target it");
     eprintln!();
 
     eprintln!("{}", "shortcuts".cyan().bold());
-    eprintln!("  ky                  status (current project or all)");
+    eprintln!("  ky                  status (current service or all)");
     eprintln!("  ky all              status --all");
     eprintln!("  ky -w               live watch mode");
     eprintln!("  ky <service>        status for a single service");
     eprintln!();
 
-    eprintln!("{}", "dependencies".cyan().bold());
+    eprintln!("{}", "startup order".cyan().bold());
     eprintln!(
-        "  In services.toml, use {} to order startup:",
+        "  {} in services.toml orders processes; deps start first and",
         "depends_on".bold()
     );
-    eprintln!("    [api]");
-    eprintln!("    run = \"python server.py\"");
-    eprintln!("    depends_on = \"db\"");
+    eprintln!("  must be ready before dependents start. Readiness is, in order:");
     eprintln!(
-        "  {} polls a command until exit 0; {} sets timeout (default 10s)",
+        "  {} exit 0 > {} listening > task exited > running",
         "ready".bold(),
-        "ready_timeout".bold()
+        "ports".bold()
+    );
+    eprintln!(
+        "  {} chains services ad hoc: ky start db..api",
+        "..".bold()
     );
     eprintln!();
 
     eprintln!("{}", "files".cyan().bold());
     eprintln!(
-        "  {}   registered projects",
+        "  {}   registered services",
         "~/.config/kagaya/projects.toml".dimmed()
     );
     eprintln!(
@@ -417,8 +352,8 @@ fn print_usage() {
         "~/.config/kagaya/config.toml".dimmed()
     );
     eprintln!(
-        "  {}          per-project services",
-        "<project>/services.toml".dimmed()
+        "  {}              per-service processes",
+        "<dir>/services.toml".dimmed()
     );
     eprintln!();
 
@@ -435,15 +370,12 @@ fn print_subcommand_help(cmd: &Cmd) {
         Cmd::Logs { .. } => "logs",
         Cmd::Echo { .. } => "echo",
         Cmd::Show { .. } => "show",
-        Cmd::Cron { .. } => "cron",
         Cmd::ReloadConfig => "reload-config",
         Cmd::Serve { .. } => "serve",
         Cmd::Add { .. } => "add",
         Cmd::Remove { .. } => "remove",
         Cmd::Init => "init",
-        Cmd::Migrate { .. } => "migrate",
         Cmd::Autostart { .. } => "autostart",
-        Cmd::Launchd { .. } => "launchd",
         Cmd::SelfCmd { .. } => "self",
         _ => {
             print_usage();
@@ -475,7 +407,7 @@ fn cmd_init() {
 
     eprintln!();
     eprintln!("getting started:");
-    eprintln!("  1. add projects: ky add (from a project dir)");
+    eprintln!("  1. register a service: ky add (from its directory)");
     eprintln!("  2. start: ky start [name|--all]");
     eprintln!("  3. check: ky status");
 }
@@ -799,16 +731,15 @@ fn remove_project_entry(content: &str, name: &str) -> Option<String> {
 
 // --- Commands ---
 
-fn cmd_status(args: &[String]) {
-    let (watch, rest) = parse_watch_opts(args, None);
+fn cmd_status(names: &[String], all: bool, detailed: bool, watch: &WatchOpts) {
     if watch.enabled && !output_format().is_plain() && io::stdout().is_terminal() {
-        watch_status(&rest, &watch);
+        watch_status(names, all, detailed, watch);
     } else {
-        let data = gather_status_data(&rest);
+        let data = gather_status_data(names, all, detailed);
         if data.detailed {
-            render_detailed_status(&rest);
+            render_detailed_status(&data);
         } else {
-            render_condensed_status(&rest);
+            render_condensed_status(&data);
         }
     }
 }
@@ -1141,6 +1072,14 @@ fn response_from_ops(results: Vec<plist_sync::OpResult>) -> Response {
     }
 }
 
+/// Per-unit operation output already names what failed line by line;
+/// print it verbatim (the exit code carries the failure).
+fn print_op_error(message: &str) {
+    for line in message.lines() {
+        eprintln!("{}", line);
+    }
+}
+
 fn handle_action_response(response: &Response) {
     let fmt = output_format();
     match response {
@@ -1160,51 +1099,114 @@ fn handle_action_response(response: &Response) {
                 format::json_error(message);
                 std::process::exit(1);
             } else {
-                eprintln!("error: {}", message);
+                print_op_error(&message);
                 std::process::exit(1);
             }
         }
-        _ => {}
     }
 }
 
-fn cmd_start(args: &[String]) {
-    let (mut watch, rest) = parse_watch_opts(args, Some(4));
+/// Start chain elements link-by-link — each link must be ready before the
+/// next starts — then start `batch` in one pass. A failed or unready link
+/// stops its chain; other chains and the batch still run.
+fn start_with_chains(
+    entries: &BTreeMap<String, config::ServiceEntry>,
+    batch: &[String],
+    chains: &[Vec<String>],
+    filters: &plist_sync::ProcessFilters,
+    opts: plist_sync::StartOpts,
+) -> Response {
+    let mut results: Vec<plist_sync::OpResult> = Vec::new();
+
+    for chain in chains {
+        for (i, element) in chain.iter().enumerate() {
+            let (svc, proc) = resolve_dot_target(element, entries);
+            let procs: Vec<String> = proc.clone().into_iter().collect();
+            let mut chain_filters = plist_sync::ProcessFilters::new();
+            if let Some(p) = proc {
+                chain_filters.insert(svc.clone(), vec![p]);
+            }
+            let link = plist_sync::start_services(
+                entries,
+                &[svc.clone()],
+                &chain_filters,
+                plist_sync::StartOpts {
+                    wait: false,
+                    force: opts.force,
+                },
+            );
+            let failed = link.iter().any(|r| !r.ok);
+            results.extend(link);
+            if failed {
+                results.push(plist_sync::OpResult {
+                    ok: false,
+                    message: format!("chain stopped at {}", element),
+                });
+                break;
+            }
+            let is_last = i + 1 == chain.len();
+            if !is_last || opts.wait {
+                if let Err(e) = plist_sync::wait_service_ready(entries, &svc, &procs) {
+                    results.push(plist_sync::OpResult {
+                        ok: false,
+                        message: format!("chain stopped: {}", e),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    if !batch.is_empty() {
+        results.extend(plist_sync::start_services(entries, batch, filters, opts));
+    }
+
+    response_from_ops(results)
+}
+
+fn cmd_start(
+    names: &[String],
+    all: bool,
+    autostart_only: bool,
+    detailed: bool,
+    wait_for_ready: bool,
+    force: bool,
+    watch: &mut WatchOpts,
+) {
     let entries = config::load_service_entries();
     let plain = output_format().is_plain();
 
-    let autostart_only = rest.iter().any(|a| a == "--autostart");
-    let start_all = rest.iter().any(|a| is_all_flag(a));
-    let detailed = rest.iter().any(|a| is_detailed_flag(a));
-    let wait_for_ready = rest.iter().any(|a| a == "--wait");
-    let force = rest.iter().any(|a| a == "--force" || a == "-f");
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|a| {
-            !is_all_flag(a)
-                && !is_detailed_flag(a)
-                && a != "--autostart"
-                && a != "--wait"
-                && a != "--force"
-                && a != "-f"
-        })
-        .collect();
+    let mut rest = names.to_vec();
+    let start_all = all || take_all_alias(&mut rest, &entries);
+
+    let opts = plist_sync::StartOpts {
+        wait: wait_for_ready,
+        force,
+    };
 
     if autostart_only {
-        let (names, _chains) = config::autostart_sorted();
+        let (names, chains) = config::autostart_sorted();
         if names.is_empty() {
             if plain {
-                format::json_error("no projects with autostart = true");
+                format::json_error("no services with autostart = true");
             } else {
-                eprintln!("no projects with autostart = true");
+                eprintln!("no services with autostart = true");
             }
             return;
         }
-        let _ = force;
-        let response = response_from_ops(plist_sync::start_services(
-            &names,
+        let chain_services: std::collections::HashSet<&String> = chains.iter().flatten().collect();
+        let batch: Vec<String> = names
+            .iter()
+            .filter(|n| !chain_services.contains(n))
+            .cloned()
+            .collect();
+        let response = start_with_chains(
+            &entries,
+            &batch,
+            &chains,
             &plist_sync::ProcessFilters::new(),
-        ));
+            opts,
+        );
         handle_action_response(&response);
         return;
     }
@@ -1225,24 +1227,32 @@ fn cmd_start(args: &[String]) {
         chains.push(chain);
     }
 
-    let combined_args: Vec<String> = if start_all && plain_args.is_empty() && chain_names.is_empty()
-    {
-        vec!["--all".to_string()]
-    } else {
-        let mut args = plain_args.clone();
-        args.extend(chain_names);
-        args
-    };
-
-    let (resolved, target_processes) = resolve_service_targets(&combined_args, &entries);
+    let (resolved, target_processes) =
+        if start_all && plain_args.is_empty() && chain_names.is_empty() {
+            resolve_service_targets(&[], true, &entries)
+        } else {
+            let mut combined = plain_args.clone();
+            combined.extend(chain_names);
+            resolve_service_targets(&combined, false, &entries)
+        };
 
     if resolved.is_empty() {
         eprintln!("no services to start");
         std::process::exit(1);
     }
 
-    let _ = (chains, wait_for_ready, force, start_all);
-    let response = response_from_ops(plist_sync::start_services(&resolved, &target_processes));
+    // Chain members start link-by-link with readiness barriers; the rest batch.
+    let chain_services: std::collections::HashSet<String> = chains
+        .iter()
+        .flatten()
+        .map(|el| resolve_dot_target(el, &entries).0)
+        .collect();
+    let batch: Vec<String> = resolved
+        .iter()
+        .filter(|n| !chain_services.contains(*n))
+        .cloned()
+        .collect();
+    let response = start_with_chains(&entries, &batch, &chains, &target_processes, opts);
 
     if plain {
         handle_action_response(&response);
@@ -1264,42 +1274,27 @@ fn cmd_start(args: &[String]) {
             }
             watch.mode = WatchMode::Start;
             if watch.enabled {
-                let mut status_args = resolved.clone();
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
-                let success = watch_status(&status_args, &watch);
+                let success = watch_status(&resolved, false, detailed, watch);
                 if !success {
                     std::process::exit(1);
                 }
             }
         }
         Response::Error { message } => {
-            eprintln!("error: {}", message);
+            print_op_error(&message);
             std::process::exit(1);
         }
-        _ => {}
     }
 }
 
-fn cmd_stop(args: &[String]) {
-    let (mut watch, rest) = parse_watch_opts(args, Some(4));
+fn cmd_stop(names: &[String], all: bool, detailed: bool, watch: &mut WatchOpts) {
     let entries = config::load_service_entries();
     let plain = output_format().is_plain();
 
-    let stop_all = rest.iter().any(|a| is_all_flag(a));
-    let detailed = rest.iter().any(|a| is_detailed_flag(a));
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a))
-        .collect();
+    let mut rest = names.to_vec();
+    let stop_all = all || take_all_alias(&mut rest, &entries);
 
-    let args_for_resolve: Vec<String> = if stop_all && rest.is_empty() {
-        vec!["--all".to_string()]
-    } else {
-        rest.clone()
-    };
-    let (names, target_processes) = resolve_service_targets(&args_for_resolve, &entries);
+    let (names, target_processes) = resolve_service_targets(&rest, stop_all && rest.is_empty(), &entries);
 
     if names.is_empty() {
         eprintln!("no services to stop");
@@ -1328,36 +1323,25 @@ fn cmd_stop(args: &[String]) {
             }
             watch.mode = WatchMode::Stop;
             if watch.enabled {
-                let mut status_args = names.clone();
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
-                let success = watch_status(&status_args, &watch);
+                let success = watch_status(&names, false, detailed, watch);
                 if !success {
                     std::process::exit(1);
                 }
             }
         }
         Response::Error { message } => {
-            eprintln!("error: {}", message);
+            print_op_error(&message);
             std::process::exit(1);
         }
-        _ => {}
     }
 }
 
-fn cmd_restart(args: &[String]) {
-    let (mut watch, rest) = parse_watch_opts(args, Some(4));
+fn cmd_restart(names: &[String], all: bool, detailed: bool, force: bool, watch: &mut WatchOpts) {
     let entries = config::load_service_entries();
     let plain = output_format().is_plain();
 
-    let restart_all = rest.iter().any(|a| is_all_flag(a));
-    let detailed = rest.iter().any(|a| is_detailed_flag(a));
-    let force = rest.iter().any(|a| a == "--force" || a == "-f");
-    let rest: Vec<String> = rest
-        .into_iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a) && a != "--force" && a != "-f")
-        .collect();
+    let mut rest = names.to_vec();
+    let restart_all = all || take_all_alias(&mut rest, &entries);
 
     if !watch.enabled && !plain && !watch.no_watch && io::stdout().is_terminal() {
         watch.enabled = true;
@@ -1367,56 +1351,17 @@ fn cmd_restart(args: &[String]) {
 
     // If --all or multiple services, do a full reload (stop+start all processes)
     if restart_all || rest.is_empty() || rest.len() > 1 {
-        let (names, target_processes) = resolve_service_targets(&rest, &entries);
+        let (names, target_processes) = resolve_service_targets(&rest, restart_all && rest.is_empty(), &entries);
         if names.is_empty() {
             eprintln!("no services to restart");
             std::process::exit(1);
         }
 
-        let _ = (restart_all, force);
-        let response = response_from_ops(plist_sync::restart_services(&names, &target_processes));
-
-        if plain {
-            handle_action_response(&response);
-            return;
-        }
-
-        match response {
-            Response::Ok { message } => {
-                if let Some(msg) = message {
-                    for line in msg.lines() {
-                        println!("{}", line);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let mut status_args: Vec<String> = names.clone();
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
-                if watch.enabled {
-                    let success = watch_status(&status_args, &watch);
-                    if !success {
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Response::Error { message } => {
-                eprintln!("error: {}", message);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    // Single target: could be "service" or "service process"
-    let (service, process) = resolve_single_target(&rest, &entries);
-
-    // No process name means restart all processes in the service
-    if process.is_none() {
-        let _ = force;
         let response = response_from_ops(plist_sync::restart_services(
-            &[service.clone()],
-            &plist_sync::ProcessFilters::new(),
+            &entries,
+            &names,
+            &target_processes,
+            force,
         ));
 
         if plain {
@@ -1432,19 +1377,55 @@ fn cmd_restart(args: &[String]) {
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let mut status_args = vec![service.clone()];
-                if detailed {
-                    status_args.push("--detailed".to_string());
-                }
                 if watch.enabled {
-                    let success = watch_status(&status_args, &watch);
+                    let success = watch_status(&names, false, detailed, watch);
                     if !success {
                         std::process::exit(1);
                     }
                 }
             }
             Response::Error { message } => {
-                eprintln!("error: {}", message);
+                print_op_error(&message);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Single target: could be "service" or "service process"
+    let (service, process) = resolve_single_target(&rest, &entries);
+
+    // No process name means restart all processes in the service
+    if process.is_none() {
+        let response = response_from_ops(plist_sync::restart_services(
+            &entries,
+            &[service.clone()],
+            &plist_sync::ProcessFilters::new(),
+            force,
+        ));
+
+        if plain {
+            handle_action_response(&response);
+            return;
+        }
+
+        match response {
+            Response::Ok { message } => {
+                if let Some(msg) = message {
+                    for line in msg.lines() {
+                        println!("{}", line);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if watch.enabled {
+                    let success = watch_status(&[service.clone()], false, detailed, watch);
+                    if !success {
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Response::Error { message } => {
+                print_op_error(&message);
                 std::process::exit(1);
             }
         }
@@ -1456,8 +1437,10 @@ fn cmd_restart(args: &[String]) {
         target_processes.insert(service.clone(), vec![process]);
     }
     let response = response_from_ops(plist_sync::restart_services(
+        &entries,
         &[service.clone()],
         &target_processes,
+        force,
     ));
 
     if plain {
@@ -1471,19 +1454,15 @@ fn cmd_restart(args: &[String]) {
                 println!("{}", msg);
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let mut status_args = vec![service.clone()];
-            if detailed {
-                status_args.push("--detailed".to_string());
-            }
             if watch.enabled {
-                let success = watch_status(&status_args, &watch);
+                let success = watch_status(&[service.clone()], false, detailed, watch);
                 if !success {
                     std::process::exit(1);
                 }
             }
         }
         Response::Error { message } => {
-            eprintln!("error: {}", message);
+            print_op_error(&message);
             std::process::exit(1);
         }
     }
@@ -1528,11 +1507,11 @@ fn tail_log_lines_string(service: &str, process: &Option<String>, n: usize) -> V
     lines[start..].iter().map(|l| l.to_string()).collect()
 }
 
-fn cmd_logs(args: &[String]) {
+fn cmd_logs(target: &[String]) {
     let svc_entries = config::load_service_entries();
     let json = output_format() == OutputFormat::Json;
 
-    let (service, process) = resolve_single_target(args, &svc_entries);
+    let (service, process) = resolve_single_target(target, &svc_entries);
 
     let plist_paths = plist_sync::log_paths(&service);
     let files = find_log_files(&service, &process);
@@ -1559,40 +1538,13 @@ fn cmd_logs(args: &[String]) {
     }
 }
 
-fn cmd_tail(args: &[String]) {
-    eprintln!("{}: use 'ky echo' instead", "tail is deprecated".yellow());
-    cmd_echo(args);
-}
-
 const DEFAULT_ECHO_TAIL: usize = 14;
 
-fn parse_echo_opts(args: &[String]) -> (usize, Vec<String>) {
-    let mut tail_lines = DEFAULT_ECHO_TAIL;
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-n" | "--lines" => {
-                if i + 1 < args.len() {
-                    if let Ok(n) = args[i + 1].parse::<usize>() {
-                        tail_lines = n;
-                        i += 1;
-                    }
-                }
-            }
-            _ => rest.push(args[i].clone()),
-        }
-        i += 1;
-    }
-    (tail_lines, rest)
-}
-
-fn cmd_echo(args: &[String]) {
+fn cmd_echo(target: &[String], tail_lines: usize) {
     let svc_entries = config::load_service_entries();
     let json = output_format() == OutputFormat::Json;
 
-    let (tail_lines, rest) = parse_echo_opts(args);
-    let (service, process) = resolve_single_target(&rest, &svc_entries);
+    let (service, process) = resolve_single_target(target, &svc_entries);
 
     tail_log_lines(&service, &process, tail_lines);
     tail_files_forever(&service, &process, json);
@@ -1678,37 +1630,29 @@ fn echo_after_stop(names: &[String]) {
     tail_log_lines(&service, &None, DEFAULT_ECHO_TAIL);
 }
 
-fn cmd_show(args: &[String]) {
+fn cmd_show(target: &[String]) {
     let entries = config::load_service_entries();
     let json = output_format() == OutputFormat::Json;
 
-    let filtered_args: Vec<String> = if args.len() >= 2 && args[1] == "show" {
-        let mut new_args = vec![args[0].clone()];
-        new_args.extend_from_slice(&args[2..]);
-        new_args
-    } else {
-        args.to_vec()
-    };
-
-    let (service_name, process_name) = if filtered_args.is_empty() {
+    let (service_name, process_name) = if target.is_empty() {
         if let Some(current) = get_current_project(&entries) {
             (current, None)
         } else {
-            let projects_path = utils::config_dir().join("projects");
+            let projects_path = utils::config_dir().join("projects.toml");
             if json {
                 let map: BTreeMap<&String, &PathBuf> =
                     entries.iter().map(|(n, e)| (n, &e.dir)).collect();
                 format::json_value(&map);
                 std::process::exit(0);
             }
-            eprintln!("{}", projects_path.display().to_string().dimmed());
+            println!("{}", projects_path.display().to_string().dimmed());
             for (name, entry) in &entries {
-                eprintln!("{}: {}", name.bold(), entry.dir.display());
+                println!("{}: {}", name.bold(), entry.dir.display());
             }
             std::process::exit(0);
         }
     } else {
-        resolve_single_target(&filtered_args, &entries)
+        resolve_single_target(target, &entries)
     };
 
     let service_entry = match entries.get(&service_name) {
@@ -1779,140 +1723,6 @@ fn cmd_show(args: &[String]) {
     }
 }
 
-fn cmd_cron(args: &[String]) {
-    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
-    let json = output_format() == OutputFormat::Json || args.iter().any(|a| a == "--json");
-
-    match subcmd {
-        "status" | "st" => match koku_client::fetch_status() {
-            Some(jobs) => {
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&jobs).unwrap());
-                } else if jobs.is_empty() {
-                    eprintln!("no cron jobs configured");
-                } else {
-                    let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
-                    for job in &jobs {
-                        let sym = koku_client::state_symbol(&job.state);
-                        let extra = match (&job.last_exit, &job.next_run) {
-                            (Some(code), Some(next)) => format!("exit {}  next {}", code, next),
-                            (Some(code), None) => format!("exit {}", code),
-                            (None, Some(next)) => format!("next {}", next),
-                            (None, None) => String::new(),
-                        };
-                        println!(
-                            "  {} {:<width$} {}{}",
-                            sym,
-                            job.name,
-                            job.state,
-                            if extra.is_empty() {
-                                String::new()
-                            } else {
-                                format!("  {}", extra)
-                            },
-                            width = max_name
-                        );
-                    }
-                }
-            }
-            None => {
-                eprintln!("koku daemon not running");
-                std::process::exit(1);
-            }
-        },
-        "run" => {
-            let name = args.get(1).unwrap_or_else(|| {
-                eprintln!("usage: ky cron run <name>");
-                std::process::exit(1);
-            });
-            match koku_client::run_job(name) {
-                Ok(msg) => {
-                    if json {
-                        format::json_ok(Some(msg));
-                    } else {
-                        eprintln!("{}", msg);
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&e);
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "pause" => {
-            let name = args.get(1).unwrap_or_else(|| {
-                eprintln!("usage: ky cron pause <name>");
-                std::process::exit(1);
-            });
-            match koku_client::pause_job(name) {
-                Ok(msg) => {
-                    if json {
-                        format::json_ok(Some(msg));
-                    } else {
-                        eprintln!("{}", msg);
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&e);
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "resume" => {
-            let name = args.get(1).unwrap_or_else(|| {
-                eprintln!("usage: ky cron resume <name>");
-                std::process::exit(1);
-            });
-            match koku_client::resume_job(name) {
-                Ok(msg) => {
-                    if json {
-                        format::json_ok(Some(msg));
-                    } else {
-                        eprintln!("{}", msg);
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        format::json_error(&e);
-                    } else {
-                        eprintln!("error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        "reload" => match koku_client::reload() {
-            Ok(msg) => {
-                if json {
-                    format::json_ok(Some(msg));
-                } else {
-                    eprintln!("{}", msg);
-                }
-            }
-            Err(e) => {
-                if json {
-                    format::json_error(&e);
-                } else {
-                    eprintln!("error: {}", e);
-                }
-                std::process::exit(1);
-            }
-        },
-        _ => {
-            eprintln!("usage: ky cron [status|run|pause|resume|reload]");
-            std::process::exit(1);
-        }
-    }
-}
-
 fn cmd_reload_config() {
     let entries = config::load_service_entries();
     if entries.is_empty() {
@@ -1967,14 +1777,15 @@ fn cmd_serve(action: Option<ServeAction>) {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(server::run());
         }
-        Some(ServeAction::Daemon) | None => serve_install_and_start(),
+        Some(ServeAction::Restart) => serve_install_and_start(true),
+        Some(ServeAction::Daemon) | None => serve_install_and_start(false),
     }
 }
 
 const SERVE_LABEL: &str = "serve";
 
-fn serve_install_and_start() {
-    let agents_dir = launchd::user_agents_dir();
+fn serve_install_and_start(restart: bool) {
+    let agents_dir = plist_sync::user_agents_dir();
     let _ = std::fs::create_dir_all(&agents_dir);
     let plist_path = agents_dir.join(format!("com.kagaya.{}.plist", SERVE_LABEL));
     let log_root = logs::log_dir();
@@ -2018,11 +1829,13 @@ fn serve_install_and_start() {
     }
 
     if plist_sync::is_loaded(SERVE_LABEL) {
-        let uid = launchd::get_uid();
+        if !restart {
+            eprintln!("serve: already running (ky serve restart to restart)");
+            return;
+        }
+        let uid = plist_sync::get_uid();
         let target = format!("gui/{}/com.kagaya.{}", uid, SERVE_LABEL);
-        let _ = std::process::Command::new("launchctl")
-            .args(["kickstart", "-kp", &target])
-            .output();
+        let _ = plist_sync::run_launchctl(&["kickstart", "-k", &target]);
         eprintln!("serve: restarted");
     } else {
         match plist_sync::bootstrap(&plist_path) {
@@ -2079,52 +1892,15 @@ struct WatchOpts {
     mode: WatchMode,
 }
 
-fn parse_watch_opts(args: &[String], default_duration: Option<u64>) -> (WatchOpts, Vec<String>) {
-    let mut opts = WatchOpts {
-        duration: None,
-        interval: 1,
-        enabled: false,
-        no_watch: false,
-        mode: WatchMode::Observe,
-    };
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--watch" | "-w" => {
-                opts.enabled = true;
-                if i + 1 < args.len() {
-                    if let Ok(n) = args[i + 1].parse::<u64>() {
-                        opts.duration = Some(n);
-                        i += 1;
-                    }
-                }
-                if opts.duration.is_none() {
-                    opts.duration = default_duration;
-                }
-            }
-            "--no-watch" | "-W" => {
-                opts.no_watch = true;
-            }
-            "--watch-interval" => {
-                if i + 1 < args.len() {
-                    if let Ok(n) = args[i + 1].parse::<u64>() {
-                        opts.interval = n.max(1);
-                        i += 1;
-                    }
-                }
-            }
-            _ => rest.push(args[i].clone()),
-        }
-        i += 1;
-    }
-    (opts, rest)
-}
-
 fn fetch_status() -> (Vec<ServiceStatus>, Option<u16>) {
     let entries = config::load_service_entries();
     let services = plist_sync::query_all(&entries);
-    (services, None)
+    let port = if plist_sync::is_loaded(SERVE_LABEL) {
+        Some(config::load_global_config().daemon.port)
+    } else {
+        None
+    };
+    (services, port)
 }
 
 struct StatusData {
@@ -2137,30 +1913,19 @@ struct StatusData {
     detailed: bool,
     is_single_service: bool,
     http_port: Option<u16>,
-    cron_jobs: Option<Vec<koku::JobStatus>>,
 }
 
-fn is_detailed_flag(s: &str) -> bool {
-    matches!(s, "--detailed" | "-d")
-}
-
-fn gather_status_data(args: &[String]) -> StatusData {
+fn gather_status_data(names: &[String], all: bool, detailed: bool) -> StatusData {
     let (services, http_port) = fetch_status();
     let entries = config::load_service_entries();
 
-    let show_all = args.iter().any(|a| is_all_flag(a));
-    let detailed = args.iter().any(|a| is_detailed_flag(a));
+    let mut names = names.to_vec();
+    let show_all = all || take_all_alias(&mut names, &entries);
     let current_project = get_current_project(&entries);
-
-    let filtered_args: Vec<String> = args
-        .iter()
-        .filter(|a| !is_all_flag(a) && !is_detailed_flag(a))
-        .cloned()
-        .collect();
 
     let (filter, process_filter) = if show_all {
         (entries.keys().cloned().collect(), None)
-    } else if filtered_args.is_empty() {
+    } else if names.is_empty() {
         let svcs = if let Some(ref current) = current_project {
             vec![current.clone()]
         } else {
@@ -2168,7 +1933,7 @@ fn gather_status_data(args: &[String]) -> StatusData {
         };
         (svcs, None)
     } else {
-        let (svcs, procs) = resolve_service_targets(&filtered_args, &entries);
+        let (svcs, procs) = resolve_service_targets(&names, false, &entries);
         let proc_filter = procs.into_values().next().and_then(|mut p| {
             if p.is_empty() {
                 None
@@ -2192,7 +1957,7 @@ fn gather_status_data(args: &[String]) -> StatusData {
             .iter()
             .filter_map(|name| status_map.get(name).cloned())
             .collect();
-        let port = if show_all || (args.is_empty() && current_project.is_none()) {
+        let port = if show_all || (names.is_empty() && current_project.is_none()) {
             http_port
         } else {
             None
@@ -2236,14 +2001,9 @@ fn gather_status_data(args: &[String]) -> StatusData {
         .max()
         .unwrap_or(0);
 
-    let is_single_service = sorted_filter.len() == 1 && !filtered_args.is_empty() && !show_all;
+    let is_single_service = sorted_filter.len() == 1 && !names.is_empty() && !show_all;
     let detailed = detailed || is_single_service;
-    let show_extras = show_all || (filtered_args.is_empty() && current_project.is_none());
-    let cron_jobs = if show_extras {
-        koku_client::fetch_status()
-    } else {
-        None
-    };
+    let show_extras = show_all || (names.is_empty() && current_project.is_none());
 
     StatusData {
         sorted_filter,
@@ -2255,13 +2015,10 @@ fn gather_status_data(args: &[String]) -> StatusData {
         detailed,
         is_single_service,
         http_port,
-        cron_jobs,
     }
 }
 
-fn render_condensed_status(args: &[String]) -> usize {
-    let data = gather_status_data(args);
-
+fn render_condensed_status(data: &StatusData) -> usize {
     if let Some(ref proc_name) = data.process_filter {
         if let Some(name) = data.sorted_filter.first() {
             if let Some(status) = data.status_map.get(name) {
@@ -2356,36 +2113,6 @@ fn render_condensed_status(args: &[String]) -> usize {
             .unwrap();
         }
         lines += 1;
-
-        if let Some(ref jobs) = data.cron_jobs {
-            if !jobs.is_empty() {
-                writeln!(tw).unwrap();
-                lines += 1;
-                for job in jobs {
-                    let sym = koku_client::state_symbol(&job.state);
-                    let state_str = job.state.to_string();
-                    let (sym_colored, state_colored) = match job.state {
-                        koku::JobState::Running => {
-                            (sym.green().to_string(), state_str.green().to_string())
-                        }
-                        koku::JobState::Idle => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Paused => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Failing => {
-                            (sym.yellow().to_string(), state_str.yellow().to_string())
-                        }
-                        koku::JobState::Stopped => {
-                            (sym.red().to_string(), state_str.red().to_string())
-                        }
-                    };
-                    writeln!(tw, "{}\t{}\t{}\t\t\t", sym_colored, job.name, state_colored).unwrap();
-                    lines += 1;
-                }
-            }
-        }
     }
 
     tw.flush().unwrap();
@@ -2396,9 +2123,7 @@ fn render_condensed_status(args: &[String]) -> usize {
     lines
 }
 
-fn render_detailed_status(args: &[String]) -> usize {
-    let data = gather_status_data(args);
-
+fn render_detailed_status(data: &StatusData) -> usize {
     if let Some(ref proc_name) = data.process_filter {
         if let Some(name) = data.sorted_filter.first() {
             if let Some(status) = data.status_map.get(name) {
@@ -2548,73 +2273,6 @@ fn render_detailed_status(args: &[String]) -> usize {
             );
         }
         lines += 1;
-
-        if let Some(ref jobs) = data.cron_jobs {
-            if !jobs.is_empty() {
-                println!();
-                lines += 1;
-
-                let has_running = jobs.iter().any(|j| j.state == koku::JobState::Running);
-                let symbol = if has_running {
-                    "●".green().to_string()
-                } else {
-                    "○".dimmed().to_string()
-                };
-                println!("{} {}", symbol, "cron".bold());
-                lines += 1;
-
-                let max_name = jobs
-                    .iter()
-                    .map(|j| j.name.len())
-                    .max()
-                    .unwrap_or(0)
-                    .max(name_w);
-
-                for job in jobs {
-                    let sym = koku_client::state_symbol(&job.state);
-                    let state_str = job.state.to_string();
-                    let (sym_colored, state_colored) = match job.state {
-                        koku::JobState::Running => {
-                            (sym.green().to_string(), state_str.green().to_string())
-                        }
-                        koku::JobState::Idle => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Paused => {
-                            (sym.dimmed().to_string(), state_str.dimmed().to_string())
-                        }
-                        koku::JobState::Failing => {
-                            (sym.yellow().to_string(), state_str.yellow().to_string())
-                        }
-                        koku::JobState::Stopped => {
-                            (sym.red().to_string(), state_str.red().to_string())
-                        }
-                    };
-
-                    let extra = match (&job.last_exit, &job.next_run) {
-                        (Some(code), Some(next)) => format!("exit {}  next {}", code, next),
-                        (Some(code), None) => format!("exit {}", code),
-                        (None, Some(next)) => format!("next {}", next),
-                        (None, None) => String::new(),
-                    };
-
-                    let extra_str = if extra.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {}", extra)
-                    };
-                    println!(
-                        "  {} {:<width$} {}{}",
-                        sym_colored,
-                        job.name,
-                        state_colored,
-                        extra_str,
-                        width = max_name
-                    );
-                    lines += 1;
-                }
-            }
-        }
     }
 
     lines
@@ -2990,69 +2648,13 @@ fn status_data_to_lines<'a>(data: &StatusData) -> Vec<RLine<'a>> {
                 ]));
             }
         }
-
-        if let Some(ref jobs) = data.cron_jobs {
-            if !jobs.is_empty() {
-                lines.push(RLine::from(""));
-                let has_running = jobs.iter().any(|j| j.state == koku::JobState::Running);
-                let cron_sym = if has_running {
-                    Span::styled("●", green)
-                } else {
-                    Span::styled("○", dim)
-                };
-                lines.push(RLine::from(vec![
-                    cron_sym,
-                    Span::raw(" "),
-                    Span::styled("cron", bold),
-                ]));
-
-                let max_name = jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
-                for job in jobs {
-                    let sym = koku_client::state_symbol(&job.state);
-                    let state_str = job.state.to_string();
-                    let (sym_style, state_style) = match job.state {
-                        koku::JobState::Running => (green, green),
-                        koku::JobState::Idle | koku::JobState::Paused => (dim, dim),
-                        koku::JobState::Failing => {
-                            let y = Style::default().fg(Color::Yellow);
-                            (y, y)
-                        }
-                        koku::JobState::Stopped => {
-                            let r = Style::default().fg(Color::Red);
-                            (r, r)
-                        }
-                    };
-                    let extra = match (&job.last_exit, &job.next_run) {
-                        (Some(code), Some(next)) => format!("exit {}  next {}", code, next),
-                        (Some(code), None) => format!("exit {}", code),
-                        (None, Some(next)) => format!("next {}", next),
-                        (None, None) => String::new(),
-                    };
-                    let extra_str = if extra.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {}", extra)
-                    };
-                    let padded_name = format!("{:<width$}", job.name, width = max_name);
-                    lines.push(RLine::from(vec![
-                        Span::raw("  "),
-                        Span::styled(sym.to_string(), sym_style),
-                        Span::raw(" "),
-                        Span::raw(padded_name),
-                        Span::raw(" "),
-                        Span::styled(state_str, state_style),
-                        Span::raw(extra_str),
-                    ]));
-                }
-            }
-        }
     }
 
     lines
 }
 
-fn build_status_lines<'a>(args: &[String]) -> (Vec<RLine<'a>>, StatusData) {
-    let data = gather_status_data(args);
+fn build_status_lines<'a>(names: &[String], all: bool, detailed: bool) -> (Vec<RLine<'a>>, StatusData) {
+    let data = gather_status_data(names, all, detailed);
     let lines = status_data_to_lines(&data);
     (lines, data)
 }
@@ -3198,7 +2800,7 @@ fn snapshot_states(data: &StatusData) -> PrevStates {
     map
 }
 
-fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
+fn watch_status(names: &[String], all: bool, detailed: bool, opts: &WatchOpts) -> bool {
     use crossterm::event::{self, Event, KeyCode, KeyModifiers};
     use crossterm::terminal;
     use ratatui::backend::CrosstermBackend;
@@ -3213,7 +2815,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
     let mut prev_states: PrevStates = PrevStates::new();
     let mut satisfied_since: Option<Instant> = None;
 
-    let (mut initial_lines, initial_data) = build_status_lines(args);
+    let (mut initial_lines, initial_data) = build_status_lines(names, all, detailed);
     let failed = failed_processes(&initial_data);
     if !failed.is_empty() {
         initial_lines.push(RLine::from(""));
@@ -3237,7 +2839,7 @@ fn watch_status(args: &[String], opts: &WatchOpts) -> bool {
     let mut last_data: Option<StatusData> = None;
 
     loop {
-        let (mut lines, data) = build_status_lines(args);
+        let (mut lines, data) = build_status_lines(names, all, detailed);
 
         let transitions = detect_transitions(&data, &prev_states);
         if !transitions.is_empty() {
@@ -3371,8 +2973,15 @@ fn resolve_dot_target(
 
 // --- Target resolution ---
 
-fn is_all_flag(s: &str) -> bool {
-    matches!(s, "--all" | "-a" | "all")
+/// Accept a bare `all` positional as an alias for --all, unless a service is
+/// literally named "all". Removes it from `names` and reports whether it was seen.
+fn take_all_alias(names: &mut Vec<String>, entries: &BTreeMap<String, ServiceEntry>) -> bool {
+    if entries.contains_key("all") {
+        return false;
+    }
+    let before = names.len();
+    names.retain(|n| n != "all");
+    names.len() != before
 }
 
 fn get_current_project(entries: &BTreeMap<String, ServiceEntry>) -> Option<String> {
@@ -3388,14 +2997,22 @@ fn get_current_project(entries: &BTreeMap<String, ServiceEntry>) -> Option<Strin
     None
 }
 
-/// Resolve a list of CLI args into service names and per-service process filters.
-/// Handles: dot notation, known service names, bare process names via CWD, --all.
-/// If args is empty, falls back to CWD project or errors.
+/// Resolve service names and per-service process filters.
+/// Handles: dot notation, known service names, bare process names via CWD, all.
+/// If names is empty and all is false, falls back to CWD project or errors.
 fn resolve_service_targets(
-    args: &[String],
+    names: &[String],
+    all: bool,
     entries: &BTreeMap<String, ServiceEntry>,
 ) -> (Vec<String>, plist_sync::ProcessFilters) {
-    if args.is_empty() {
+    if all {
+        return (
+            entries.keys().cloned().collect(),
+            plist_sync::ProcessFilters::new(),
+        );
+    }
+
+    if names.is_empty() {
         if let Some(current) = get_current_project(entries) {
             return (vec![current], plist_sync::ProcessFilters::new());
         }
@@ -3408,20 +3025,10 @@ fn resolve_service_targets(
         std::process::exit(1);
     }
 
-    if args.len() == 1 && is_all_flag(&args[0]) {
-        return (
-            entries.keys().cloned().collect(),
-            plist_sync::ProcessFilters::new(),
-        );
-    }
-
     let mut service_names: Vec<String> = Vec::new();
     let mut process_filters = plist_sync::ProcessFilters::new();
 
-    for arg in args {
-        if is_all_flag(arg) {
-            continue;
-        }
+    for arg in names {
         let (svc, proc) = resolve_dot_target(arg, entries);
         if let Some(p) = proc {
             if !service_names.contains(&svc) {
@@ -3493,46 +3100,6 @@ fn resolve_single_target(
     std::process::exit(1);
 }
 
-fn check_alias_hint() {
-    if command_exists("lctl") {
-        return;
-    }
-
-    let shell = detect_shell();
-    let rc_file = shell_rc_file(&shell);
-
-    eprintln!();
-    eprintln!("tip: add to {}:", rc_file);
-    eprintln!("  alias lctl='ky launchd'");
-}
-
-fn detect_shell() -> String {
-    if let Ok(shell) = std::env::var("SHELL") {
-        if let Some(name) = shell.rsplit('/').next() {
-            return name.to_string();
-        }
-    }
-    "bash".to_string()
-}
-
-fn shell_rc_file(shell: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
-    match shell {
-        "zsh" => format!("{}/.zshrc", home),
-        "fish" => format!("{}/.config/fish/config.fish", home),
-        "bash" => format!("{}/.bashrc", home),
-        _ => format!("~/.{}rc", shell),
-    }
-}
-
-fn command_exists(name: &str) -> bool {
-    std::process::Command::new("sh")
-        .args(["-c", &format!("command -v {} >/dev/null 2>&1", name)])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3584,7 +3151,6 @@ mod tests {
             detailed: false,
             is_single_service: false,
             http_port: None,
-            cron_jobs: None,
         }
     }
 
@@ -3621,7 +3187,8 @@ mod tests {
     #[test]
     fn resolve_dot_target_scopes_process_to_service() {
         let entries = test_entries(&["jobs"]);
-        let (services, processes) = resolve_service_targets(&["jobs.ui".to_string()], &entries);
+        let (services, processes) =
+            resolve_service_targets(&["jobs.ui".to_string()], false, &entries);
 
         assert_eq!(services, vec!["jobs"]);
         assert_eq!(processes.get("jobs"), Some(&vec!["ui".to_string()]));
@@ -3631,7 +3198,7 @@ mod tests {
     fn resolve_process_filters_do_not_cross_services() {
         let entries = test_entries(&["jobs", "admin"]);
         let args = vec!["jobs.ui".to_string(), "admin.worker".to_string()];
-        let (services, processes) = resolve_service_targets(&args, &entries);
+        let (services, processes) = resolve_service_targets(&args, false, &entries);
 
         assert_eq!(services, vec!["jobs", "admin"]);
         assert_eq!(processes.get("jobs"), Some(&vec!["ui".to_string()]));
@@ -4005,69 +3572,6 @@ mod tests {
         let lines = status_data_to_lines(&data);
 
         assert!(lines.is_empty());
-    }
-
-    // --- status_data_to_lines: cron jobs ---
-
-    #[test]
-    fn lines_cron_jobs() {
-        let mut data = test_status_data(vec![]);
-        data.show_extras = true;
-        data.http_port = None;
-        data.cron_jobs = Some(vec![
-            koku::JobStatus {
-                name: "backup".to_string(),
-                state: koku::JobState::Idle,
-                last_run: None,
-                last_exit: None,
-                next_run: Some("2026-03-01T00:00:00".to_string()),
-            },
-            koku::JobStatus {
-                name: "sync".to_string(),
-                state: koku::JobState::Running,
-                last_run: None,
-                last_exit: None,
-                next_run: None,
-            },
-        ]);
-        let lines = status_data_to_lines(&data);
-
-        // "" + serve + "" + cron-header + backup + sync = 6
-        assert_eq!(lines.len(), 6);
-        let cron_header = span_text(&lines[3]);
-        assert!(cron_header.contains("cron"));
-        let dot = find_span(&lines[3], "●").unwrap();
-        assert_eq!(dot.style, Style::default().fg(Color::Green));
-
-        let backup_text = span_text(&lines[4]);
-        assert!(backup_text.contains("backup"));
-        assert!(backup_text.contains("idle"));
-        assert!(backup_text.contains("next 2026-03-01T00:00:00"));
-
-        let sync_text = span_text(&lines[5]);
-        assert!(sync_text.contains("sync"));
-        assert!(sync_text.contains("running"));
-    }
-
-    #[test]
-    fn lines_cron_no_running_jobs() {
-        let mut data = test_status_data(vec![]);
-        data.show_extras = true;
-        data.http_port = None;
-        data.cron_jobs = Some(vec![koku::JobStatus {
-            name: "cleanup".to_string(),
-            state: koku::JobState::Paused,
-            last_run: None,
-            last_exit: Some(0),
-            next_run: None,
-        }]);
-        let lines = status_data_to_lines(&data);
-
-        // "" + serve + "" + cron-header + cleanup = 5
-        assert_eq!(lines.len(), 5);
-        let cron_header = &lines[3];
-        let circle = find_span(cron_header, "○").unwrap();
-        assert_eq!(circle.style, Style::default().add_modifier(Modifier::DIM));
     }
 
     // --- parity: print_process_line text matches process_line_spans text ---

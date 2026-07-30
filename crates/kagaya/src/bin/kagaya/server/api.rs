@@ -271,7 +271,13 @@ type ActionResult = Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse
 pub async fn start(Path(name): Path<String>) -> ActionResult {
     tokio::task::spawn_blocking(move || {
         require_service(&name)?;
-        op_response(plist_sync::start_services(&[name], &ProcessFilters::new()))
+        let entries = config::load_service_entries();
+        op_response(plist_sync::start_services(
+            &entries,
+            &[name],
+            &ProcessFilters::new(),
+            plist_sync::StartOpts::default(),
+        ))
     })
     .await
     .unwrap_or_else(|_| Err(join_error()))
@@ -313,9 +319,12 @@ fn one_filter(name: &str, process: &str) -> ProcessFilters {
 pub async fn restart_process(Path((name, process)): Path<(String, String)>) -> ActionResult {
     tokio::task::spawn_blocking(move || {
         require_service(&name)?;
+        let entries = config::load_service_entries();
         op_response(plist_sync::restart_services(
+            &entries,
             &[name.clone()],
             &one_filter(&name, &process),
+            false,
         ))
     })
     .await

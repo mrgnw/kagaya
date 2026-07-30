@@ -66,7 +66,7 @@ pub fn enforce_log_caps() {
         .logs
         .max_mb
         .saturating_mul(MB);
-    let agents_dir = crate::launchd::user_agents_dir();
+    let agents_dir = crate::plist_sync::user_agents_dir();
     let entries = match fs::read_dir(&agents_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -74,7 +74,7 @@ pub fn enforce_log_caps() {
     let log_root = log_dir();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with(crate::launchd::KAGAYA_PREFIX) || !name.ends_with(".plist") {
+        if !name.starts_with(crate::plist_sync::KAGAYA_PREFIX) || !name.ends_with(".plist") {
             continue;
         }
         let path = entry.path();

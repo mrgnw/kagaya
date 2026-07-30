@@ -2,16 +2,28 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn kagaya_paths() -> muzan::DaemonPaths {
-    muzan::DaemonPaths::new("kagaya")
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 pub fn state_dir() -> PathBuf {
-    kagaya_paths().state_dir()
+    if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
+        PathBuf::from(dir).join("kagaya")
+    } else if let Some(home) = home_dir() {
+        home.join(".local").join("state").join("kagaya")
+    } else {
+        PathBuf::from("/tmp").join("kagaya")
+    }
 }
 
 pub fn config_dir() -> PathBuf {
-    kagaya_paths().config_dir()
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(dir).join("kagaya")
+    } else if let Some(home) = home_dir() {
+        home.join(".config").join("kagaya")
+    } else {
+        PathBuf::from("/tmp").join("kagaya").join("config")
+    }
 }
 
 pub fn duration_since_timestamp(ts: u64) -> u64 {

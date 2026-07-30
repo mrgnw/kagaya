@@ -1,0 +1,11 @@
+{
+	"worktree": {
+		"setup": "cd ui && pnpm install"
+	},
+	"scripts": {
+		"check": { "command": "cargo check --workspace" },
+		"test": { "command": "cargo test --workspace" },
+		"lint": { "command": "cargo clippy --workspace" },
+		"ui-check": { "command": "cd ui && pnpm check" }
+	}
+}

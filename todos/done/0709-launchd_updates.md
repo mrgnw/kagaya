@@ -1,3 +1,5 @@
+> obsolete: `ky launchd` was removed in the launchd API overhaul (Jul 2026) — ky itself is the launchctl frontend now.
+
 # Launchd Output Improvements
 
 ## Alias

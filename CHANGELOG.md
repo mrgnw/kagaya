@@ -5,7 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0-alpha.3] - 2026-07-30
+
+Prerelease, like alpha.1 and alpha.2 — `releases/latest` stays on 0.14.1, so the
+install script and `ky self update` are unaffected.
+
+### Fixed
+
+- **`ky restart` honours `depends_on`.** The restart path walked the topo-ordered units and restarted each back to back with no readiness barrier, so dependencies and dependents restarted concurrently. A service whose process depended on a `type = "task"` build could come back up against a half-written build directory and stay broken until restarted a second time.
+- **A `type = "task"` no longer reads ready before launchd has spawned it.** Readiness was `!is_running_label(label)`, true both when a task had finished and when it had not started yet; launchd takes ~250ms to spawn after `kickstart`, well under the 500ms readiness poll. Readiness now tracks launchd's `runs` counter from a baseline captured before the unit is kicked, tolerating both counter jumps greater than one and the reset to 0 across `bootout`/`bootstrap`. This affected `ky start` too, where it was masked by `RunAtLoad` usually spawning the task in time.
+- **`ky start` no longer reports "started" without starting anything.** With autostart off, `bootstrap` loads a job idle rather than running it, so `ky start` on such a service reported success while starting nothing — and any dependent waiting on it blocked until its `ready_timeout`.
+
+## [0.15.0-alpha.2] - 2026-07-09
+
+### Removed
+
+- `ky cron` and the koku/muzan dependencies — cron management belongs to koku's own CLI; kagaya now has zero path dependencies.
+- Unused dependencies: `nix`, `tower-http`, `tracing`, `tracing-subscriber`.
+
+### Changed
+
+- All dependencies bumped to latest (`toml` 1, `listeners` 0.6, and a full `cargo update`).
+
+## [0.15.0-alpha.1] - 2026-07-09
+
+Pre-release of the launchd API overhaul — published as a GitHub prerelease, so
+`releases/latest` (install script, `ky self update`) stays on 0.14.1.
+
+### Added
+
+- **`--wait` works**: `ky start db --wait` blocks until every started process is ready (readiness priority: `ready` command exit 0 > all `ports` listening > task exited > running), bounded by `ready_timeout`.
+- **`depends_on` works**: processes start in dependency order; a dependency must be ready before its dependents start, and an unready dependency skips them with a clear error.
+- **`..` chains work**: `ky start db..api` starts `db`, waits until it is ready, then starts `api`. `ky start --autostart` applies the same sequencing to `depends_on` chains in projects.toml.
+- **`--force` works**: `ky start`/`ky restart` with `--force` kill foreign processes holding the service's configured ports (SIGTERM, bounded wait, then SIGKILL).
+- **Sync-on-start**: `ky start` and `ky restart` re-sync plists from services.toml/projects.toml first, so config edits take effect without `ky reload-config`.
+- **Unsupported-key warnings**: unknown keys in services.toml entries now warn loudly instead of being silently ignored.
+- `ky serve restart`; `ky serve` itself is now idempotent and reports `already running`.
 
 ### Added
 
@@ -13,7 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ky status --watch 10` parses (previously: `unknown service: 10`).
+- `ky restart --all` restarts everything (previously fell back to the cwd project).
+- The `serve` row in `ky status` reflects the daemon's real state (was always `off`), and the web server binds `daemon.port` from config.toml instead of a hardcoded 13369.
+- launchctl calls run under a hard 15s deadline, and generated plists use `ThrottleInterval = 5` without `kickstart -p` — `ky restart` can no longer hang for 30+ seconds in launchd's spawn throttle.
 - **Port-safe restart**: restarting a service that binds ports now fully stops the running instance, waits (bounded, 5s) for it to release its ports, and only then starts a fresh instance — removing the rapid-restart race that could leave two listeners or a service that failed to rebind. If a port is held by an unrelated process, `ky restart` now fails with a clear error (`port N held by pid P (name)`) instead of letting launchd crash-loop. Portless services keep the cheap `kickstart` path, so they don't raise a macOS "Login Items" notification on every restart.
+
+### Removed
+
+- `ky launchd`/`lctl` (generic launchd agent manager), `ky tail` (use `ky echo`), `ky migrate` (`ky add` detects Procfiles), the unused in-process supervisor, and the `ubermind-cli` crate.
+- Config keys `max_retries`, `restart_delay`, `pre_start`, and the `[logs]` block — launchd owns restart pacing (`KeepAlive` + throttle); log rotation was supervisor-era.
+
+### Changed
+
+- One vocabulary everywhere: a registered unit is a **service**, its units are **processes** (docs previously mixed project/service/process/agent).
+- README, completions, and `docs/api.md` (full command tree) rewritten for the launchd backend.
 
 ## [0.14.1] - 2026-05-15
 

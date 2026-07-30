@@ -1,8 +1,6 @@
 mod api;
 
 use axum::{
-    body::Body,
-    extract::Request,
     http::{header, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -41,6 +39,7 @@ pub fn router() -> Router {
 
 pub async fn run() {
     let app = router();
+    let port = crate::config::load_global_config().daemon.port;
 
     // Bound per-service log growth (issue #6): launchd has no native rotation, so
     // the daemon copytruncates oversized logs. `interval` fires once immediately,
@@ -56,10 +55,10 @@ pub async fn run() {
     // Listen on both loopback stacks (127.0.0.1 and ::1) so a local reverse
     // proxy reaches us whether it dials localhost via IPv4 or IPv6. Both are
     // loopback-only — never 0.0.0.0.
-    let v4 = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 13369)))
+    let v4 = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
         .await
-        .expect("bind 127.0.0.1:13369");
-    match tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 13369))).await {
+        .unwrap_or_else(|e| panic!("bind 127.0.0.1:{}: {}", port, e));
+    match tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port))).await {
         Ok(v6) => {
             let app6 = app.clone();
             let s4 = tokio::spawn(async move { axum::serve(v4, app).await });
@@ -94,6 +93,7 @@ async fn static_handler(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, extract::Request};
     use tower::ServiceExt;
 
     #[tokio::test]
