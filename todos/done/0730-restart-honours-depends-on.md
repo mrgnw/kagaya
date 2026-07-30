@@ -1,4 +1,11 @@
+---
+branch: launchd-api-overhaul
+---
+
 # `ky restart` ignores `depends_on`, and a task reads ready before it starts
+
+> **Done 2026-07-30.** Both defects fixed in `a4e05f1`. Step 0 findings and the
+> before/after measurements are recorded at the bottom of this file.
 
 Found 2026-07-30 while debugging `blog-cms`, whose `web` process depended on a
 `type = "task"` build. Every `ky restart blog-cms` left the service returning
@@ -134,3 +141,66 @@ rather than copying it — but only that block; do not merge start and restart.
   load-bearing for services with `ports` — do not restructure it.
 - Keep `ky restart` fast for the common case: a service with no `depends_on`
   must not gain any new waiting.
+
+---
+
+## Outcome
+
+### Step 0 findings (measured, macOS 25.5, uid 501)
+
+`analysis/step0_runs_signal.py`. `runs` holds up, with two tolerances:
+
+| Question | Answer |
+| --- | --- |
+| `runs` on a bootstrapped job that never ran | present as `runs = 0`, **not** absent; `last exit code = (never exited)` |
+| Does `runs` increment per spawn? | Yes, but **not by 1** — observed `0 -> 1 -> 3` |
+| Does `runs` survive `bootout` + `bootstrap`? | **No, resets to 0** (observed `3 -> 0`) |
+| Delay from `kickstart` to a visible pid | **~0.26s**, well under the 500ms `READY_POLL_INTERVAL` |
+
+The 0.26s spawn delay is the direct cause of defect 2: a just-kicked task reads
+"not running" purely because launchd has not spawned it yet.
+
+Only the direction of travel of `runs` is therefore usable, never the delta, and
+a count *below* the baseline must be read as a fresh epoch rather than as
+"never ready".
+
+### Before / after (`analysis/repro_restart_depends_on.py`)
+
+Isolated repro: `[build]` is a `type = "task"` that sleeps 4s then stamps a
+file; `[web]` has `depends_on = "build"` and stamps a file the moment it starts.
+The number is `web_start - build_done`, so negative means the dependent started
+while the task was still running.
+
+```
+                                ky start     ky restart
+autostart=on     before            +0.69          -3.89
+autostart=on     after             +1.68          +0.75
+autostart=off    before   BUG web-no-build        -2.96
+autostart=off    after     ok both skipped        +1.30
+```
+
+- `ky restart` is the headline fix: negative (dependent started ~3-4s early)
+  before, positive after, in both autostart modes.
+- `autostart=off` / `ky start` shows defect 2 on its own: the task never ran at
+  all (`runs = 0`), the old code called it ready and started `web` regardless;
+  the new code withholds `web` and reports
+  `web: skipped — build not ready after 10s`.
+- `autostart=on` / `ky start` held before the fix too — that is the masking the
+  plan predicted: `RunAtLoad` spawns the task fast enough that the old
+  `!is_running_label` check usually caught it mid-run.
+
+### Follow-up found while testing (NOT fixed here, separate defect)
+
+`start_one_label` (`plist_sync.rs`) bootstraps and reports `"started"` without
+kickstarting:
+
+```rust
+bootstrap(path)?;
+Ok("started")
+```
+
+With `RunAtLoad = false` the job loads idle and never runs, so `ky start` on an
+autostart-off service reports success while starting nothing. `restart_one_label`
+already guards this (`bootstrap(path)?; if !is_running_label(label) { kickstart_label(label)?; }`).
+This is why the `autostart=off` rows above show the task never running. Out of
+scope for this todo; worth its own fix.
