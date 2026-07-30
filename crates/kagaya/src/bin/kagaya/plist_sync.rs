@@ -387,20 +387,45 @@ pub fn is_loaded_label(label: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn is_running_label(label: &str) -> bool {
-    let out = run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)]);
-    match out {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            text.lines().any(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("pid = ")
-                    && !trimmed.starts_with("pid = 0")
-                    && !trimmed.contains("(none)")
-            })
-        }
-        _ => false,
+/// What `launchctl print` says about a label right now: launchd's lifetime
+/// spawn counter, and whether an instance is live.
+///
+/// `runs` is None when the job is not loaded (or the field is absent), which is
+/// distinct from `Some(0)` — "loaded but never spawned".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TaskRunState {
+    runs: Option<u64>,
+    running: bool,
+}
+
+/// Pull `runs = N` and a live `pid = N` out of a `launchctl print` block.
+fn parse_task_run_state(text: &str) -> TaskRunState {
+    TaskRunState {
+        runs: text.lines().find_map(|line| {
+            line.trim_start()
+                .strip_prefix("runs = ")?
+                .trim()
+                .parse()
+                .ok()
+        }),
+        running: text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("pid = ")
+                && !trimmed.starts_with("pid = 0")
+                && !trimmed.contains("(none)")
+        }),
     }
+}
+
+fn task_run_state(label: &str) -> TaskRunState {
+    match run_launchctl(&["print", &format!("gui/{}/{}", get_uid(), label)]) {
+        Ok(o) if o.status.success() => parse_task_run_state(&String::from_utf8_lossy(&o.stdout)),
+        _ => TaskRunState::default(),
+    }
+}
+
+pub fn is_running_label(label: &str) -> bool {
+    task_run_state(label).running
 }
 
 pub fn is_loaded(project: &str) -> bool {
@@ -902,6 +927,66 @@ fn prepare_units(
         .collect())
 }
 
+/// Per-label `runs`/pid state captured immediately before we start or restart
+/// a task, so readiness can mean "finished *this* invocation" rather than
+/// "no process right now". Only tasks are recorded; nothing else consults it.
+type TaskBaselines = HashMap<String, TaskRunState>;
+
+/// Snapshot a task's counter before we kick it. Non-tasks are skipped so a
+/// service without dependencies pays no extra `launchctl print`.
+fn record_task_baseline(unit: &Unit, label: &str, baselines: &mut TaskBaselines) {
+    let is_task = unit
+        .def
+        .as_ref()
+        .is_some_and(|d| d.service_type == ServiceType::Task);
+    if is_task {
+        baselines.insert(label.to_string(), task_run_state(label));
+    }
+}
+
+/// Readiness barrier shared by start and restart: every `depends_on` entry of
+/// `unit` must be ready before `unit` itself is touched.
+///
+/// Returns one message per unready dependency; empty means the caller may
+/// proceed. Dependencies already confirmed ready this pass are not re-waited,
+/// and a dependency with no plist of its own is not something we can wait on.
+fn wait_for_deps(
+    entry: &ServiceEntry,
+    project: &str,
+    unit: &Unit,
+    units: &[Unit],
+    baselines: &TaskBaselines,
+    ready_done: &mut HashSet<String>,
+) -> Vec<String> {
+    let Some(def) = &unit.def else {
+        return Vec::new();
+    };
+    let mut unready = Vec::new();
+    for dep in &def.depends_on {
+        if ready_done.contains(dep.as_str()) {
+            continue;
+        }
+        let dep_unit = units
+            .iter()
+            .find(|u| u.proc_name.as_deref() == Some(dep.as_str()));
+        let Some(dep_unit) = dep_unit else { continue };
+        let dep_label = label_for(project, dep_unit.proc_name.as_deref());
+        let baseline = baselines.get(&dep_label).copied().unwrap_or_default();
+        match wait_unit_ready(entry, dep_unit, &dep_label, baseline) {
+            Ok(()) => {
+                ready_done.insert(dep.clone());
+            }
+            Err(e) => unready.push(format!(
+                "{}: skipped — {} {}",
+                unit.display(project),
+                dep,
+                e
+            )),
+        }
+    }
+    unready
+}
+
 fn start_one_service(
     entries: &BTreeMap<String, ServiceEntry>,
     project: &str,
@@ -916,42 +1001,23 @@ fn start_one_service(
 
     let mut messages = Vec::new();
     let mut any_err = false;
-    let mut ready_done: HashSet<&str> = HashSet::new();
+    let mut ready_done: HashSet<String> = HashSet::new();
+    let mut baselines: TaskBaselines = HashMap::new();
 
     for unit in &units {
         let label = label_for(project, unit.proc_name.as_deref());
 
-        // Readiness barrier: dependencies started earlier in the topo order
-        // must be ready before this one starts; an unready dependency means
-        // the dependent is not started at all.
         let mut deps_ready = true;
-        if let (Some(def), Some(entry)) = (&unit.def, entry) {
-            for dep in &def.depends_on {
-                if ready_done.contains(dep.as_str()) {
-                    continue;
-                }
-                let dep_unit = units
-                    .iter()
-                    .find(|u| u.proc_name.as_deref() == Some(dep.as_str()));
-                let Some(dep_unit) = dep_unit else { continue };
-                let dep_label = label_for(project, dep_unit.proc_name.as_deref());
-                match wait_unit_ready(entry, dep_unit, &dep_label) {
-                    Ok(()) => {
-                        ready_done.insert(dep.as_str());
-                    }
-                    Err(e) => {
-                        deps_ready = false;
-                        any_err = true;
-                        messages.push(format!(
-                            "{}: skipped — {} {}",
-                            unit.display(project),
-                            dep,
-                            e
-                        ));
-                    }
-                }
+        if let Some(entry) = entry {
+            let unready = wait_for_deps(entry, project, unit, &units, &baselines, &mut ready_done);
+            if !unready.is_empty() {
+                deps_ready = false;
+                any_err = true;
+                messages.extend(unready);
             }
-            if opts.force && !def.ports.is_empty() {
+        }
+        if let (Some(def), true) = (&unit.def, opts.force) {
+            if !def.ports.is_empty() {
                 messages.extend(force_free_ports(&label, &def.ports));
             }
         }
@@ -959,6 +1025,7 @@ fn start_one_service(
             continue;
         }
 
+        record_task_baseline(unit, &label, &mut baselines);
         match start_one_label(&label, &unit.path) {
             Ok(verb) => messages.push(format!("{}: {}", unit.display(project), verb)),
             Err(e) => {
@@ -980,7 +1047,8 @@ fn start_one_service(
                     continue;
                 }
                 let label = label_for(project, unit.proc_name.as_deref());
-                if let Err(e) = wait_unit_ready(entry, unit, &label) {
+                let baseline = baselines.get(&label).copied().unwrap_or_default();
+                if let Err(e) = wait_unit_ready(entry, unit, &label, baseline) {
                     any_err = true;
                     messages.push(format!("{}: {}", name, e));
                 } else {
@@ -1038,15 +1106,34 @@ fn restart_one_service(
         Err(message) => return OpResult { ok: false, message },
     };
 
+    let entry = entries.get(project);
+
     let mut messages = Vec::new();
     let mut any_err = false;
+    let mut ready_done: HashSet<String> = HashSet::new();
+    let mut baselines: TaskBaselines = HashMap::new();
+
     for unit in &units {
         let label = label_for(project, unit.proc_name.as_deref());
+
+        // Same barrier as the start path: units are topo-ordered, so a
+        // dependency was restarted on an earlier iteration and must be ready
+        // before its dependent is torn down and brought back.
+        if let Some(entry) = entry {
+            let unready = wait_for_deps(entry, project, unit, &units, &baselines, &mut ready_done);
+            if !unready.is_empty() {
+                any_err = true;
+                messages.extend(unready);
+                continue;
+            }
+        }
+
         let expected = unit
             .def
             .as_ref()
             .map(|d| d.ports.clone())
             .unwrap_or_else(|| expected_ports_for(&unit.path, unit.proc_name.as_deref()));
+        record_task_baseline(unit, &label, &mut baselines);
         match restart_one_label(&label, &unit.path, &expected, force) {
             Ok(verb) => messages.push(format!("{}: {}", unit.display(project), verb)),
             Err(e) => {
@@ -1065,9 +1152,45 @@ fn restart_one_service(
 
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Has this task finished an invocation since `baseline` was captured?
+///
+/// "Not running" alone is not enough: launchd takes ~250ms to spawn a job after
+/// `kickstart`, well under `READY_POLL_INTERVAL`, so a just-kicked task reads
+/// "not running" simply because it has not started yet. The `runs` counter
+/// distinguishes the two, with two tolerances measured on macOS 25.5:
+///
+/// - `runs` can jump by more than one between samples (observed 1 -> 3), so
+///   only the direction of travel is meaningful, never the delta.
+/// - `bootout` + `bootstrap` resets it to 0 (observed 3 -> 0), and
+///   `restart_one_label` does exactly that for port-holding units. A count
+///   *below* the baseline is therefore a fresh epoch we created, in which any
+///   run at all is ours.
+///
+/// A task already running when the baseline was taken needs no counter at all:
+/// it has completed once it is no longer running.
+fn task_completed_since(baseline: TaskRunState, now: TaskRunState) -> bool {
+    if now.running {
+        return false;
+    }
+    if baseline.running {
+        return true;
+    }
+    match (baseline.runs, now.runs) {
+        (_, None) => false,
+        (Some(base), Some(n)) if n < base => n >= 1,
+        (Some(base), Some(n)) => n > base,
+        (None, Some(n)) => n >= 1,
+    }
+}
+
 /// Wait (bounded by ready_timeout) until a unit is ready:
 /// `ready` command exit 0 > all `ports` listening > task finished > running.
-fn wait_unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> Result<(), String> {
+fn wait_unit_ready(
+    entry: &ServiceEntry,
+    unit: &Unit,
+    label: &str,
+    task_baseline: TaskRunState,
+) -> Result<(), String> {
     let timeout = unit
         .def
         .as_ref()
@@ -1076,7 +1199,7 @@ fn wait_unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> Result<(),
         .max(1);
     let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
-        if unit_ready(entry, unit, label) {
+        if unit_ready(entry, unit, label, task_baseline) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1086,7 +1209,7 @@ fn wait_unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> Result<(),
     }
 }
 
-fn unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> bool {
+fn unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str, task_baseline: TaskRunState) -> bool {
     let Some(def) = &unit.def else {
         return is_running_label(label);
     };
@@ -1104,8 +1227,8 @@ fn unit_ready(entry: &ServiceEntry, unit: &Unit, label: &str) -> bool {
         return ports_in_use(&def.ports).len() == def.ports.len();
     }
     if def.service_type == ServiceType::Task {
-        // ponytail: task = done when no longer running; exit code not checked
-        return !is_running_label(label);
+        // ponytail: done when this invocation has finished; exit code not checked
+        return task_completed_since(task_baseline, task_run_state(label));
     }
     is_running_label(label)
 }
@@ -1122,7 +1245,9 @@ pub fn wait_service_ready(
     let units = prepare_units(entries, project, proc_filter)?;
     for unit in &units {
         let label = label_for(project, unit.proc_name.as_deref());
-        wait_unit_ready(entry, unit, &label)
+        // No baseline: this barrier observes units someone else started, so
+        // "has ever completed a run" is the strongest claim available.
+        wait_unit_ready(entry, unit, &label, TaskRunState::default())
             .map_err(|e| format!("{}: {}", unit.display(project), e))?;
     }
     Ok(())
@@ -1452,7 +1577,8 @@ fn expected_ports_for(path: &PathBuf, proc_opt: Option<&str>) -> Vec<u16> {
 mod tests {
     use super::{
         filtered_project_plists, format_port_conflict, parse_etime, parse_service_ports,
-        tcp_listener_holders, wait_for_ports_free, PortHolder,
+        parse_task_run_state, task_completed_since, tcp_listener_holders, wait_for_ports_free,
+        PortHolder, TaskRunState,
     };
     use std::path::PathBuf;
 
@@ -1514,6 +1640,142 @@ mod tests {
             filtered_project_plists("jobs", plist_set(), &["worker".to_string()]).unwrap_err();
 
         assert_eq!(err, "jobs: process target not found: worker");
+    }
+
+    // ── task readiness ─────────────────────────────────────────────────────
+    //
+    // Fixtures are trimmed from real `launchctl print gui/501/<label>` output
+    // on macOS 25.5; the nested `state = active` lines are why the parser
+    // anchors on the field name rather than searching the whole block.
+
+    const PRINT_NEVER_RUN: &str = "\
+com.kagaya.demo.build = {
+\tactive count = 0
+\tstate = not running
+\truns = 0
+\tlast exit code = (never exited)
+}";
+
+    const PRINT_RUNNING: &str = "\
+com.kagaya.demo.build = {
+\tactive count = 1
+\tstate = running
+\truns = 1
+\tpid = 12567
+\tendpoints = {
+\t\t\"com.kagaya.demo\" = {
+\t\t\tstate = active
+\t\t}
+\t}
+}";
+
+    const PRINT_FINISHED: &str = "\
+com.kagaya.demo.build = {
+\tstate = not running
+\truns = 1
+\tlast exit code = 0
+}";
+
+    fn stopped(runs: u64) -> TaskRunState {
+        parse_task_run_state(&format!("\tstate = not running\n\truns = {}\n", runs))
+    }
+
+    fn running(runs: u64) -> TaskRunState {
+        parse_task_run_state(&format!("\truns = {}\n\tpid = 999\n", runs))
+    }
+
+    #[test]
+    fn never_run_task_reports_runs_zero_not_absent() {
+        // Q1 from the plan: launchd emits `runs = 0` for a bootstrapped job
+        // that has never spawned. Absent `runs` must stay distinguishable.
+        let state = parse_task_run_state(PRINT_NEVER_RUN);
+        assert_eq!(state.runs, Some(0));
+        assert!(!state.running);
+    }
+
+    #[test]
+    fn running_task_reports_pid_and_counter() {
+        let state = parse_task_run_state(PRINT_RUNNING);
+        assert_eq!(state.runs, Some(1));
+        assert!(state.running);
+    }
+
+    #[test]
+    fn finished_task_reports_counter_without_pid() {
+        let state = parse_task_run_state(PRINT_FINISHED);
+        assert_eq!(state.runs, Some(1));
+        assert!(!state.running);
+    }
+
+    #[test]
+    fn unloaded_job_has_no_counter() {
+        assert_eq!(parse_task_run_state(""), TaskRunState::default());
+        assert_eq!(parse_task_run_state("").runs, None);
+    }
+
+    #[test]
+    fn idle_pid_forms_are_not_running() {
+        assert!(!parse_task_run_state("\tpid = 0\n").running);
+        assert!(!parse_task_run_state("\tpid = (none)\n").running);
+    }
+
+    #[test]
+    fn just_kickstarted_task_is_not_ready_before_launchd_spawns_it() {
+        // The original defect: launchd takes ~250ms to spawn, so the task is
+        // "not running" purely because it has not started. It must not read
+        // ready just because no pid exists yet.
+        assert!(!task_completed_since(stopped(1), stopped(1)));
+    }
+
+    #[test]
+    fn task_is_not_ready_while_running() {
+        assert!(!task_completed_since(stopped(1), running(2)));
+    }
+
+    #[test]
+    fn task_is_ready_once_counter_moved_and_process_exited() {
+        assert!(task_completed_since(stopped(1), stopped(2)));
+    }
+
+    #[test]
+    fn counter_jumping_more_than_one_still_counts_as_ready() {
+        // Observed on macOS 25.5: consecutive kickstarts took runs 1 -> 3.
+        // Only the direction of travel is meaningful.
+        assert!(task_completed_since(stopped(1), stopped(3)));
+    }
+
+    #[test]
+    fn bootstrapped_but_never_run_task_is_not_ready() {
+        assert!(!task_completed_since(stopped(0), stopped(0)));
+        assert!(!task_completed_since(TaskRunState::default(), stopped(0)));
+    }
+
+    #[test]
+    fn counter_reset_by_bootout_bootstrap_is_a_fresh_epoch() {
+        // `restart_one_label` boots out and bootstraps port-holding units,
+        // which resets runs to 0 (observed 3 -> 0). Mid-reset the task has not
+        // run yet; once it has, that run is ours even though 1 < 3.
+        assert!(!task_completed_since(stopped(3), stopped(0)));
+        assert!(task_completed_since(stopped(3), stopped(1)));
+    }
+
+    #[test]
+    fn task_already_running_at_baseline_is_ready_once_it_exits() {
+        // `start_one_label` reports "already running" without kickstarting, so
+        // the counter never moves; completion is the pid going away.
+        assert!(!task_completed_since(running(1), running(1)));
+        assert!(task_completed_since(running(1), stopped(1)));
+    }
+
+    #[test]
+    fn unreadable_current_state_is_never_ready() {
+        assert!(!task_completed_since(stopped(1), TaskRunState::default()));
+    }
+
+    #[test]
+    fn without_a_baseline_any_completed_run_counts() {
+        // `wait_service_ready` (ky start a..b) has no baseline to capture.
+        assert!(task_completed_since(TaskRunState::default(), stopped(2)));
     }
 
     // ── port-safe restart ──────────────────────────────────────────────────
