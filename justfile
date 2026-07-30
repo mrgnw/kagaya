@@ -8,6 +8,11 @@ bump part="patch":
 	#!/bin/bash
 	set -euo pipefail
 	current="{{version}}"
+	# 0.15.0-alpha.2 would reach $((patch + 1)) as "0-alpha.2" and die with
+	# "invalid arithmetic operator". Say so instead of failing cryptically.
+	case "${current}" in
+		*-*) echo "refusing to bump prerelease ${current}: set the version in Cargo.toml by hand"; exit 1 ;;
+	esac
 	IFS='.' read -r major minor patch <<< "${current}"
 	case "{{part}}" in
 		patch) patch=$((patch + 1)) ;;
@@ -79,9 +84,16 @@ gh-release confirm="yes":
 		read -rp "create github release {{tag}}? [y/N] " ans
 		[[ "$ans" =~ ^[Yy] ]] || exit 1
 	fi
+	# A semver prerelease (0.15.0-alpha.3) must not become releases/latest —
+	# that is what the install script and `ky self update` follow.
+	prerelease=""
+	case "{{version}}" in
+		*-*) prerelease="--prerelease" ;;
+	esac
 	gh release create "{{tag}}" \
 		--title "{{tag}}" \
 		--generate-notes \
+		${prerelease} \
 		dist/*.tar.gz
 	echo
 	echo "released {{tag}}"
