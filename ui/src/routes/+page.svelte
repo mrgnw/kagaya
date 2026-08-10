@@ -23,6 +23,7 @@
 	const stateOrder = ["on", "degraded", "err", "off"] as const satisfies AggregateState[];
 
 	let services = $state<ServiceWithState[]>([]);
+	let loaded = $state(false);
 	let autostartStatus = $state<AutostartStatus | null>(null);
 	let error = $state("");
 	let refreshTimer: ReturnType<typeof setInterval>;
@@ -78,6 +79,7 @@
 	async function refresh() {
 		try {
 			services = (await getServices()) as ServiceWithState[];
+			loaded = true;
 			error = "";
 			for (const name of selectedNames) {
 				if (!services.some((s) => s.name === name)) selectedNames.delete(name);
@@ -338,10 +340,14 @@
 
 		{#if services.length === 0 && !error}
 			<div class="empty">
-				<p>No projects configured</p>
-				<p class="empty-hint">
-					Run <code>ky init</code> to get started
-				</p>
+				{#if loaded}
+					<p>No projects configured</p>
+					<p class="empty-hint">
+						Run <code>ky init</code> to get started
+					</p>
+				{:else}
+					<p>Loading…</p>
+				{/if}
 			</div>
 		{/if}
 	</div>
