@@ -71,6 +71,17 @@ pub async fn run() {
     }
 }
 
+/// Asset filenames under `_app/immutable` carry a content hash, so they can be
+/// cached forever. Everything else — index.html above all — must revalidate, or
+/// a browser pins an old build and never sees a `ky self update`.
+fn cache_control_for(path: &str) -> &'static str {
+    if path.starts_with("_app/immutable/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
 async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -78,13 +89,20 @@ async fn static_handler(uri: Uri) -> Response {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             (
-                [(header::CONTENT_TYPE, mime.as_ref())],
+                [
+                    (header::CONTENT_TYPE, mime.as_ref()),
+                    (header::CACHE_CONTROL, cache_control_for(path)),
+                ],
                 content.data.into_owned(),
             )
                 .into_response()
         }
         None => match UiAssets::get("index.html") {
-            Some(content) => Html(content.data.into_owned()).into_response(),
+            Some(content) => (
+                [(header::CACHE_CONTROL, "no-cache")],
+                Html(content.data.into_owned()),
+            )
+                .into_response(),
             None => (StatusCode::NOT_FOUND, "ui not built").into_response(),
         },
     }
@@ -142,6 +160,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn html_revalidates_while_hashed_assets_are_immutable() {
+        assert_eq!(cache_control_for("index.html"), "no-cache");
+        assert_eq!(cache_control_for("settings.html"), "no-cache");
+        assert_eq!(
+            cache_control_for("_app/immutable/nodes/2.abc123.js"),
+            "public, max-age=31536000, immutable"
+        );
+        // A path that merely mentions immutable must not be cached forever.
+        assert_eq!(cache_control_for("docs/immutable/guide.html"), "no-cache");
     }
 
     #[tokio::test]
