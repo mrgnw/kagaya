@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ky status` and the web UI are ~26× faster.** `status_for` ran `launchctl list` once per service, plus a `ps` and a full system socket scan once per process — roughly 110 subprocess spawns for 32 services, which made `GET /api/services` take 6.6s and the CLI 2.2s. Each of the three is now a single batched call per query: 0.25s and 0.45s respectively. Uptimes and ports are unchanged.
+- **A stopped service no longer looks crashed in the web UI.** `error_tail` was attached to every service that was not running, so a cleanly stopped one showed the previous run's stderr — install progress, warnings, old failures — in red under its name. The tail is now sent only for services in the `err` or `degraded` state.
+- **The web UI says "Loading…" instead of "No projects configured" before its first fetch completes.** The empty state rendered whenever the list was empty, including the initial render, so every page load flashed "Run `ky init` to get started" at a fully configured install.
+- **`ky serve` sends cache headers.** It sent none, so browsers heuristically cached `index.html` and kept serving a stale embedded UI after an update. HTML now revalidates (`no-cache`); content-hashed `_app/immutable/*` assets are cached for a year.
+
 ## [0.15.0-alpha.4] - 2026-07-30
 
 Prerelease — `releases/latest` stays on 0.14.1, so the install script and
