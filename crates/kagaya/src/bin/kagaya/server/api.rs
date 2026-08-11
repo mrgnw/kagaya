@@ -179,7 +179,12 @@ fn to_service_info(st: &ServiceStatus, entry: &ServiceEntry) -> ServiceInfo {
         autostart: entry.autostart,
         urls: (!entry.urls.is_empty()).then(|| entry.urls.clone()),
         ports: (!ports.is_empty()).then_some(ports),
-        error_tail: (!st.is_running())
+        // Only a failed service's log tail is an error. A cleanly stopped one
+        // still has its last run's stderr on disk — showing it reads as a crash.
+        error_tail: matches!(
+            st.aggregate_state(),
+            ServiceState::Err | ServiceState::Degraded
+        )
             .then(|| error_tail_for(&st.name))
             .flatten(),
     }
@@ -237,9 +242,10 @@ fn join_error() -> (StatusCode, Json<ErrorResponse>) {
 
 pub async fn list_services() -> Json<Vec<ServiceInfo>> {
     let infos = tokio::task::spawn_blocking(|| {
-        config::load_service_entries()
-            .values()
-            .map(|e| to_service_info(&plist_sync::status_for(e), e))
+        let entries = config::load_service_entries();
+        plist_sync::query_all(&entries)
+            .iter()
+            .filter_map(|st| entries.get(&st.name).map(|e| to_service_info(st, e)))
             .collect()
     })
     .await

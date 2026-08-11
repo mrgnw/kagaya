@@ -657,16 +657,34 @@ pub fn log_paths(project: &str) -> Option<(PathBuf, PathBuf)> {
         .map(|(_, o, e)| (o, e))
 }
 
-fn uptime_secs_for_pid(pid: u32) -> Option<u64> {
-    let output = Command::new("ps")
-        .args(["-o", "etime=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// One `ps` for every pid at once. Per-pid calls turn a status query into
+/// dozens of subprocess spawns, which is what made the web UI take seconds.
+fn uptimes_for_pids(pids: &[u32]) -> HashMap<u32, u64> {
+    let mut map = HashMap::new();
+    if pids.is_empty() {
+        return map;
     }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    parse_etime(&raw)
+    let list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "pid=,etime=", "-p", &list])
+        .output()
+    else {
+        return map;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((pid, etime)) = line.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let (Ok(pid), Some(secs)) = (pid.parse::<u32>(), parse_etime(etime.trim())) else {
+            continue;
+        };
+        map.insert(pid, secs);
+    }
+    map
 }
 
 fn parse_etime(s: &str) -> Option<u64> {
@@ -690,6 +708,36 @@ fn parse_etime(s: &str) -> Option<u64> {
 
 pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
     let launchctl = parse_launchctl_list();
+    let mut status = status_from_launchctl(svc, &launchctl);
+    fill_runtime(std::slice::from_mut(&mut status));
+    status
+}
+
+/// Uptime and listening ports for every process in one `ps` and one socket scan.
+/// Both are whole-system queries, so doing them per process is pure waste.
+fn fill_runtime(statuses: &mut [ServiceStatus]) {
+    let pids: Vec<u32> = statuses
+        .iter()
+        .flat_map(|s| s.processes.iter().filter_map(|p| p.pid))
+        .collect();
+    if pids.is_empty() {
+        return;
+    }
+    let uptimes = uptimes_for_pids(&pids);
+    let ports = listening_ports_for_pids(&pids);
+    for proc in statuses.iter_mut().flat_map(|s| s.processes.iter_mut()) {
+        let Some(pid) = proc.pid else { continue };
+        proc.ports = ports.get(&pid).cloned().unwrap_or_default();
+        if let ProcessState::Running { uptime_secs, .. } = &mut proc.state {
+            *uptime_secs = uptimes.get(&pid).copied().unwrap_or(0);
+        }
+    }
+}
+
+fn status_from_launchctl(
+    svc: &ServiceEntry,
+    launchctl: &BTreeMap<String, (Option<u32>, Option<i32>)>,
+) -> ServiceStatus {
     let plists = plist_paths_for_project(&svc.name);
 
     let mut processes = Vec::new();
@@ -719,7 +767,7 @@ pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
                 Some((Some(pid), _)) => (
                     ProcessState::Running {
                         pid: *pid,
-                        uptime_secs: uptime_secs_for_pid(*pid).unwrap_or(0),
+                        uptime_secs: 0,
                     },
                     Some(*pid),
                 ),
@@ -733,14 +781,6 @@ pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
                 Some((None, _)) => (ProcessState::Stopped, None),
                 None => (ProcessState::Stopped, None),
             };
-            let ports: Vec<u16> = pid
-                .map(|p| {
-                    listening_ports_for_pids(&[p])
-                        .into_values()
-                        .flatten()
-                        .collect()
-                })
-                .unwrap_or_default();
             let proc_display = proc_opt.clone().unwrap_or_else(|| svc.name.clone());
             processes.push(ProcessStatus {
                 name: proc_display,
@@ -748,7 +788,7 @@ pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
                 pid,
                 autostart: run_at_load,
                 service_type: ServiceType::Service,
-                ports,
+                ports: vec![],
                 ports_expected: vec![],
                 state_since: None,
                 cpu_percent: None,
@@ -765,7 +805,13 @@ pub fn status_for(svc: &ServiceEntry) -> ServiceStatus {
 }
 
 pub fn query_all(services: &BTreeMap<String, ServiceEntry>) -> Vec<ServiceStatus> {
-    services.values().map(status_for).collect()
+    let launchctl = parse_launchctl_list();
+    let mut statuses: Vec<ServiceStatus> = services
+        .values()
+        .map(|svc| status_from_launchctl(svc, &launchctl))
+        .collect();
+    fill_runtime(&mut statuses);
+    statuses
 }
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
@@ -1588,10 +1634,24 @@ fn expected_ports_for(path: &PathBuf, proc_opt: Option<&str>) -> Vec<u16> {
 mod tests {
     use super::{
         filtered_project_plists, format_port_conflict, parse_etime, parse_service_ports,
-        parse_task_run_state, task_completed_since, tcp_listener_holders, wait_for_ports_free,
-        PortHolder, TaskRunState,
+        parse_task_run_state, task_completed_since, tcp_listener_holders, uptimes_for_pids,
+        wait_for_ports_free, PortHolder, TaskRunState,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn uptimes_batches_every_pid_in_one_call() {
+        assert!(uptimes_for_pids(&[]).is_empty());
+
+        let me = std::process::id();
+        let batch = uptimes_for_pids(&[me, 1]);
+        assert!(batch.contains_key(&me), "own pid missing from {batch:?}");
+        assert!(batch.contains_key(&1), "launchd missing from {batch:?}");
+        assert!(batch[&1] >= batch[&me], "launchd should outlive the test");
+
+        // A pid nobody owns must not invent an entry.
+        assert!(!uptimes_for_pids(&[u32::MAX]).contains_key(&u32::MAX));
+    }
 
     #[test]
     fn etime_formats() {
