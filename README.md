@@ -2,12 +2,21 @@
   <img src="logo.svg" width="128" height="128" alt="kagaya logo">
 </p>
 
-# kagaya (pre-alpha, under construction)
+# kagaya (unmaintained)
 
 **launchd made easy.** Register a project or command as a service, then reliably
 `start` / `stop` / `restart` / `status` / `logs` it. kagaya compiles simple TOML into
 launchd plists and drives `launchctl` for you — launchd does the supervision
 (auto-restart, boot start), ky makes it usable.
+
+> [!IMPORTANT]
+> kagaya is no longer developed. Use [pitchfork](https://pitchfork.jdx.dev)
+> instead — it does the same job (local daemons with good DX) and is actively
+> maintained. Existing kagaya services keep working; `ky stop` + `ky remove`
+> unregisters them.
+
+> [!NOTE]
+> This project was built with heavy LLM assistance and should be considered proof-of-concept. Contributions are welcome, but I can't guarantee the accuracy of the code or that I will continue to maintain it. If there are any mistakes in attribution or anything else, please let me know.
 
 macOS only. See [docs/api.md](docs/api.md) for the full command tree.
 
@@ -244,10 +253,11 @@ cd ui && pnpm install && pnpm dev  # web UI with HMR
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
 ## History
 
 Formerly known as **ubermind**. Renamed to **kagaya** in v0.9. v0.6–v0.13 ran a
 native Rust supervisor; kagaya now drives launchd directly — less machinery,
-same commands, and services survive kagaya itself.
+same commands, and services survive kagaya itself. Development stopped in
+August 2026 in favor of [pitchfork](https://pitchfork.jdx.dev).
